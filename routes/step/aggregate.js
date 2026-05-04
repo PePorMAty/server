@@ -15,7 +15,11 @@ const {
   pickTechnologyBlocksFromSources,
 } = require("../sources/utils");
 
-const { buildStepAggregatePrompts } = require("./utils/prompts");
+const {
+  buildStepAggregatePrompts,
+  stringifyExistingChain,
+  formatBlocksForPrompt,
+} = require("./utils/prompts");
 
 // ---------- heartbeat ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -97,6 +101,12 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   const maxBlockChars = Number.isFinite(maxBlockCharsRaw)
     ? maxBlockCharsRaw
     : 2500;
+  const customSystemPrompt = req.body?.customSystemPrompt
+    ? String(req.body.customSystemPrompt).trim()
+    : "";
+  const customUserPrompt = req.body?.customUserPrompt
+    ? String(req.body.customUserPrompt).trim()
+    : "";
 
   if (!productName) {
     return res
@@ -140,22 +150,34 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   };
 
   try {
-    const { SYSTEM, USER_PROMPT } = buildStepAggregatePrompts({
+    const defaults = buildStepAggregatePrompts({
       productName,
       existingChain,
       blocks,
     });
 
-    // direction preamble (если когда-то понадобится — по аналогии с /sources/aggregate)
-    const systemWithDir =
-      direction === "up"
-        ? `НАПРАВЛЕНИЕ: ВВЕРХ. "${productName}" рассматривай как ВХОДНОЕ СЫРЬЁ.\n\n${SYSTEM}`
-        : SYSTEM;
+    // SYSTEM: кастомный — как есть; иначе — дефолт + direction-преамбула.
+    const systemFinal = customSystemPrompt
+      ? customSystemPrompt
+      : direction === "up"
+        ? `НАПРАВЛЕНИЕ: ВВЕРХ. "${productName}" рассматривай как ВХОДНОЕ СЫРЬЁ.\n\n${defaults.SYSTEM}`
+        : defaults.SYSTEM;
+
+    // USER: если кастомный — подставить плейсхолдеры тем же способом, что в дефолтном пути.
+    const userFinal = customUserPrompt
+      ? customUserPrompt
+          .replace("<<<TARGET_PRODUCT>>>", String(productName || "").trim())
+          .replace(
+            "<<<EXISTING_CHAIN>>>",
+            stringifyExistingChain(existingChain) || "[]",
+          )
+          .replace("<<<BLOCKS>>>", formatBlocksForPrompt(blocks))
+      : defaults.USER_PROMPT;
 
     const payload = {
       model: "gpt-5-mini",
-      instructions: systemWithDir,
-      input: USER_PROMPT,
+      instructions: systemFinal,
+      input: userFinal,
       truncation: "auto",
       max_output_tokens: 16000,
     };
@@ -179,7 +201,10 @@ router.post("/gpt/step/aggregate", async (req, res) => {
 
     const markdown = (extractOutputText(resp) || "").trim();
     if (!markdown) {
-      return reply(502, { success: false, error: "OpenAI returned empty output" });
+      return reply(502, {
+        success: false,
+        error: "OpenAI returned empty output",
+      });
     }
 
     const needs = parseNeedsSources(markdown);

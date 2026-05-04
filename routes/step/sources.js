@@ -16,7 +16,10 @@ const {
   normalizeAndFilterItems,
 } = require("../sources/utils");
 
-const { buildStepSourcesPromptDown } = require("./utils/prompts");
+const {
+  buildStepSourcesPromptDown,
+  buildStepSourcesPromptUp,
+} = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -66,6 +69,9 @@ router.post("/gpt/step/sources", async (req, res) => {
   const direction = req.body?.direction === "up" ? "up" : "down";
   const maxItemsRaw = Number(req.body?.maxItems ?? 8);
   const maxItems = Number.isFinite(maxItemsRaw) ? maxItemsRaw : 8;
+  const customSystemPrompt = req.body?.customSystemPrompt
+    ? String(req.body.customSystemPrompt).trim()
+    : "";
 
   if (!productName) {
     return res
@@ -83,23 +89,15 @@ router.post("/gpt/step/sources", async (req, res) => {
       .json({ success: false, error: "maxItems must be between 1 and 15" });
   }
 
-  // ---------- step-up: заглушка до появления up-промпта ----------
-  if (direction === "up") {
-    return res.status(200).json({
-      success: false,
-      error: "step-up not implemented yet",
-      product: productName,
-      direction,
-      sources: [],
-      took_ms: Date.now() - t0,
-    });
-  }
-
   // ---------- step-down: OpenAI web-search + json_schema ----------
   const stream = startAntiIdle(res, req, { heartbeatMs: 15000 });
 
   try {
-    const prompt = buildStepSourcesPromptDown(productName, maxItems);
+    const prompt = customSystemPrompt
+      ? customSystemPrompt
+      : direction === "up"
+        ? buildStepSourcesPromptUp(productName, maxItems)
+        : buildStepSourcesPromptDown(productName, maxItems);
 
     const openaiResp = await callOpenAIResponses({
       apiKey: process.env.GPT_API_KEY,
@@ -152,14 +150,16 @@ router.post("/gpt/step/sources", async (req, res) => {
       );
     }
 
-    const blocks_preview = items.slice(0, maxItems).map((it, i) =>
-      [
-        `--- Блок ${i + 1} ---`,
-        `URL: ${it.url}`,
-        `access_hint: ${it.access_hint}`,
-        `technology_description: ${it.technology_description}`,
-      ].join("\n"),
-    );
+    const blocks_preview = items
+      .slice(0, maxItems)
+      .map((it, i) =>
+        [
+          `--- Блок ${i + 1} ---`,
+          `URL: ${it.url}`,
+          `access_hint: ${it.access_hint}`,
+          `technology_description: ${it.technology_description}`,
+        ].join("\n"),
+      );
 
     return res.end(
       JSON.stringify({
