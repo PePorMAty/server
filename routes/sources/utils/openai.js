@@ -1,17 +1,47 @@
 // routes/sources/utils/openai.js
 
-const axios = require("axios");
-const https = require("https");
+const OpenAI = require("openai");
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
+const PROVIDERS = {
+  openai: {
+    baseURL: "https://api.openai.com/v1",
+    apiKeyEnv: "GPT_API_KEY",
+    defaultModel: "gpt-5-mini",
+  },
+  qwen: {
+    baseURL:
+      process.env.QWEN_BASE_URL ||
+      "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    apiKeyEnv: "QWEN_API_KEY",
+    defaultModel: process.env.QWEN_MODEL || "qwen-plus",
+  },
+};
 
-// keep-alive помогает убрать часть "socket hang up" на длинных запросах
-const httpsAgent = new https.Agent({ keepAlive: true });
+const clientCache = {};
+
+function getClient(providerName) {
+  const name = providerName || process.env.AI_PROVIDER || "openai";
+  const cfg = PROVIDERS[name];
+  if (!cfg) throw new Error(`Unknown AI provider: "${name}"`);
+
+  const apiKey = process.env[cfg.apiKeyEnv];
+  if (!apiKey) throw new Error(`${cfg.apiKeyEnv} is not set in env`);
+
+  const cacheKey = `${name}:${apiKey}`;
+  if (!clientCache[cacheKey]) {
+    clientCache[cacheKey] = new OpenAI({ apiKey, baseURL: cfg.baseURL });
+  }
+
+  return {
+    client: clientCache[cacheKey],
+    defaultModel: cfg.defaultModel,
+    name,
+  };
+}
 
 function extractOutputText(resp) {
   if (!resp) return "";
 
-  // иногда есть output_text прямо в корне
   if (typeof resp.output_text === "string" && resp.output_text.trim()) {
     return resp.output_text.trim();
   }
@@ -22,7 +52,6 @@ function extractOutputText(resp) {
   for (const item of out) {
     const content = Array.isArray(item?.content) ? item.content : [];
     for (const c of content) {
-      // встречается type: "output_text"
       if (typeof c?.text === "string") parts.push(c.text);
     }
   }
@@ -35,7 +64,6 @@ function safeJsonParse(text) {
   try {
     return JSON.parse(text);
   } catch {
-    // fallback: вытащить первый JSON-объект
     const m = text.match(/\{[\s\S]*\}/);
     if (!m) return null;
     try {
@@ -81,74 +109,70 @@ function buildSourcesSchema(maxItems) {
   };
 }
 
-async function callOpenAIResponses({ apiKey, prompt, maxItems }) {
-  const payload = {
-    model: "gpt-5-mini",
-    input: prompt,
+async function callOpenAIResponses({
+  prompt,
+  maxItems,
+  provider,
+  model,
+  timeoutMs = 35 * 60 * 1000,
+}) {
+  const { client, defaultModel } = getClient(provider);
 
-    tools: [{ type: "web_search", search_context_size: "medium" }], //low
-    tool_choice: "auto",
-    parallel_tool_calls: false,
-    max_tool_calls: 8,
+  const response = await client.responses.create(
+    {
+      model: model || defaultModel,
+      input: prompt,
 
-    // как в Python: просим отдать список просмотренных URL
-    include: ["web_search_call.action.sources"],
+      tools: [{ type: "web_search", search_context_size: "medium" }],
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      max_tool_calls: 8,
 
-    reasoning: { effort: "low" },
-    truncation: "auto",
-    max_output_tokens: 16000,
+      include: ["web_search_call.action.sources"],
 
-    text: {
-      format: {
-        type: "json_schema",
-        name: "technology_sources",
-        strict: true,
-        schema: buildSourcesSchema(maxItems),
+      reasoning: { effort: "low" },
+      truncation: "auto",
+      max_output_tokens: 16000,
+
+      text: {
+        format: {
+          type: "json_schema",
+          name: "technology_sources",
+          strict: true,
+          schema: buildSourcesSchema(maxItems),
+        },
       },
     },
-  };
+    { timeout: timeoutMs },
+  );
 
-  const { data } = await axios.post(OPENAI_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    httpsAgent,
-    timeout: 35 * 60 * 1000, // 35 минут
-    // важно: не роняем соединение из-за больших payloads
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
-
-  return data;
+  return response;
 }
 
 async function callOpenAIResponsesRaw({
-  apiKey,
   payload,
   timeoutMs = 10 * 60 * 1000,
+  provider,
+  model,
 }) {
-  const { data } = await axios.post(OPENAI_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    httpsAgent,
+  const { client, defaultModel } = getClient(provider);
+
+  const effectivePayload = {
+    ...payload,
+    model: model || payload.model || defaultModel,
+  };
+
+  const response = await client.responses.create(effectivePayload, {
     timeout: timeoutMs,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
   });
 
-  return data;
+  return response;
 }
 
 function normalizeUrl(raw) {
   let url = String(raw || "").trim();
 
-  // если модель вдруг вернула "URL: ..."
   url = url.replace(/^URL:\s*/i, "");
-
-  // убрать хвостовую пунктуацию
   url = url.replace(/[)\],.;]+$/g, "");
 
   if (!url) return "";
@@ -195,7 +219,8 @@ module.exports = {
   extractOutputText,
   safeJsonParse,
   callOpenAIResponses,
+  callOpenAIResponsesRaw,
   normalizeAndFilterItems,
   pickTechnologyBlocksFromSources,
-  callOpenAIResponsesRaw,
+  getClient,
 };

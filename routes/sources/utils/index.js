@@ -10,9 +10,10 @@ const {
   extractOutputText,
   safeJsonParse,
   callOpenAIResponses,
+  callOpenAIResponsesRaw,
   normalizeAndFilterItems,
   pickTechnologyBlocksFromSources,
-  callOpenAIResponsesRaw,
+  getClient,
 } = require("./openai");
 
 module.exports = {
@@ -22,7 +23,8 @@ module.exports = {
   extractOutputText,
   safeJsonParse,
   callOpenAIResponses,
+  callOpenAIResponsesRaw,
   normalizeAndFilterItems,
   pickTechnologyBlocksFromSources,
-  callOpenAIResponsesRaw,
+  getClient,
 };

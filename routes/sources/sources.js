@@ -64,16 +64,15 @@ router.post("/gpt/sources", async (req, res) => {
   const maxItemsRaw = Number(req.body?.maxItems ?? 5);
   const maxItems = Number.isFinite(maxItemsRaw) ? maxItemsRaw : 5;
   const direction = req.body?.direction === "up" ? "up" : "down";
+  const provider = req.body?.provider
+    ? String(req.body.provider).trim()
+    : undefined;
+  const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
   if (!productName) {
     return res
       .status(400)
       .json({ success: false, error: "productName is required" });
-  }
-  if (!process.env.GPT_API_KEY) {
-    return res
-      .status(500)
-      .json({ success: false, error: "GPT_API_KEY is not set in env" });
   }
   if (maxItems < 1 || maxItems > 10) {
     return res
@@ -91,11 +90,11 @@ router.post("/gpt/sources", async (req, res) => {
         : buildSourcesPrompt(productName, maxItems);
 
     const openaiResp = await callOpenAIResponses({
-      apiKey: process.env.GPT_API_KEY,
       prompt,
       maxItems,
-      // чтобы не висеть бесконечно, можно оставить 35 минут, как у /gpt
       timeoutMs: 35 * 60 * 1000,
+      provider,
+      model,
     });
 
     stream.stop();

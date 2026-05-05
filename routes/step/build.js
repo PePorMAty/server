@@ -164,15 +164,15 @@ ${techText}
 }
 
 const SUFFICIENCY_CHECK_SYSTEM = `Ты — аналитик производственных источников. Тебе даны:
-1) Список выходных продуктов только что построенного шага DOWN-цепочки (т.е. потомков, которые получают из раскрываемого продукта).
+1) Список новых продуктов из построенного шага цепочки.
 2) Текстовые описания (technology_description) имеющихся источников.
 
-Задача (DOWN-семантика): определить, для каких из этих продуктов в источниках НЕТ достаточного описания их ДАЛЬНЕЙШЕЙ ПЕРЕРАБОТКИ — то есть процесса, где данный продукт сам выступает входным сырьём/реагентом для получения какого-то ДРУГОГО продукта.
+Задача: определить, для каких из новых продуктов в источниках НЕТ достаточного описания их промышленного производства (т.е. нельзя построить следующий шаг цепочки без дополнительного поиска).
 
 Правила:
-- Продукт считается обеспеченным, если хотя бы в одном источнике есть содержательное описание процесса его ПЕРЕРАБОТКИ (где он подаётся на вход реактора/процесса, и из него получают другой продукт). Признаки: формулировки вида «X производят из <продукта>», «<продукт> используется как сырьё для X», «<продукт> подают в …, на выходе …», «conversion of <product> to», «<product> as feedstock» и т.п.
-- Продукт считается НЕобеспеченным, если источники описывают только процесс его ПОЛУЧЕНИЯ (где он — выходной продукт), но не его дальнейшую переработку. Описания, где он упомянут лишь как сырьё-результат, побочный продукт или товарная позиция без технологии переработки — НЕ считаются обеспечением.
-- Продукт необеспечен и в случае, когда источники не упоминают его вовсе или описывают только смежные/неподходящие процессы.
+- Продукт считается обеспеченным, если хотя бы в одном источнике есть содержательное описание процесса его получения (feedstock, стадии, реакции).
+- Продукт считается необеспеченным, если источники описывают его только как выход/вход без деталей процесса.
+- Если продукт уже существует в графе — он не требует проверки (пропускай).
 
 Верни JSON по схеме: { "insufficient": ["название продукта", ...] }
 Если все продукты обеспечены — верни { "insufficient": [] }`;
@@ -204,7 +204,11 @@ router.post("/gpt/step/build", async (req, res) => {
     : [];
   const customSystemPrompt = req.body?.customSystemPrompt
     ? String(req.body.customSystemPrompt).trim()
-    : "";
+    : null;
+  const provider = req.body?.provider
+    ? String(req.body.provider).trim()
+    : undefined;
+  const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
   if (!productName) {
     return res
@@ -215,11 +219,6 @@ router.post("/gpt/step/build", async (req, res) => {
     return res
       .status(400)
       .json({ success: false, error: "techText is required" });
-  }
-  if (!process.env.GPT_API_KEY) {
-    return res
-      .status(500)
-      .json({ success: false, error: "GPT_API_KEY is not set in env" });
   }
 
   const stream = startAntiIdle(res, req, { heartbeatMs: 15000 });
@@ -256,9 +255,10 @@ router.post("/gpt/step/build", async (req, res) => {
     };
 
     const resp = await callOpenAIResponsesRaw({
-      apiKey: process.env.GPT_API_KEY,
       payload,
       timeoutMs: 10 * 60 * 1000,
+      provider,
+      model,
     });
 
     if (resp?.status !== "completed") {
@@ -359,11 +359,10 @@ router.post("/gpt/step/build", async (req, res) => {
       });
     }
 
-    // ---------- проверка достаточности источников (DOWN-семантика) ----------
-    // Проверяем ВСЕ outputProducts (потомков шага), а не только новые:
-    // даже если потомок уже existing (повтор шага), для движения дальше нужны
-    // источники, описывающие именно его ДАЛЬНЕЙШУЮ ПЕРЕРАБОТКУ.
-    const productsToCheck = step.outputProducts.map((p) => p.name);
+    // ---------- проверка достаточности источников ----------
+    const newProducts = [...step.inputProducts, ...step.outputProducts]
+      .filter((p) => !p.isExisting)
+      .map((p) => p.name);
 
     const sourcesDescriptions = existingSources
       .map((s) => String(s?.technology_description || "").trim())
@@ -372,15 +371,15 @@ router.post("/gpt/step/build", async (req, res) => {
     let sourcesStatus = "sufficient";
     let insufficientProducts = [];
 
-    if (productsToCheck.length > 0 && sourcesDescriptions.length > 0) {
+    if (newProducts.length > 0 && sourcesDescriptions.length > 0) {
       try {
         const suffResp = await callOpenAIResponsesRaw({
-          apiKey: process.env.GPT_API_KEY,
+          provider,
+          model,
           payload: {
-            model: "gpt-5-mini",
             instructions: SUFFICIENCY_CHECK_SYSTEM,
             input: buildSufficiencyPrompt({
-              newProducts: productsToCheck,
+              newProducts,
               sourcesDescriptions,
             }),
             truncation: "auto",
@@ -412,9 +411,9 @@ router.post("/gpt/step/build", async (req, res) => {
       } catch (suffErr) {
         console.error("Sufficiency check failed:", suffErr?.message);
       }
-    } else if (productsToCheck.length > 0 && sourcesDescriptions.length === 0) {
+    } else if (newProducts.length > 0 && sourcesDescriptions.length === 0) {
       sourcesStatus = "insufficient";
-      insufficientProducts = productsToCheck;
+      insufficientProducts = newProducts;
     }
 
     return reply(200, {

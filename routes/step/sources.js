@@ -16,10 +16,7 @@ const {
   normalizeAndFilterItems,
 } = require("../sources/utils");
 
-const {
-  buildStepSourcesPromptDown,
-  buildStepSourcesPromptUp,
-} = require("./utils/prompts");
+const { buildStepSourcesPromptDown } = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -71,17 +68,16 @@ router.post("/gpt/step/sources", async (req, res) => {
   const maxItems = Number.isFinite(maxItemsRaw) ? maxItemsRaw : 8;
   const customSystemPrompt = req.body?.customSystemPrompt
     ? String(req.body.customSystemPrompt).trim()
-    : "";
+    : null;
+  const provider = req.body?.provider
+    ? String(req.body.provider).trim()
+    : undefined;
+  const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
   if (!productName) {
     return res
       .status(400)
       .json({ success: false, error: "productName is required" });
-  }
-  if (!process.env.GPT_API_KEY) {
-    return res
-      .status(500)
-      .json({ success: false, error: "GPT_API_KEY is not set in env" });
   }
   if (maxItems < 1 || maxItems > 15) {
     return res
@@ -89,21 +85,31 @@ router.post("/gpt/step/sources", async (req, res) => {
       .json({ success: false, error: "maxItems must be between 1 and 15" });
   }
 
+  // ---------- step-up: заглушка до появления up-промпта ----------
+  if (direction === "up") {
+    return res.status(200).json({
+      success: false,
+      error: "step-up not implemented yet",
+      product: productName,
+      direction,
+      sources: [],
+      took_ms: Date.now() - t0,
+    });
+  }
+
   // ---------- step-down: OpenAI web-search + json_schema ----------
   const stream = startAntiIdle(res, req, { heartbeatMs: 15000 });
 
   try {
-    const prompt = customSystemPrompt
-      ? customSystemPrompt
-      : direction === "up"
-        ? buildStepSourcesPromptUp(productName, maxItems)
-        : buildStepSourcesPromptDown(productName, maxItems);
+    const prompt =
+      customSystemPrompt || buildStepSourcesPromptDown(productName, maxItems);
 
     const openaiResp = await callOpenAIResponses({
-      apiKey: process.env.GPT_API_KEY,
       prompt,
       maxItems,
       timeoutMs: 35 * 60 * 1000,
+      provider,
+      model,
     });
 
     stream.stop();

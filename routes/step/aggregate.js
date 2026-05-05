@@ -15,11 +15,7 @@ const {
   pickTechnologyBlocksFromSources,
 } = require("../sources/utils");
 
-const {
-  buildStepAggregatePrompts,
-  stringifyExistingChain,
-  formatBlocksForPrompt,
-} = require("./utils/prompts");
+const { buildStepAggregatePrompts } = require("./utils/prompts");
 
 // ---------- heartbeat ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -103,20 +99,19 @@ router.post("/gpt/step/aggregate", async (req, res) => {
     : 2500;
   const customSystemPrompt = req.body?.customSystemPrompt
     ? String(req.body.customSystemPrompt).trim()
-    : "";
+    : null;
   const customUserPrompt = req.body?.customUserPrompt
     ? String(req.body.customUserPrompt).trim()
-    : "";
+    : null;
+  const provider = req.body?.provider
+    ? String(req.body.provider).trim()
+    : undefined;
+  const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
   if (!productName) {
     return res
       .status(400)
       .json({ success: false, error: "productName is required" });
-  }
-  if (!process.env.GPT_API_KEY) {
-    return res
-      .status(500)
-      .json({ success: false, error: "GPT_API_KEY is not set in env" });
   }
   if (!sources.length) {
     return res
@@ -150,42 +145,32 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   };
 
   try {
-    const defaults = buildStepAggregatePrompts({
+    const { SYSTEM, USER_PROMPT } = buildStepAggregatePrompts({
       productName,
       existingChain,
       blocks,
     });
 
-    // SYSTEM: кастомный — как есть; иначе — дефолт + direction-преамбула.
-    const systemFinal = customSystemPrompt
-      ? customSystemPrompt
-      : direction === "up"
-        ? `НАПРАВЛЕНИЕ: ВВЕРХ. "${productName}" рассматривай как ВХОДНОЕ СЫРЬЁ.\n\n${defaults.SYSTEM}`
-        : defaults.SYSTEM;
-
-    // USER: если кастомный — подставить плейсхолдеры тем же способом, что в дефолтном пути.
-    const userFinal = customUserPrompt
-      ? customUserPrompt
-          .replace("<<<TARGET_PRODUCT>>>", String(productName || "").trim())
-          .replace(
-            "<<<EXISTING_CHAIN>>>",
-            stringifyExistingChain(existingChain) || "[]",
-          )
-          .replace("<<<BLOCKS>>>", formatBlocksForPrompt(blocks))
-      : defaults.USER_PROMPT;
+    const effectiveSystem =
+      customSystemPrompt ||
+      (direction === "up"
+        ? `НАПРАВЛЕНИЕ: ВВЕРХ. "${productName}" рассматривай как ВХОДНОЕ СЫРЬЁ.\n\n${SYSTEM}`
+        : SYSTEM);
+    const effectiveUser = customUserPrompt || USER_PROMPT;
 
     const payload = {
       model: "gpt-5-mini",
-      instructions: systemFinal,
-      input: userFinal,
+      instructions: effectiveSystem,
+      input: effectiveUser,
       truncation: "auto",
       max_output_tokens: 16000,
     };
 
     const resp = await callOpenAIResponsesRaw({
-      apiKey: process.env.GPT_API_KEY,
       payload,
       timeoutMs: 10 * 60 * 1000,
+      provider,
+      model,
     });
 
     if (resp?.status !== "completed") {
