@@ -39,6 +39,81 @@ function getClient(providerName) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Qwen: Responses API → Chat Completions API conversion
+// DashScope не поддерживает /v1/responses, поэтому для Qwen используем
+// /v1/chat/completions через client.chat.completions.create()
+// ---------------------------------------------------------------------------
+
+function responsesToChatParams(params) {
+  const messages = [];
+
+  if (params.instructions) {
+    messages.push({ role: "system", content: params.instructions });
+  }
+
+  if (typeof params.input === "string") {
+    messages.push({ role: "user", content: params.input });
+  } else if (Array.isArray(params.input)) {
+    for (const item of params.input) {
+      if (typeof item === "string") {
+        messages.push({ role: "user", content: item });
+      } else if (item?.role && item?.content) {
+        messages.push(item);
+      }
+    }
+  }
+
+  const chatParams = {
+    model: params.model,
+    messages,
+    max_tokens: params.max_output_tokens || 16000,
+  };
+
+  if (params.text?.format?.type === "json_schema") {
+    chatParams.response_format = {
+      type: "json_schema",
+      json_schema: {
+        name: params.text.format.name,
+        schema: params.text.format.schema,
+      },
+    };
+  }
+
+  // DashScope Chat Completions: enable_search вместо tools: [web_search]
+  if (Array.isArray(params.tools)) {
+    const hasWebSearch = params.tools.some(
+      (t) => t.type === "web_search" || t.type === "web_search_preview",
+    );
+    if (hasWebSearch) {
+      chatParams.enable_search = true;
+    }
+    const funcTools = params.tools.filter((t) => t.type === "function");
+    if (funcTools.length) {
+      chatParams.tools = funcTools;
+    }
+  }
+
+  return chatParams;
+}
+
+function chatToResponsesFormat(chatResp) {
+  const content = chatResp.choices?.[0]?.message?.content || "";
+  return {
+    output_text: content,
+    output: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: content }],
+      },
+    ],
+    status: "completed",
+  };
+}
+
+// ---------------------------------------------------------------------------
+
 function extractOutputText(resp) {
   if (!resp) return "";
 
@@ -109,6 +184,19 @@ function buildSourcesSchema(maxItems) {
   };
 }
 
+function extractApiError(err) {
+  console.error("[AI debug] error status:", err?.status);
+  console.error("[AI debug] error.error:", JSON.stringify(err?.error, null, 2));
+  console.error("[AI debug] error.message:", err?.message);
+  console.error("[AI debug] error.code:", err?.code);
+  if (err?.error?.message) return err.error.message;
+  if (err?.message) return err.message;
+  if (typeof err?.body === "string" && err.body) return err.body;
+  if (err?.body?.message) return err.body.message;
+  if (err?.status) return `API returned status ${err.status}`;
+  return String(err);
+}
+
 async function callOpenAIResponses({
   prompt,
   maxItems,
@@ -116,37 +204,76 @@ async function callOpenAIResponses({
   model,
   timeoutMs = 35 * 60 * 1000,
 }) {
-  const { client, defaultModel } = getClient(provider);
+  const { client, defaultModel, name } = getClient(provider);
+  const isQwen = name === "qwen";
 
-  const response = await client.responses.create(
-    {
-      model: model || defaultModel,
-      input: prompt,
+  const effectiveModel = model || defaultModel;
 
-      tools: [{ type: "web_search", search_context_size: "medium" }],
-      tool_choice: "auto",
-      parallel_tool_calls: false,
-      max_tool_calls: 8,
-
-      include: ["web_search_call.action.sources"],
-
-      reasoning: { effort: "low" },
-      truncation: "auto",
-      max_output_tokens: 16000,
-
-      text: {
-        format: {
-          type: "json_schema",
+  if (isQwen) {
+    const chatParams = {
+      model: effectiveModel,
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 16000,
+      enable_search: true,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
           name: "technology_sources",
-          strict: true,
           schema: buildSourcesSchema(maxItems),
         },
       },
-    },
-    { timeout: timeoutMs },
-  );
+    };
 
-  return response;
+    console.log(
+      `[${name}] sending chat.completions request, model=${effectiveModel}`,
+    );
+
+    try {
+      const chatResp = await client.chat.completions.create(chatParams, {
+        timeout: timeoutMs,
+      });
+      return chatToResponsesFormat(chatResp);
+    } catch (err) {
+      const msg = extractApiError(err);
+      console.error(`[${name}] callOpenAIResponses error:`, msg);
+      throw new Error(`[${name}] ${msg}`);
+    }
+  }
+
+  // OpenAI — Responses API
+  const params = {
+    model: effectiveModel,
+    input: prompt,
+    tools: [{ type: "web_search", search_context_size: "medium" }],
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    max_tool_calls: 8,
+    include: ["web_search_call.action.sources"],
+    reasoning: { effort: "low" },
+    truncation: "auto",
+    max_output_tokens: 16000,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "technology_sources",
+        strict: true,
+        schema: buildSourcesSchema(maxItems),
+      },
+    },
+  };
+
+  console.log(`[${name}] sending responses request, model=${effectiveModel}`);
+
+  try {
+    const response = await client.responses.create(params, {
+      timeout: timeoutMs,
+    });
+    return response;
+  } catch (err) {
+    const msg = extractApiError(err);
+    console.error(`[${name}] callOpenAIResponses error:`, msg);
+    throw new Error(`[${name}] ${msg}`);
+  }
 }
 
 async function callOpenAIResponsesRaw({
@@ -155,18 +282,53 @@ async function callOpenAIResponsesRaw({
   provider,
   model,
 }) {
-  const { client, defaultModel } = getClient(provider);
+  const { client, defaultModel, name } = getClient(provider);
+  const isQwen = name === "qwen";
 
+  const effectiveModel = model || payload.model || defaultModel;
+
+  if (isQwen) {
+    const chatParams = responsesToChatParams({
+      ...payload,
+      model: effectiveModel,
+    });
+
+    console.log(
+      `[${name}] sending chat.completions (raw) request, model=${effectiveModel}`,
+    );
+
+    try {
+      const chatResp = await client.chat.completions.create(chatParams, {
+        timeout: timeoutMs,
+      });
+      return chatToResponsesFormat(chatResp);
+    } catch (err) {
+      const msg = extractApiError(err);
+      console.error(`[${name}] callOpenAIResponsesRaw error:`, msg);
+      throw new Error(`[${name}] ${msg}`);
+    }
+  }
+
+  // OpenAI — Responses API
   const effectivePayload = {
     ...payload,
-    model: model || payload.model || defaultModel,
+    model: effectiveModel,
   };
 
-  const response = await client.responses.create(effectivePayload, {
-    timeout: timeoutMs,
-  });
+  console.log(
+    `[${name}] sending responses (raw) request, model=${effectiveModel}`,
+  );
 
-  return response;
+  try {
+    const response = await client.responses.create(effectivePayload, {
+      timeout: timeoutMs,
+    });
+    return response;
+  } catch (err) {
+    const msg = extractApiError(err);
+    console.error(`[${name}] callOpenAIResponsesRaw error:`, msg);
+    throw new Error(`[${name}] ${msg}`);
+  }
 }
 
 function normalizeUrl(raw) {
