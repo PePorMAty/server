@@ -59,7 +59,7 @@ router.get("/", async (req, res) => {
     const result = await Promise.all(
       files.map(async (file) => {
         const content = JSON.parse(
-          await fs.readFile(path.join(GRAPH_DIR, file), "utf-8")
+          await fs.readFile(path.join(GRAPH_DIR, file), "utf-8"),
         );
 
         return {
@@ -68,7 +68,7 @@ router.get("/", async (req, res) => {
           createdAt: content.meta.createdAt,
           leafCount: content.state.leaf_nodes.length,
         };
-      })
+      }),
     );
 
     res.json({ success: true, data: result });
@@ -87,6 +87,22 @@ router.get("/:id", async (req, res) => {
     res.json(JSON.parse(data));
   } catch {
     res.status(404).json({ error: "Graph not found" });
+  }
+});
+
+router.delete("/:id", async (req, res) => {
+  try {
+    const fileName = path.basename(req.params.id);
+    const filePath = path.join(GRAPH_DIR, fileName);
+
+    await fs.unlink(filePath);
+    res.status(204).end();
+  } catch (e) {
+    if (e && e.code === "ENOENT") {
+      return res.status(404).json({ error: "Graph not found" });
+    }
+    console.error("Delete graph error:", e);
+    res.status(500).json({ error: "Failed to delete graph" });
   }
 });
 

@@ -16,7 +16,10 @@ const {
   normalizeAndFilterItems,
 } = require("../sources/utils");
 
-const { buildStepSourcesPromptDown } = require("./utils/prompts");
+const {
+  buildStepSourcesPromptDown,
+  buildStepSourcesPromptUp,
+} = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -86,23 +89,15 @@ router.post("/gpt/step/sources", async (req, res) => {
   }
 
   // ---------- step-up: заглушка до появления up-промпта ----------
-  if (direction === "up") {
-    return res.status(200).json({
-      success: false,
-      error: "step-up not implemented yet",
-      product: productName,
-      direction,
-      sources: [],
-      took_ms: Date.now() - t0,
-    });
-  }
 
-  // ---------- step-down: OpenAI web-search + json_schema ----------
   const stream = startAntiIdle(res, req, { heartbeatMs: 15000 });
 
   try {
-    const prompt =
-      customSystemPrompt || buildStepSourcesPromptDown(productName, maxItems);
+    const defaultPrompt =
+      direction === "up"
+        ? buildStepSourcesPromptUp(productName, maxItems)
+        : buildStepSourcesPromptDown(productName, maxItems);
+    const prompt = customSystemPrompt || defaultPrompt;
 
     const openaiResp = await callOpenAIResponses({
       prompt,

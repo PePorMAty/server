@@ -11,6 +11,8 @@ const fillCardRouter = require("./routes/fill-card/fill-card");
 const stepSources = require("./routes/step/sources");
 const stepAggregate = require("./routes/step/aggregate");
 const stepBuild = require("./routes/step/build");
+const transformationBetween = require("./routes/transformation-between/transformation-between");
+const shareRoutes = require("./routes/share/share");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -77,6 +79,8 @@ app.use("/api/graphs", fillCardRouter);
 app.use("/api/graphs", stepSources);
 app.use("/api/graphs", stepAggregate);
 app.use("/api/graphs", stepBuild);
+app.use("/api/graphs", transformationBetween);
+app.use("/api/graphs", shareRoutes);
 
 // Health check
 app.get("/api/health", async (req, res) => {
