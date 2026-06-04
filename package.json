@@ -14,15 +14,16 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@dagrejs/dagre": "^1.0.0",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "https-proxy-agent": "^7.0.6",
+    "openai": "^6.42.0",
     "pg": "^8.16.3",
     "sequelize": "^6.37.7",
-    "sequelize-cli": "^6.6.3",
-    "@dagrejs/dagre": "^1.0.0"
+    "sequelize-cli": "^6.6.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
