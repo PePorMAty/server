@@ -62,8 +62,14 @@ const connectDB = async () => {
       console.log("✅ Database synchronized");
     }
   } catch (error) {
-    console.error("❌ PostgreSQL connection error:", error);
-    process.exit(1);
+    // БД не обязательна: share (/api/graphs/share) и graph-files работают на
+    // файлах, AI-роуты — через OpenAI. Не роняем процесс при недоступной БД —
+    // логируем и продолжаем. Откажут только DB-эндпоинты
+    // (GET /api/graphs, /api/stats, /api/health).
+    console.error(
+      "⚠️  PostgreSQL недоступен — продолжаем работу без БД:",
+      error.message,
+    );
   }
 };
 
