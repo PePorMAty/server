@@ -148,30 +148,20 @@ router.post("/gpt/step/sources", async (req, res) => {
 
     const items = normalizeAndFilterItems(parsed.items);
     if (items.length < 1) {
-      // Если у продукта уже были источники, а поиск ничего не дал — это
-      // «источники закончились», а не ошибка: не роняем клиента 422,
-      // возвращаем прежние источники с флагом exhausted.
-      if (existingUrls.size > 0) {
-        return res.end(
-          JSON.stringify({
-            success: true,
-            product: productName,
-            direction,
-            maxItems,
-            blocks_preview: [],
-            sources: existingSources,
-            exhausted: true,
-            took_ms: Date.now() - t0,
-          }),
-        );
-      }
+      // Ничего не нашли. Для UI это не ошибка, а сигнал «источники закончились»:
+      // были прежние — возвращаем их; не было — пустой массив. В обоих случаях
+      // success:true + exhausted:true, чтобы клиент показал «закончились», а не
+      // падал на 422 и не оставался в немом пустом состоянии.
       return res.end(
         JSON.stringify({
-          success: false,
-          http_status: 422,
-          error: "No valid sources found",
-          got: 0,
-          expected: maxItems,
+          success: true,
+          product: productName,
+          direction,
+          maxItems,
+          blocks_preview: [],
+          sources: existingUrls.size > 0 ? existingSources : [],
+          exhausted: true,
+          took_ms: Date.now() - t0,
         }),
       );
     }
