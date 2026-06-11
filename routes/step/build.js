@@ -371,7 +371,13 @@ router.post("/gpt/step/build", async (req, res) => {
     let sourcesStatus = "sufficient";
     let insufficientProducts = [];
 
-    if (newProducts.length > 0 && sourcesDescriptions.length > 0) {
+    if (newProducts.length === 0) {
+      // Шаг не дал ни одного НОВОГО продукта — только воспроизвёл уже
+      // существующие в графе (цикл/тупик). Источники не ведут к новому шагу:
+      // надёжно сигналим, что для раскрываемого продукта нужен свежий поиск.
+      sourcesStatus = "insufficient";
+      insufficientProducts = [productName];
+    } else if (newProducts.length > 0 && sourcesDescriptions.length > 0) {
       try {
         const suffResp = await callOpenAIResponsesRaw({
           provider,
