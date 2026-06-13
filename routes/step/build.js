@@ -423,6 +423,8 @@ router.post("/gpt/step/build", async (req, res) => {
     // --- диагностика проверки достаточности ---
     let suffRan = false;
     let suffRaw = null; // что вернул LLM (insufficient[]) до гейта length>0
+    let suffStatus = null; // статус ответа второго вызова
+    let suffIncomplete = null; // причина, если incomplete
 
     // newProducts.length === 0 (вырожденный шаг — только существующие продукты):
     // родителя в insufficientProducts НЕ кладём, шаг остаётся sufficient.
@@ -444,7 +446,12 @@ router.post("/gpt/step/build", async (req, res) => {
               ancestorProducts,
             }),
             truncation: "auto",
-            max_output_tokens: 500,
+            // gpt-5-mini — reasoning-модель: лимит делится между рассуждением
+            // и ответом. С 500 токенов рассуждение съедало весь бюджет →
+            // status "incomplete" без текста → проверка молча падала. Даём
+            // запас (как у основного build) + низкий effort: задача простая.
+            reasoning: { effort: "low" },
+            max_output_tokens: 4000,
             text: {
               format: {
                 type: "json_schema",
@@ -457,6 +464,8 @@ router.post("/gpt/step/build", async (req, res) => {
           timeoutMs: 2 * 60 * 1000,
         });
 
+        suffStatus = suffResp?.status ?? null;
+        suffIncomplete = suffResp?.incomplete_details ?? null;
         if (suffResp?.status === "completed") {
           const suffText = extractOutputText(suffResp);
           const suffParsed = safeJsonParse(suffText);
@@ -493,6 +502,8 @@ router.post("/gpt/step/build", async (req, res) => {
         ancestorProducts,
         newProductsChecked: newProducts,
         sufficiencyRan: suffRan,
+        sufficiencyStatus: suffStatus,
+        sufficiencyIncomplete: suffIncomplete,
         sourcesCount: sourcesDescriptions.length,
         rawInsufficient: suffRaw,
       },
