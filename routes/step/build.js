@@ -420,11 +420,15 @@ router.post("/gpt/step/build", async (req, res) => {
 
     let sourcesStatus = "sufficient";
     let insufficientProducts = [];
+    // --- диагностика проверки достаточности ---
+    let suffRan = false;
+    let suffRaw = null; // что вернул LLM (insufficient[]) до гейта length>0
 
     // newProducts.length === 0 (вырожденный шаг — только существующие продукты):
     // родителя в insufficientProducts НЕ кладём, шаг остаётся sufficient.
     // Достаточность оцениваем только для НОВЫХ дочерних продуктов.
     if (newProducts.length > 0 && sourcesDescriptions.length > 0) {
+      suffRan = true;
       try {
         const suffResp = await callOpenAIResponsesRaw({
           provider,
@@ -456,6 +460,9 @@ router.post("/gpt/step/build", async (req, res) => {
         if (suffResp?.status === "completed") {
           const suffText = extractOutputText(suffResp);
           const suffParsed = safeJsonParse(suffText);
+          suffRaw = Array.isArray(suffParsed?.insufficient)
+            ? suffParsed.insufficient
+            : null;
           if (
             suffParsed &&
             Array.isArray(suffParsed.insufficient) &&
@@ -480,6 +487,15 @@ router.post("/gpt/step/build", async (req, res) => {
       step,
       sourcesStatus,
       insufficientProducts,
+      // Диагностика: видно, доехал ли новый код, что получила проверка и
+      // что решил LLM. Если debug отсутствует — сервер крутит старый код.
+      debug: {
+        ancestorProducts,
+        newProductsChecked: newProducts,
+        sufficiencyRan: suffRan,
+        sourcesCount: sourcesDescriptions.length,
+        rawInsufficient: suffRaw,
+      },
     });
   } catch (err) {
     return reply(500, {
