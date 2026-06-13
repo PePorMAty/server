@@ -420,17 +420,11 @@ router.post("/gpt/step/build", async (req, res) => {
 
     let sourcesStatus = "sufficient";
     let insufficientProducts = [];
-    // --- диагностика проверки достаточности ---
-    let suffRan = false;
-    let suffRaw = null; // что вернул LLM (insufficient[]) до гейта length>0
-    let suffStatus = null; // статус ответа второго вызова
-    let suffIncomplete = null; // причина, если incomplete
 
     // newProducts.length === 0 (вырожденный шаг — только существующие продукты):
     // родителя в insufficientProducts НЕ кладём, шаг остаётся sufficient.
     // Достаточность оцениваем только для НОВЫХ дочерних продуктов.
     if (newProducts.length > 0 && sourcesDescriptions.length > 0) {
-      suffRan = true;
       try {
         const suffResp = await callOpenAIResponsesRaw({
           provider,
@@ -464,14 +458,9 @@ router.post("/gpt/step/build", async (req, res) => {
           timeoutMs: 2 * 60 * 1000,
         });
 
-        suffStatus = suffResp?.status ?? null;
-        suffIncomplete = suffResp?.incomplete_details ?? null;
         if (suffResp?.status === "completed") {
           const suffText = extractOutputText(suffResp);
           const suffParsed = safeJsonParse(suffText);
-          suffRaw = Array.isArray(suffParsed?.insufficient)
-            ? suffParsed.insufficient
-            : null;
           if (
             suffParsed &&
             Array.isArray(suffParsed.insufficient) &&
@@ -480,6 +469,14 @@ router.post("/gpt/step/build", async (req, res) => {
             sourcesStatus = "insufficient";
             insufficientProducts = suffParsed.insufficient;
           }
+        } else {
+          // Не completed (напр. обрыв по лимиту токенов) — логируем, чтобы
+          // проверка не падала молча, как было до фикса лимита.
+          console.warn(
+            "Sufficiency check not completed:",
+            suffResp?.status,
+            suffResp?.incomplete_details,
+          );
         }
       } catch (suffErr) {
         console.error("Sufficiency check failed:", suffErr?.message);
@@ -496,17 +493,6 @@ router.post("/gpt/step/build", async (req, res) => {
       step,
       sourcesStatus,
       insufficientProducts,
-      // Диагностика: видно, доехал ли новый код, что получила проверка и
-      // что решил LLM. Если debug отсутствует — сервер крутит старый код.
-      debug: {
-        ancestorProducts,
-        newProductsChecked: newProducts,
-        sufficiencyRan: suffRan,
-        sufficiencyStatus: suffStatus,
-        sufficiencyIncomplete: suffIncomplete,
-        sourcesCount: sourcesDescriptions.length,
-        rawInsufficient: suffRaw,
-      },
     });
   } catch (err) {
     return reply(500, {
