@@ -76,6 +76,14 @@ router.post("/gpt/step/sources", async (req, res) => {
     ? String(req.body.provider).trim()
     : undefined;
   const model = req.body?.model ? String(req.body.model).trim() : undefined;
+  // Уже известные источники (клиент шлёт текущий пул продукта). Нужны, чтобы
+  // отличить «источники закончились» от «в этот раз не нашлось».
+  const existingSources = Array.isArray(req.body?.existingSources)
+    ? req.body.existingSources
+    : [];
+  const existingUrls = new Set(
+    existingSources.map((s) => String(s?.url || "").trim()).filter(Boolean),
+  );
 
   if (!productName) {
     return res
@@ -140,13 +148,20 @@ router.post("/gpt/step/sources", async (req, res) => {
 
     const items = normalizeAndFilterItems(parsed.items);
     if (items.length < 1) {
+      // Ничего не нашли. Для UI это не ошибка, а сигнал «источники закончились»:
+      // были прежние — возвращаем их; не было — пустой массив. В обоих случаях
+      // success:true + exhausted:true, чтобы клиент показал «закончились», а не
+      // падал на 422 и не оставался в немом пустом состоянии.
       return res.end(
         JSON.stringify({
-          success: false,
-          http_status: 422,
-          error: "No valid sources found",
-          got: 0,
-          expected: maxItems,
+          success: true,
+          product: productName,
+          direction,
+          maxItems,
+          blocks_preview: [],
+          sources: existingUrls.size > 0 ? existingSources : [],
+          exhausted: true,
+          took_ms: Date.now() - t0,
         }),
       );
     }
@@ -162,6 +177,13 @@ router.post("/gpt/step/sources", async (req, res) => {
         ].join("\n"),
       );
 
+    // «Исчерпано»: источники у продукта уже были, но новый поиск не дал
+    // ничего сверх известных URL — сигналим, чтобы UI показал «закончились».
+    const picked = items.slice(0, maxItems);
+    const exhausted =
+      existingUrls.size > 0 &&
+      picked.every((it) => existingUrls.has(String(it?.url || "").trim()));
+
     return res.end(
       JSON.stringify({
         success: true,
@@ -169,7 +191,8 @@ router.post("/gpt/step/sources", async (req, res) => {
         direction,
         maxItems,
         blocks_preview,
-        sources: items.slice(0, maxItems),
+        sources: picked,
+        exhausted,
         took_ms: Date.now() - t0,
       }),
     );

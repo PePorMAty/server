@@ -163,28 +163,99 @@ ${techText}
 Верни СТРОГО JSON по прикреплённому json_schema. Никакого свободного текста вне JSON.`;
 }
 
-const SUFFICIENCY_CHECK_SYSTEM = `Ты — аналитик производственных источников. Тебе даны:
-1) Список новых продуктов из построенного шага цепочки.
-2) Текстовые описания (technology_description) имеющихся источников.
+const SUFFICIENCY_CHECK_SYSTEM = `Ты — строгий аналитик достаточности источников для ПОШАГОВОГО построения производственной цепочки.
 
-Задача: определить, для каких из новых продуктов в источниках НЕТ достаточного описания их промышленного производства (т.е. нельзя построить следующий шаг цепочки без дополнительного поиска).
+Только что построен один шаг: от РОДИТЕЛЬСКОГО продукта через преобразование получены новые (дочерние) продукты. Источники, которые тебе даны, подбирались под РОДИТЕЛЯ — для построения этого шага. Для КАЖДОГО дочернего продукта надо решить: можно ли из ЭТИХ ЖЕ источников построить его СЛЕДУЮЩИЙ шаг цепочки — или для него нужен отдельный (новый) поиск источников.
 
-Правила:
-- Продукт считается обеспеченным, если хотя бы в одном источнике есть содержательное описание процесса его получения (feedstock, стадии, реакции).
-- Продукт считается необеспеченным, если источники описывают его только как выход/вход без деталей процесса.
-- Если продукт уже существует в графе — он не требует проверки (пропускай).
+Тебе дают: направление построения, родительский продукт, преобразование шага, список дочерних продуктов (с описаниями) и тексты источников (technology_description).
 
-Верни JSON по схеме: { "insufficient": ["название продукта", ...] }
-Если все продукты обеспечены — верни { "insufficient": [] }`;
+«Источников ДОСТАТОЧНО» для дочернего продукта P — только если СТРОГО (хотя бы один источник):
+- направление DOWN: есть конкретное описание СЛЕДУЮЩЕГО передела, где P является СЫРЬЁМ/входом и из него получают ДРУГОЙ продукт (процесс/стадии) — т.е. «X производят из P»;
+- направление UP: есть конкретное описание, ИЗ ЧЕГО производят P (feedstock + процесс), позволяющее раскрыть P дальше вверх.
 
-function buildSufficiencyPrompt({ newProducts, sourcesDescriptions }) {
-  return `Новые продукты для проверки:
-${newProducts.map((p) => `- ${p}`).join("\n")}
+ТИПИЧНАЯ ОШИБКА (не допускай её): счесть достаточными источники, которые описывают только
+- процесс РОДИТЕЛЯ (текущий шаг «родитель → дети», которым P только что получен), или
+- свойства/применение P без его следующего передела.
+Такие источники НЕ покрывают следующий шаг для P — продукт идёт в "insufficient".
+
+Также НЕдостаточно, если источники описывают другой продукт, а не сам P.
+
+ПРАВИЛО ПЕТЛИ (главное в этой задаче). Тебе дают РОДОСЛОВНУЮ — список продуктов-предков, уже стоящих в цепочке ВЫШЕ дочернего продукта (от корня до родителя включительно). forward-описание засчитывается ТОЛЬКО если следующий передел продукта P ведёт к продукту, которого НЕТ в родословной (новое направление цепочки). Если по источникам единственный следующий передел P производит продукт, который УЖЕ есть в родословной (P семантически превращается обратно в своего предка — например «товарный полиэтилен снова уходит на пиролиз в пиролизное масло», а «Пиролизное масло» уже в родословной) — это замкнёт ЦИКЛ. Такое описание НЕ засчитывается, и P идёт в insufficient: для него нужен отдельный поиск источников, чтобы найти НОВОЕ направление передела.
+ВАЖНО: производство продукта, которого НЕТ в родословной, засчитывается как достаточное — даже если такой продукт уже существует где-то в графе (это законное схождение ветвей, а не петля). Сопоставляй с родословной СЕМАНТИЧЕСКИ (по сути вещества), а не по точному написанию.
+
+Если по продукту нет явного forward-описания (или единственное forward-описание замыкает петлю на предка) — он НЕдостаточен. Сомневаешься — считай НЕдостаточным (лучше добрать источники, чем молча замкнуть цепочку в цикл).
+
+Верни СТРОГО JSON по схеме: { "insufficient": ["продукт", ...] }. Если для ВСЕХ продуктов есть forward-описание — { "insufficient": [] }. В поле insufficient верни ТОЛЬКО НАЗВАНИЕ продукта (часть строки до « — »), без описания.`;
+
+function buildSufficiencyPrompt({
+  newProducts,
+  sourcesDescriptions,
+  direction,
+  parentProduct,
+  transformationName,
+  ancestorProducts = [],
+}) {
+  const dirText =
+    direction === "up"
+      ? "UP — для каждого дочернего продукта нужно описание, ИЗ ЧЕГО его производят (следующий шаг вверх)."
+      : "DOWN — для каждого дочернего продукта нужно описание, что производят ИЗ него (следующий шаг вниз).";
+  const productsText = newProducts
+    .map((p) =>
+      p.description ? `- ${p.name} — ${p.description}` : `- ${p.name}`,
+    )
+    .join("\n");
+  const ancestorList =
+    ancestorProducts.length > 0
+      ? ancestorProducts.map((a) => `- ${a}`).join("\n")
+      : "(пусто — это первый шаг цепочки, петля невозможна)";
+  return `Направление построения: ${dirText}
+
+Контекст построенного шага:
+- Родительский продукт (источники подбирались под него): «${parentProduct}»
+- Преобразование шага: «${transformationName}»
+
+Родословная (продукты-предки ВЫШЕ по цепочке — следующий передел дочернего продукта НЕ должен вести обратно к ним, иначе это петля):
+${ancestorList}
+
+Дочерние продукты для проверки:
+${productsText}
 
 Имеющиеся источники (technology_description):
 ${sourcesDescriptions.map((d, i) => `--- Источник ${i + 1} ---\n${d}`).join("\n\n")}
 
+Для КАЖДОГО дочернего продукта реши строго: есть ли в источниках КОНКРЕТНОЕ описание его СЛЕДУЮЩЕГО передела в указанном направлении, ведущего к продукту ВНЕ родословной? Описание текущего шага («${parentProduct}» → дети) или процесса родителя НЕ считается. Если единственный следующий передел ведёт обратно к продукту из родословной (петля) — продукт в "insufficient". Если forward-описания нет вовсе — тоже в "insufficient". Сомнения — в "insufficient".
+
 Верни СТРОГО JSON по прикреплённому json_schema.`;
+}
+
+// Ответ проверки достаточности может прийти как «Имя — описание» (LLM эхом
+// возвращает строку из списка дочерних продуктов). Маппим обратно на
+// КАНОНИЧЕСКОЕ имя продукта из newProductObjs, чтобы клиент сопоставил его с
+// метками узлов графа (точным normalizeProductName) и показал плашку «нужны
+// свежие источники». Без этого «Олефины (C2–C4) — Лёгкие газы…» не совпадёт с
+// узлом «Олефины (C2–C4)», и маркер не выставится.
+function canonicalizeInsufficient(entries, newProductObjs) {
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .trim()
+      .replace(/\s+/g, " ");
+  // Длинные имена первыми — более специфичное имя выигрывает у короткого префикса.
+  const cands = [...newProductObjs].sort(
+    (a, b) => (b.name || "").length - (a.name || "").length,
+  );
+  const out = new Set();
+  for (const raw of entries) {
+    const e = String(raw || "").trim();
+    if (!e) continue;
+    const m =
+      cands.find((p) => p.name === e) ||
+      cands.find((p) => p.name && e.startsWith(p.name)) ||
+      cands.find((p) => p.name && norm(e).startsWith(norm(p.name)));
+    out.add(m ? m.name : e);
+  }
+  return [...out];
 }
 
 router.post("/gpt/step/build", async (req, res) => {
@@ -196,6 +267,14 @@ router.post("/gpt/step/build", async (req, res) => {
   const techText = String(req.body?.techText || "").trim();
   const existingProducts = Array.isArray(req.body?.existingProducts)
     ? req.body.existingProducts
+        .map((s) => String(s || "").trim())
+        .filter(Boolean)
+    : [];
+  // Родословная раскрываемого продукта (предки по цепочке + он сам). Нужна
+  // проверке достаточности: forward-передел нового ребёнка НЕ должен вести
+  // обратно к предку (это замкнуло бы цикл).
+  const ancestorProducts = Array.isArray(req.body?.ancestorProducts)
+    ? req.body.ancestorProducts
         .map((s) => String(s || "").trim())
         .filter(Boolean)
     : [];
@@ -360,9 +439,10 @@ router.post("/gpt/step/build", async (req, res) => {
     }
 
     // ---------- проверка достаточности источников ----------
-    const newProducts = [...step.inputProducts, ...step.outputProducts]
+    const newProductObjs = [...step.inputProducts, ...step.outputProducts]
       .filter((p) => !p.isExisting)
-      .map((p) => p.name);
+      .map((p) => ({ name: p.name, description: p.description || "" }));
+    const newProducts = newProductObjs.map((p) => p.name);
 
     const sourcesDescriptions = existingSources
       .map((s) => String(s?.technology_description || "").trim())
@@ -371,6 +451,9 @@ router.post("/gpt/step/build", async (req, res) => {
     let sourcesStatus = "sufficient";
     let insufficientProducts = [];
 
+    // newProducts.length === 0 (вырожденный шаг — только существующие продукты):
+    // родителя в insufficientProducts НЕ кладём, шаг остаётся sufficient.
+    // Достаточность оцениваем только для НОВЫХ дочерних продуктов.
     if (newProducts.length > 0 && sourcesDescriptions.length > 0) {
       try {
         const suffResp = await callOpenAIResponsesRaw({
@@ -379,11 +462,20 @@ router.post("/gpt/step/build", async (req, res) => {
           payload: {
             instructions: SUFFICIENCY_CHECK_SYSTEM,
             input: buildSufficiencyPrompt({
-              newProducts,
+              newProducts: newProductObjs,
               sourcesDescriptions,
+              direction,
+              parentProduct: productName,
+              transformationName: step.transformation.name,
+              ancestorProducts,
             }),
             truncation: "auto",
-            max_output_tokens: 500,
+            // gpt-5-mini — reasoning-модель: лимит делится между рассуждением
+            // и ответом. С 500 токенов рассуждение съедало весь бюджет →
+            // status "incomplete" без текста → проверка молча падала. Даём
+            // запас (как у основного build) + низкий effort: задача простая.
+            reasoning: { effort: "low" },
+            max_output_tokens: 4000,
             text: {
               format: {
                 type: "json_schema",
@@ -405,8 +497,19 @@ router.post("/gpt/step/build", async (req, res) => {
             suffParsed.insufficient.length > 0
           ) {
             sourcesStatus = "insufficient";
-            insufficientProducts = suffParsed.insufficient;
+            insufficientProducts = canonicalizeInsufficient(
+              suffParsed.insufficient,
+              newProductObjs,
+            );
           }
+        } else {
+          // Не completed (напр. обрыв по лимиту токенов) — логируем, чтобы
+          // проверка не падала молча, как было до фикса лимита.
+          console.warn(
+            "Sufficiency check not completed:",
+            suffResp?.status,
+            suffResp?.incomplete_details,
+          );
         }
       } catch (suffErr) {
         console.error("Sufficiency check failed:", suffErr?.message);

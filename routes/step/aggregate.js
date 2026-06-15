@@ -93,6 +93,13 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   const direction = req.body?.direction === "up" ? "up" : "down";
   const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
   const existingChain = req.body?.existingChain ?? "";
+  // Родословная раскрываемого продукта (предки по цепочке + он сам) — чтобы
+  // обобщение НЕ выбирало следующим продуктом предка (это замкнуло бы петлю).
+  const ancestorProducts = Array.isArray(req.body?.ancestorProducts)
+    ? req.body.ancestorProducts
+        .map((s) => String(s || "").trim())
+        .filter(Boolean)
+    : [];
   const maxBlockCharsRaw = Number(req.body?.maxBlockChars ?? 2500);
   const maxBlockChars = Number.isFinite(maxBlockCharsRaw)
     ? maxBlockCharsRaw
@@ -145,10 +152,11 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   };
 
   try {
-    const { SYSTEM, USER_PROMPT } = buildStepAggregatePrompts({
+    const { SYSTEM, USER_PROMPT, lineageText } = buildStepAggregatePrompts({
       productName,
       existingChain,
       blocks,
+      ancestorProducts,
     });
 
     const effectiveSystem =
@@ -156,7 +164,12 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       (direction === "up"
         ? `НАПРАВЛЕНИЕ: ВВЕРХ. "${productName}" рассматривай как ВХОДНОЕ СЫРЬЁ.\n\n${SYSTEM}`
         : SYSTEM);
-    const effectiveUser = customUserPrompt || USER_PROMPT;
+    // Подставляем родословную и в кастомный пользовательский промпт (он идёт мимо
+    // builder); в дефолтном USER_PROMPT плейсхолдер уже заменён — здесь no-op.
+    const effectiveUser = (customUserPrompt || USER_PROMPT).replace(
+      "<<<LINEAGE>>>",
+      () => lineageText,
+    );
 
     const payload = {
       model: "gpt-5-mini",
