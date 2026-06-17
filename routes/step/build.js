@@ -438,6 +438,24 @@ router.post("/gpt/step/build", async (req, res) => {
       });
     }
 
+    // Защита от вырожденного шага: если после удаления якоря (раскрываемого
+    // продукта) не осталось ни одного отличного продукта — модель вернула no-op
+    // (вход=выход=якорь, как бывало для up). Строить нечего: отдаём 422, клиент
+    // покажет ошибку и даст повторить, а не открывает пустое превью.
+    const anchorNormName = normalize(productName);
+    const hasDistinctProduct = [
+      ...step.inputProducts,
+      ...step.outputProducts,
+    ].some((p) => normalize(p.name) !== anchorNormName);
+    if (!hasDistinctProduct) {
+      return reply(422, {
+        success: false,
+        error:
+          "Модель вернула шаг без нового продукта (вход совпал с раскрываемым продуктом). Повторите построение или добавьте источники.",
+        debug: { step, productName },
+      });
+    }
+
     // ---------- проверка достаточности источников ----------
     const newProductObjs = [...step.inputProducts, ...step.outputProducts]
       .filter((p) => !p.isExisting)
