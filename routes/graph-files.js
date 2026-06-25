@@ -7,7 +7,8 @@ const GRAPH_DIR = path.resolve(__dirname, "../data/saved-graphs");
 
 router.post("/save", async (req, res) => {
   try {
-    const { name, prompt, nodes, edges, leaf_nodes, has_more } = req.body;
+    const { name, prompt, nodes, edges, leaf_nodes, has_more, sources } =
+      req.body;
 
     if (!nodes || !edges) {
       return res.status(400).json({ error: "nodes and edges required" });
@@ -38,6 +39,8 @@ router.post("/save", async (req, res) => {
       state: {
         leaf_nodes: leaf_nodes || [],
         has_more: !!has_more,
+        // Пул источников + счётчики номеров бейджа (если переданы).
+        sources: sources || null,
       },
     };
 
