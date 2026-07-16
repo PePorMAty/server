@@ -9,6 +9,8 @@ const {
   extractOutputText,
   safeJsonParse,
   normalizeAndFilterItems,
+  sanitizeAllowedDomains,
+  filterItemsByAllowedDomains,
 } = require("./utils");
 
 // аккуратный heartbeat, который НЕ ломает JSON
@@ -68,6 +70,8 @@ router.post("/gpt/sources", async (req, res) => {
     ? String(req.body.provider).trim()
     : undefined;
   const model = req.body?.model ? String(req.body.model).trim() : undefined;
+  // Опциональный whitelist доменов для web_search (задача 3.3)
+  const allowedDomains = sanitizeAllowedDomains(req.body?.allowedDomains);
 
   if (!productName) {
     return res
@@ -95,6 +99,7 @@ router.post("/gpt/sources", async (req, res) => {
       timeoutMs: 35 * 60 * 1000,
       provider,
       model,
+      allowedDomains,
     });
 
     stream.stop();
@@ -129,14 +134,19 @@ router.post("/gpt/sources", async (req, res) => {
       );
     }
 
-    const items = normalizeAndFilterItems(parsed.items);
+    const items = filterItemsByAllowedDomains(
+      normalizeAndFilterItems(parsed.items),
+      allowedDomains,
+    );
 
     if (items.length < 1) {
       return res.end(
         JSON.stringify({
           success: false,
           http_status: 422,
-          error: "No valid sources found",
+          error: allowedDomains.length
+            ? "No valid sources found on allowed domains"
+            : "No valid sources found",
           got: 0,
           expected: maxItems,
         }),

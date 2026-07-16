@@ -203,6 +203,7 @@ async function callOpenAIResponses({
   provider,
   model,
   timeoutMs = 35 * 60 * 1000,
+  allowedDomains,
 }) {
   const { client, defaultModel, name } = getClient(provider);
   const isQwen = name === "qwen";
@@ -210,6 +211,12 @@ async function callOpenAIResponses({
   const effectiveModel = model || defaultModel;
 
   if (isQwen) {
+    if (allowedDomains?.length) {
+      console.log(
+        `[${name}] allowedDomains не поддерживается провайдером (enable_search), игнорирую:`,
+        allowedDomains,
+      );
+    }
     const chatParams = {
       model: effectiveModel,
       messages: [{ role: "user", content: prompt }],
@@ -244,7 +251,15 @@ async function callOpenAIResponses({
   const params = {
     model: effectiveModel,
     input: prompt,
-    tools: [{ type: "web_search", search_context_size: "medium" }],
+    tools: [
+      {
+        type: "web_search",
+        search_context_size: "medium",
+        ...(allowedDomains?.length
+          ? { filters: { allowed_domains: allowedDomains } }
+          : {}),
+      },
+    ],
     tool_choice: "auto",
     parallel_tool_calls: false,
     max_tool_calls: 8,
@@ -262,7 +277,12 @@ async function callOpenAIResponses({
     },
   };
 
-  console.log(`[${name}] sending responses request, model=${effectiveModel}`);
+  console.log(
+    `[${name}] sending responses request, model=${effectiveModel}` +
+      (allowedDomains?.length
+        ? `, allowed_domains=[${allowedDomains.join(", ")}]`
+        : ""),
+  );
 
   try {
     const response = await client.responses.create(params, {

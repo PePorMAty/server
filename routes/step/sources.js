@@ -14,6 +14,8 @@ const {
   extractOutputText,
   safeJsonParse,
   normalizeAndFilterItems,
+  sanitizeAllowedDomains,
+  filterItemsByAllowedDomains,
 } = require("../sources/utils");
 
 const {
@@ -76,6 +78,8 @@ router.post("/gpt/step/sources", async (req, res) => {
     ? String(req.body.provider).trim()
     : undefined;
   const model = req.body?.model ? String(req.body.model).trim() : undefined;
+  // Опциональный whitelist доменов для web_search (задача 3.3)
+  const allowedDomains = sanitizeAllowedDomains(req.body?.allowedDomains);
   // Уже известные источники (клиент шлёт текущий пул продукта). Нужны, чтобы
   // отличить «источники закончились» от «в этот раз не нашлось».
   const existingSources = Array.isArray(req.body?.existingSources)
@@ -113,6 +117,7 @@ router.post("/gpt/step/sources", async (req, res) => {
       timeoutMs: 35 * 60 * 1000,
       provider,
       model,
+      allowedDomains,
     });
 
     stream.stop();
@@ -146,7 +151,12 @@ router.post("/gpt/step/sources", async (req, res) => {
       );
     }
 
-    const items = normalizeAndFilterItems(parsed.items);
+    // Пост-фильтр ДО веток «пусто»/exhausted: отброшенные чужие домены
+    // не должны считаться «новыми» источниками.
+    const items = filterItemsByAllowedDomains(
+      normalizeAndFilterItems(parsed.items),
+      allowedDomains,
+    );
     if (items.length < 1) {
       // Ничего не нашли. Для UI это не ошибка, а сигнал «источники закончились»:
       // были прежние — возвращаем их; не было — пустой массив. В обоих случаях
