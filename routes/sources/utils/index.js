@@ -45,6 +45,32 @@ function sanitizeAllowedDomains(raw) {
   return out;
 }
 
+// Строгий пост-фильтр: filters.allowed_domains ограничивает только сам
+// web_search, а итоговый JSON пишет модель и может «дописать» источники из
+// памяти с чужих доменов. При активном белом списке отбрасываем такие ссылки
+// (сабдомены разрешены: wikipedia.org матчит en.wikipedia.org).
+function filterItemsByAllowedDomains(items, allowedDomains) {
+  if (!Array.isArray(items)) return [];
+  if (!Array.isArray(allowedDomains) || allowedDomains.length === 0) {
+    return items;
+  }
+  const kept = items.filter((item) => {
+    let host;
+    try {
+      host = new URL(String(item?.url || "")).hostname.toLowerCase();
+    } catch {
+      return false;
+    }
+    return allowedDomains.some((d) => host === d || host.endsWith("." + d));
+  });
+  if (kept.length !== items.length) {
+    console.log(
+      `[sources] пост-фильтр доменов: отброшено ${items.length - kept.length} из ${items.length} источников (allowed: ${allowedDomains.join(", ")})`,
+    );
+  }
+  return kept;
+}
+
 module.exports = {
   buildSourcesPrompt,
   buildSourcesPromptUp,
@@ -57,4 +83,5 @@ module.exports = {
   pickTechnologyBlocksFromSources,
   getClient,
   sanitizeAllowedDomains,
+  filterItemsByAllowedDomains,
 };

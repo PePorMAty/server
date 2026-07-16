@@ -15,6 +15,7 @@ const {
   safeJsonParse,
   normalizeAndFilterItems,
   sanitizeAllowedDomains,
+  filterItemsByAllowedDomains,
 } = require("../sources/utils");
 
 const {
@@ -150,7 +151,12 @@ router.post("/gpt/step/sources", async (req, res) => {
       );
     }
 
-    const items = normalizeAndFilterItems(parsed.items);
+    // Пост-фильтр ДО веток «пусто»/exhausted: отброшенные чужие домены
+    // не должны считаться «новыми» источниками.
+    const items = filterItemsByAllowedDomains(
+      normalizeAndFilterItems(parsed.items),
+      allowedDomains,
+    );
     if (items.length < 1) {
       // Ничего не нашли. Для UI это не ошибка, а сигнал «источники закончились»:
       // были прежние — возвращаем их; не было — пустой массив. В обоих случаях

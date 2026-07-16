@@ -10,6 +10,7 @@ const {
   safeJsonParse,
   normalizeAndFilterItems,
   sanitizeAllowedDomains,
+  filterItemsByAllowedDomains,
 } = require("./utils");
 
 // аккуратный heartbeat, который НЕ ломает JSON
@@ -133,14 +134,19 @@ router.post("/gpt/sources", async (req, res) => {
       );
     }
 
-    const items = normalizeAndFilterItems(parsed.items);
+    const items = filterItemsByAllowedDomains(
+      normalizeAndFilterItems(parsed.items),
+      allowedDomains,
+    );
 
     if (items.length < 1) {
       return res.end(
         JSON.stringify({
           success: false,
           http_status: 422,
-          error: "No valid sources found",
+          error: allowedDomains.length
+            ? "No valid sources found on allowed domains"
+            : "No valid sources found",
           got: 0,
           expected: maxItems,
         }),
