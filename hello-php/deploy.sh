@@ -86,8 +86,14 @@ server {
     }
 
     location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
+        # Параметры FastCGI прописаны напрямую, чтобы работало и на nginx из
+        # репозитория Ubuntu, и на сборке с nginx.org (там нет snippets/fastcgi-php.conf).
+        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
         fastcgi_pass unix:$FPM_SOCK;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
     }
 
     location ~ /\.ht {
