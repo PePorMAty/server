@@ -104,11 +104,24 @@ EOF
 
 ln -sf "/etc/nginx/sites-available/$NGINX_SITE" "/etc/nginx/sites-enabled/$NGINX_SITE"
 
+# --- Доступ nginx к сокету php-fpm ---
+# nginx из репозитория nginx.org работает от пользователя "nginx", а сокет
+# php-fpm принадлежит www-data (mode 0660). Без доступа получаем 502 Bad Gateway.
+# Если nginx работает не от www-data — добавляем его в группу www-data.
+NGINX_RELOAD="reload"
+NGINX_USER="$(awk '$1=="user"{u=$2} END{gsub(/;/,"",u); print u}' /etc/nginx/nginx.conf 2>/dev/null || true)"
+NGINX_USER="${NGINX_USER:-www-data}"
+if [ "$NGINX_USER" != "www-data" ] && id "$NGINX_USER" >/dev/null 2>&1; then
+  echo "==> nginx работает от '$NGINX_USER' — добавляю его в группу www-data (доступ к сокету php-fpm)"
+  usermod -aG www-data "$NGINX_USER"
+  NGINX_RELOAD="restart"   # restart нужен, чтобы применилось новое членство в группе
+fi
+
 echo "==> Проверяю конфиг nginx (nginx -t)..."
 nginx -t
 
-echo "==> Перезагружаю nginx..."
-systemctl reload nginx
+echo "==> Применяю конфиг nginx ($NGINX_RELOAD)..."
+systemctl "$NGINX_RELOAD" nginx
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 echo ""

@@ -98,6 +98,18 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ---
 
+## Если что-то не так
+
+Сначала всегда проверяй сайт **локально на сервере** — это отделяет проблему nginx/php от firewall:
+```bash
+curl -i http://127.0.0.1:8080/
+```
+
+- **`502 Bad Gateway`** — nginx работает, но не достучался до php-fpm. Смотри `sudo tail -n 5 /var/log/nginx/error.log`:
+  - `(13: Permission denied)` — nginx (обычно от пользователя `nginx`, если ставился из nginx.org) не имеет доступа к сокету php-fpm, который принадлежит `www-data`. Лечится: `sudo usermod -aG www-data nginx && sudo systemctl restart nginx`. (В свежей версии `deploy.sh` это делается автоматически.)
+  - `(2: No such file or directory)` — php-fpm не запущен или сокет другой. Проверь `systemctl status php8.3-fpm` и `ls -l /run/php/`.
+- **Локально `200 OK`, но снаружи не открывается** — закрыт порт. Открой его в firewall (`ufw allow 8080/tcp`, либо для iptables: `sudo iptables -I INPUT -p tcp --dport 8080 -j ACCEPT`) и проверь сетевой firewall у провайдера VPS.
+
 ## Красивый адрес и HTTPS (по желанию)
 
 Порт `:8080` в адресе выглядит некрасиво. Если есть домен:
