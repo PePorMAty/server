@@ -101,6 +101,10 @@ function responsesToChatParams(params) {
       json_schema: {
         name: params.text.format.name,
         schema: params.text.format.schema,
+        // Без strict модель вправе вернуть JSON произвольной формы: проверено
+        // на qwen3.6-flash — вместо схемы приходил свободный ответ, и разбор
+        // ломался. Роуты передают strict: true, раньше он терялся здесь.
+        strict: params.text.format.strict !== false,
       },
     };
     chatParams.messages = ensureJsonMention(chatParams.messages);
@@ -253,6 +257,7 @@ async function callOpenAIResponses({
         json_schema: {
           name: "technology_sources",
           schema: buildSourcesSchema(maxItems),
+          strict: true,
         },
       },
     };
