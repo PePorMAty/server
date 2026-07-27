@@ -13,7 +13,9 @@ const PROVIDERS = {
       process.env.QWEN_BASE_URL ||
       "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     apiKeyEnv: "QWEN_API_KEY",
-    defaultModel: process.env.QWEN_MODEL || "qwen-plus",
+    // qwen-plus нашему ключу недоступен (403 AccessDenied.Unpurchased) —
+    // дефолтом берём модель из доступных аккаунту.
+    defaultModel: process.env.QWEN_MODEL || "qwen3.7-plus",
   },
 };
 
@@ -305,7 +307,11 @@ async function callOpenAIResponsesRaw({
   const { client, defaultModel, name } = getClient(provider);
   const isQwen = name === "qwen";
 
-  const effectiveModel = model || payload.model || defaultModel;
+  // payload.model роуты задают хардкодом ("gpt-5-mini") — это дефолт OpenAI.
+  // Для другого провайдера такое имя модели бессмысленно (DashScope ответит
+  // AccessDenied), поэтому подставляем дефолт самого провайдера.
+  const effectiveModel =
+    model || (name === "openai" ? payload.model : null) || defaultModel;
 
   if (isQwen) {
     const chatParams = responsesToChatParams({
