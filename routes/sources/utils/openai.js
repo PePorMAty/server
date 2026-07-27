@@ -47,6 +47,29 @@ function getClient(providerName) {
 // /v1/chat/completions через client.chat.completions.create()
 // ---------------------------------------------------------------------------
 
+// DashScope отклоняет response_format, если ни в одном сообщении нет слова
+// "json" (InternalError.Algo.InvalidParameter). Дефолтные промпты его содержат,
+// но пользователь может отредактировать промпт в UI и убрать — подстраховываемся.
+function ensureJsonMention(messages) {
+  const mentioned = messages.some(
+    (m) => typeof m?.content === "string" && /json/i.test(m.content),
+  );
+  if (mentioned) return messages;
+
+  const note = "Ответ верни строго в формате JSON по заданной схеме.";
+  const sysIndex = messages.findIndex(
+    (m) => m?.role === "system" && typeof m?.content === "string",
+  );
+  if (sysIndex === -1) return [{ role: "system", content: note }, ...messages];
+
+  const patched = messages.slice();
+  patched[sysIndex] = {
+    ...patched[sysIndex],
+    content: `${patched[sysIndex].content}\n\n${note}`,
+  };
+  return patched;
+}
+
 function responsesToChatParams(params) {
   const messages = [];
 
@@ -80,6 +103,7 @@ function responsesToChatParams(params) {
         schema: params.text.format.schema,
       },
     };
+    chatParams.messages = ensureJsonMention(chatParams.messages);
   }
 
   // DashScope Chat Completions: enable_search вместо tools: [web_search]
@@ -221,7 +245,7 @@ async function callOpenAIResponses({
     }
     const chatParams = {
       model: effectiveModel,
-      messages: [{ role: "user", content: prompt }],
+      messages: ensureJsonMention([{ role: "user", content: prompt }]),
       max_tokens: 16000,
       enable_search: true,
       response_format: {
