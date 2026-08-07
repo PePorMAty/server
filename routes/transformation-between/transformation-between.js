@@ -28,6 +28,10 @@ router.post("/gpt/transformation-between", async (req, res) => {
     const customSystemPrompt = req.body?.customSystemPrompt
       ? String(req.body.customSystemPrompt)
       : "";
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
     if (!chain || chain.length === 0) {
       return res.status(400).json({
@@ -80,6 +84,8 @@ router.post("/gpt/transformation-between", async (req, res) => {
     const resp = await callOpenAIResponsesRaw({
       payload,
       timeoutMs: 10 * 60 * 1000,
+      provider,
+      model,
     });
 
     if (resp?.status !== "completed") {

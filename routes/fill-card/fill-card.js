@@ -18,6 +18,10 @@ router.post("/gpt/fill-card", async (req, res) => {
 
   try {
     const nodeType = String(req.body?.nodeType || "product").trim(); // ✅
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
     if (!["product", "transformation"].includes(nodeType)) {
       return res.status(400).json({
         success: false,
@@ -63,12 +67,6 @@ router.post("/gpt/fill-card", async (req, res) => {
       });
     }
 
-    if (!process.env.GPT_API_KEY) {
-      return res
-        .status(500)
-        .json({ success: false, error: "GPT_API_KEY is not set in env" });
-    }
-
     const systemPrompt = customSystemPrompt
       ? String(customSystemPrompt)
       : buildFillCardSystemPrompt({ nodeType, productName });
@@ -76,7 +74,8 @@ router.post("/gpt/fill-card", async (req, res) => {
     const useWebSearch = !!req.body?.useWebSearch;
 
     const openaiResp = await callOpenAIFillCard({
-      apiKey: process.env.GPT_API_KEY,
+      provider,
+      model,
       systemPrompt,
       userPrompt,
       nodeType,
@@ -189,18 +188,12 @@ module.exports = router;
       });
     }
 
-    if (!process.env.GPT_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: "GPT_API_KEY is not set in env",
-      });
-    }
-
     const systemPrompt = buildFillCardSystemPrompt(productName);
     const userPrompt = buildFillCardUserPrompt(inputText);
 
     const openaiResp = await callOpenAIFillCard({
-      apiKey: process.env.GPT_API_KEY,
+      provider,
+      model,
       systemPrompt,
       userPrompt,
     });

@@ -1,11 +1,19 @@
 // server/routes/graphs.js
 const express = require("express");
 const axios = require("axios");
+const {
+  callOpenAIResponsesRaw,
+  extractOutputText,
+} = require("./sources/utils");
 const router = express.Router();
 
 // Основной endpoint для создания графа
 router.post("/gpt", async (req, res) => {
   const { userPrompt, promptLayout } = req.body;
+  const provider = req.body?.provider
+    ? String(req.body.provider).trim()
+    : undefined;
+  const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
   // ✅ ВАЛИДАЦИЯ ДО СТРИМА
   if (!userPrompt?.trim()) {
@@ -51,27 +59,22 @@ router.post("/gpt", async (req, res) => {
       promptLayout?.trim() || process.env.GPT_PROMT_LAYOUT || "";
     const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
-    const gptResponse = await axios.post(
-      "https://api.openai.com/v1/responses",
-      {
+    // Общий транспорт: знает про выбор провайдера и модели.
+    const gptResponse = await callOpenAIResponsesRaw({
+      payload: {
         model: "gpt-4.1",
         input: fullPrompt,
         temperature: 0.3,
         max_output_tokens: 12000,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.GPT_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        // лучше не бесконечно:
-        timeout: 35 * 60 * 1000,
-      },
-    );
+      timeoutMs: 35 * 60 * 1000,
+      provider,
+      model,
+    });
 
     if (aborted) return;
 
-    const text = gptResponse.data.output?.[0]?.content?.[0]?.text || "";
+    const text = extractOutputText(gptResponse);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("GPT did not return JSON");
 
@@ -106,6 +109,10 @@ router.get("/prompt-layout", (req, res) => {
 router.post("/gpt/continue", async (req, res) => {
   try {
     const { originalPrompt, existingGraph, leafNodes } = req.body;
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
     if (!originalPrompt || !existingGraph || !leafNodes) {
       return res.status(400).json({ error: "Bad request" });
@@ -132,24 +139,19 @@ ${leafNodes.join(", ")}
 }
 `;
 
-    const gptResponse = await axios.post(
-      "https://api.openai.com/v1/responses",
-      {
+    const gptResponse = await callOpenAIResponsesRaw({
+      payload: {
         model: "gpt-4.1",
         input: prompt,
         temperature: 0.2,
         max_output_tokens: 6000,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.GPT_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 0,
-      },
-    );
+      timeoutMs: 35 * 60 * 1000,
+      provider,
+      model,
+    });
 
-    const text = gptResponse.data.output[0].content[0].text;
+    const text = extractOutputText(gptResponse);
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("GPT did not return JSON");

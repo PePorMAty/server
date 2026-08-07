@@ -31,6 +31,10 @@ router.post("/gpt/chain", async (req, res) => {
     const customSystemPrompt = req.body?.customSystemPrompt
       ? String(req.body.customSystemPrompt).trim()
       : "";
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
     if (!productName) {
       return res
@@ -68,9 +72,10 @@ router.post("/gpt/chain", async (req, res) => {
       };
 
       const resp = await callOpenAIResponsesRaw({
-        apiKey: process.env.GPT_API_KEY,
         payload,
         timeoutMs: 10 * 60 * 1000,
+        provider,
+        model,
       });
 
       if (resp?.status !== "completed") {

@@ -1,10 +1,6 @@
 // routes/fill-card/utils/openai.js
 
-const axios = require("axios");
-const https = require("https");
-
-const OPENAI_URL = "https://api.openai.com/v1/responses";
-const httpsAgent = new https.Agent({ keepAlive: true });
+const { callOpenAIResponsesRaw } = require("../../sources/utils");
 
 function extractOutputText(resp) {
   if (!resp) return "";
@@ -102,12 +98,13 @@ function buildFillCardSchema(nodeType, selectedFields) {
 }
 
 async function callOpenAIFillCard({
-  apiKey,
   systemPrompt,
   userPrompt,
   nodeType,
   selectedFields,
   useWebSearch,
+  provider,
+  model,
 }) {
   const payload = {
     model: "gpt-5-mini",
@@ -130,18 +127,15 @@ async function callOpenAIFillCard({
   if (useWebSearch) {
     payload.tools = [{ type: "web_search_preview" }];
   }
-  const { data } = await axios.post(OPENAI_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    httpsAgent,
-    timeout: 10 * 60 * 1000,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
 
-  return data;
+  // Транспорт общий: он знает про провайдеров, выбор модели и конвертацию
+  // Responses -> Chat Completions для Qwen (включая web_search -> enable_search).
+  return callOpenAIResponsesRaw({
+    payload,
+    timeoutMs: 10 * 60 * 1000,
+    provider,
+    model,
+  });
 }
 
 module.exports = {
