@@ -26,11 +26,22 @@ function getClient(providerName) {
   const cfg = PROVIDERS[name];
   if (!cfg) throw new Error(`Unknown AI provider: "${name}"`);
 
-  const apiKey = process.env[cfg.apiKeyEnv];
+  // Ключ из .env/секретов часто приезжает с пробелом, переводом строки или
+  // кавычками по краям — провайдер на такой ключ отвечает "Incorrect API key",
+  // что выглядит как неверный ключ, хотя он верный.
+  const rawKey = process.env[cfg.apiKeyEnv];
+  const apiKey = String(rawKey ?? "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
   if (!apiKey) throw new Error(`${cfg.apiKeyEnv} is not set in env`);
 
   const cacheKey = `${name}:${apiKey}`;
   if (!clientCache[cacheKey]) {
+    // Логируем длину, а не сам ключ: этого хватает, чтобы поймать обрезанный
+    // или частично скопированный ключ, и не утекает секрет.
+    console.log(
+      `[${name}] client init: baseURL=${cfg.baseURL}, keyLen=${apiKey.length}, keyPrefix=${apiKey.slice(0, 6)}…`,
+    );
     clientCache[cacheKey] = new OpenAI({ apiKey, baseURL: cfg.baseURL });
   }
 
