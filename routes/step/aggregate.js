@@ -157,13 +157,12 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       existingChain,
       blocks,
       ancestorProducts,
+      direction,
     });
 
-    const effectiveSystem =
-      customSystemPrompt ||
-      (direction === "up"
-        ? `НАПРАВЛЕНИЕ: ВВЕРХ. "${productName}" рассматривай как ВХОДНОЕ СЫРЬЁ.\n\n${SYSTEM}`
-        : SYSTEM);
+    // SYSTEM уже направление-аware (UP — зеркало DOWN, см. buildStepAggregatePrompts),
+    // поэтому костыль-префикс для up больше не нужен.
+    const effectiveSystem = customSystemPrompt || SYSTEM;
     // Подставляем родословную и в кастомный пользовательский промпт (он идёт мимо
     // builder); в дефолтном USER_PROMPT плейсхолдер уже заменён — здесь no-op.
     const effectiveUser = (customUserPrompt || USER_PROMPT).replace(
