@@ -12,6 +12,7 @@ const stepSources = require("./routes/step/sources");
 const stepAggregate = require("./routes/step/aggregate");
 const stepBuild = require("./routes/step/build");
 const transformationBetween = require("./routes/transformation-between/transformation-between");
+const techDescription = require("./routes/tech-description/tech-description");
 const shareRoutes = require("./routes/share/share");
 
 const app = express();
@@ -86,6 +87,7 @@ app.use("/api/graphs", stepSources);
 app.use("/api/graphs", stepAggregate);
 app.use("/api/graphs", stepBuild);
 app.use("/api/graphs", transformationBetween);
+app.use("/api/graphs", techDescription);
 app.use("/api/graphs", shareRoutes);
 
 // Health check
