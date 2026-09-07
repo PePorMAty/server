@@ -1,45 +1,29 @@
 // routes/fill-card/utils/openai.js
+//
+// Запрос карточки узла к LLM.
+//
+// Провайдер и модель приходят из тела запроса (клиент шлёт их из селектора
+// «Модель для запросов»). Раньше здесь был жёстко зашит OpenAI gpt-5-mini, и
+// выбор модели на карточку не влиял вовсе — DashScope-модели (Qwen, DeepSeek)
+// не вызывались никогда.
+//
+// Общий клиент из sources/utils/openai умеет оба провайдера: у DashScope нет
+// /v1/responses, и он сам переводит payload в /v1/chat/completions (включая
+// json_schema и enable_search вместо web_search).
 
-const axios = require("axios");
-const https = require("https");
+const {
+  callOpenAIResponsesRaw,
+  extractOutputText,
+  safeJsonParse,
+} = require("../../sources/utils/openai");
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
-const httpsAgent = new https.Agent({ keepAlive: true });
-
-function extractOutputText(resp) {
-  if (!resp) return "";
-
-  if (typeof resp.output_text === "string" && resp.output_text.trim()) {
-    return resp.output_text.trim();
-  }
-
-  const out = Array.isArray(resp.output) ? resp.output : [];
-  const parts = [];
-
-  for (const item of out) {
-    const content = Array.isArray(item?.content) ? item.content : [];
-    for (const c of content) {
-      if (typeof c?.text === "string") parts.push(c.text);
-    }
-  }
-
-  return parts.join("\n").trim();
-}
-
-function safeJsonParse(text) {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    try {
-      return JSON.parse(m[0]);
-    } catch {
-      return null;
-    }
-  }
-}
+/**
+ * Потолок ответа. Держим как в остальных маршрутах (16000): у моделей с
+ * размышлениями (Qwen/DeepSeek Flash и Pro) бюджет делится между рассуждением
+ * и ответом, и при прежних 4000 карточка приходила пустой — рассуждение
+ * съедало весь лимит.
+ */
+const MAX_OUTPUT_TOKENS = 16000;
 
 function buildFillCardSchema(nodeType, selectedFields) {
   // все поля для данного типа
@@ -102,14 +86,17 @@ function buildFillCardSchema(nodeType, selectedFields) {
 }
 
 async function callOpenAIFillCard({
-  apiKey,
   systemPrompt,
   userPrompt,
   nodeType,
   selectedFields,
   useWebSearch,
+  provider,
+  model,
 }) {
   const payload = {
+    // Модель по умолчанию для openai; provider/model из тела запроса её
+    // перекрывают (см. callOpenAIResponsesRaw).
     model: "gpt-5-mini",
     input: [
       { role: "system", content: systemPrompt },
@@ -117,7 +104,7 @@ async function callOpenAIFillCard({
     ],
     reasoning: { effort: "low" },
     truncation: "auto",
-    max_output_tokens: 4000,
+    max_output_tokens: MAX_OUTPUT_TOKENS,
     text: {
       format: {
         type: "json_schema",
@@ -130,18 +117,13 @@ async function callOpenAIFillCard({
   if (useWebSearch) {
     payload.tools = [{ type: "web_search_preview" }];
   }
-  const { data } = await axios.post(OPENAI_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    httpsAgent,
-    timeout: 10 * 60 * 1000,
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
 
-  return data;
+  return callOpenAIResponsesRaw({
+    payload,
+    provider,
+    model,
+    timeoutMs: 10 * 60 * 1000,
+  });
 }
 
 module.exports = {

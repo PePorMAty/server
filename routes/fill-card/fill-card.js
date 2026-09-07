@@ -33,6 +33,12 @@ router.post("/gpt/fill-card", async (req, res) => {
     const selectedFields = Array.isArray(req.body?.selectedFields)
       ? req.body.selectedFields
       : null;
+    // Провайдер и модель из селектора на клиенте. Пусто — серверный дефолт
+    // (AI_PROVIDER, иначе openai) внутри общего клиента.
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
     let inputText = "";
     if (typeof rawText === "string" && rawText.trim()) {
@@ -63,31 +69,32 @@ router.post("/gpt/fill-card", async (req, res) => {
       });
     }
 
-    if (!process.env.GPT_API_KEY) {
-      return res
-        .status(500)
-        .json({ success: false, error: "GPT_API_KEY is not set in env" });
-    }
-
     const systemPrompt = customSystemPrompt
       ? String(customSystemPrompt)
       : buildFillCardSystemPrompt({ nodeType, productName });
     const userPrompt = buildFillCardUserPrompt({ nodeType, inputText });
     const useWebSearch = !!req.body?.useWebSearch;
 
+    // Ключ проверяет сам клиент провайдера (GPT_API_KEY для openai,
+    // QWEN_API_KEY для DashScope) и сообщает, какого именно не хватает.
     const openaiResp = await callOpenAIFillCard({
-      apiKey: process.env.GPT_API_KEY,
       systemPrompt,
       userPrompt,
       nodeType,
       selectedFields,
       useWebSearch,
+      provider,
+      model,
     });
+
+    const usedBy = `${provider || process.env.AI_PROVIDER || "openai"}/${
+      model || "по умолчанию"
+    }`;
 
     if (openaiResp?.status !== "completed") {
       return res.status(502).json({
         success: false,
-        error: "OpenAI response status is not completed",
+        error: `Модель ${usedBy}: ответ не завершён`,
         debug: {
           status: openaiResp?.status,
           incomplete_details: openaiResp?.incomplete_details ?? null,
@@ -100,9 +107,14 @@ router.post("/gpt/fill-card", async (req, res) => {
     const card = parsed?.productCard;
 
     if (!card || typeof card !== "object") {
+      // Модели с размышлениями иногда отдают пустой content: весь бюджет
+      // токенов уходит в рассуждение. Пишем в ошибку модель и начало ответа,
+      // иначе причина не видна ни в UI, ни в логах.
       return res.status(502).json({
         success: false,
-        error: "OpenAI did not return productCard",
+        error: text
+          ? `Модель ${usedBy} вернула ответ не по схеме (нет productCard)`
+          : `Модель ${usedBy} вернула пустой ответ`,
         debug: { output_text_preview: (text || "").slice(0, 1200) },
       });
     }
