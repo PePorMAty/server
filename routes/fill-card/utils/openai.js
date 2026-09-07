@@ -1,29 +1,41 @@
 // routes/fill-card/utils/openai.js
-//
-// Запрос карточки узла к LLM.
-//
-// Провайдер и модель приходят из тела запроса (клиент шлёт их из селектора
-// «Модель для запросов»). Раньше здесь был жёстко зашит OpenAI gpt-5-mini, и
-// выбор модели на карточку не влиял вовсе — DashScope-модели (Qwen, DeepSeek)
-// не вызывались никогда.
-//
-// Общий клиент из sources/utils/openai умеет оба провайдера: у DashScope нет
-// /v1/responses, и он сам переводит payload в /v1/chat/completions (включая
-// json_schema и enable_search вместо web_search).
 
-const {
-  callOpenAIResponsesRaw,
-  extractOutputText,
-  safeJsonParse,
-} = require("../../sources/utils/openai");
+const { callOpenAIResponsesRaw } = require("../../sources/utils");
 
-/**
- * Потолок ответа. Держим как в остальных маршрутах (16000): у моделей с
- * размышлениями (Qwen/DeepSeek Flash и Pro) бюджет делится между рассуждением
- * и ответом, и при прежних 4000 карточка приходила пустой — рассуждение
- * съедало весь лимит.
- */
-const MAX_OUTPUT_TOKENS = 16000;
+function extractOutputText(resp) {
+  if (!resp) return "";
+
+  if (typeof resp.output_text === "string" && resp.output_text.trim()) {
+    return resp.output_text.trim();
+  }
+
+  const out = Array.isArray(resp.output) ? resp.output : [];
+  const parts = [];
+
+  for (const item of out) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const c of content) {
+      if (typeof c?.text === "string") parts.push(c.text);
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
+function safeJsonParse(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch {
+      return null;
+    }
+  }
+}
 
 function buildFillCardSchema(nodeType, selectedFields) {
   // все поля для данного типа
@@ -95,8 +107,6 @@ async function callOpenAIFillCard({
   model,
 }) {
   const payload = {
-    // Модель по умолчанию для openai; provider/model из тела запроса её
-    // перекрывают (см. callOpenAIResponsesRaw).
     model: "gpt-5-mini",
     input: [
       { role: "system", content: systemPrompt },
@@ -104,7 +114,10 @@ async function callOpenAIFillCard({
     ],
     reasoning: { effort: "low" },
     truncation: "auto",
-    max_output_tokens: MAX_OUTPUT_TOKENS,
+    // Как в остальных маршрутах. Прежние 4000 — единственное место с таким
+    // потолком: у моделей с размышлениями бюджет делится между рассуждением и
+    // ответом, и на 4000 content приходил пустым (Qwen/DeepSeek Flash).
+    max_output_tokens: 16000,
     text: {
       format: {
         type: "json_schema",
@@ -118,11 +131,13 @@ async function callOpenAIFillCard({
     payload.tools = [{ type: "web_search_preview" }];
   }
 
+  // Транспорт общий: он знает про провайдеров, выбор модели и конвертацию
+  // Responses -> Chat Completions для Qwen (включая web_search -> enable_search).
   return callOpenAIResponsesRaw({
     payload,
+    timeoutMs: 10 * 60 * 1000,
     provider,
     model,
-    timeoutMs: 10 * 60 * 1000,
   });
 }
 

@@ -18,6 +18,10 @@ router.post("/gpt/fill-card", async (req, res) => {
 
   try {
     const nodeType = String(req.body?.nodeType || "product").trim(); // ✅
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
     if (!["product", "transformation"].includes(nodeType)) {
       return res.status(400).json({
         success: false,
@@ -33,12 +37,6 @@ router.post("/gpt/fill-card", async (req, res) => {
     const selectedFields = Array.isArray(req.body?.selectedFields)
       ? req.body.selectedFields
       : null;
-    // Провайдер и модель из селектора на клиенте. Пусто — серверный дефолт
-    // (AI_PROVIDER, иначе openai) внутри общего клиента.
-    const provider = req.body?.provider
-      ? String(req.body.provider).trim()
-      : undefined;
-    const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
     let inputText = "";
     if (typeof rawText === "string" && rawText.trim()) {
@@ -75,18 +73,18 @@ router.post("/gpt/fill-card", async (req, res) => {
     const userPrompt = buildFillCardUserPrompt({ nodeType, inputText });
     const useWebSearch = !!req.body?.useWebSearch;
 
-    // Ключ проверяет сам клиент провайдера (GPT_API_KEY для openai,
-    // QWEN_API_KEY для DashScope) и сообщает, какого именно не хватает.
     const openaiResp = await callOpenAIFillCard({
+      provider,
+      model,
       systemPrompt,
       userPrompt,
       nodeType,
       selectedFields,
       useWebSearch,
-      provider,
-      model,
     });
 
+    // Модель называем в тексте ошибки: без неё в UI не видно, какая именно не
+    // справилась, а провайдеров и моделей теперь несколько.
     const usedBy = `${provider || process.env.AI_PROVIDER || "openai"}/${
       model || "по умолчанию"
     }`;
@@ -107,9 +105,9 @@ router.post("/gpt/fill-card", async (req, res) => {
     const card = parsed?.productCard;
 
     if (!card || typeof card !== "object") {
-      // Модели с размышлениями иногда отдают пустой content: весь бюджет
-      // токенов уходит в рассуждение. Пишем в ошибку модель и начало ответа,
-      // иначе причина не видна ни в UI, ни в логах.
+      // Пустой ответ и ответ не по схеме — разные причины и разные лечения:
+      // первое обычно значит, что весь бюджет токенов ушёл в размышления,
+      // второе — что модель проигнорировала json_schema.
       return res.status(502).json({
         success: false,
         error: text
@@ -201,18 +199,12 @@ module.exports = router;
       });
     }
 
-    if (!process.env.GPT_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: "GPT_API_KEY is not set in env",
-      });
-    }
-
     const systemPrompt = buildFillCardSystemPrompt(productName);
     const userPrompt = buildFillCardUserPrompt(inputText);
 
     const openaiResp = await callOpenAIFillCard({
-      apiKey: process.env.GPT_API_KEY,
+      provider,
+      model,
       systemPrompt,
       userPrompt,
     });
