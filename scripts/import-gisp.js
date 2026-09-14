@@ -10,6 +10,12 @@
 //                       показываем в карточке продукта)
 //   --map поле=Колонка  задать соответствие вручную, через запятую
 //   --limit <N>         обработать только первые N строк
+//   --only-active       не брать записи, прекратившие действие: реестр хранит
+//                       и старые, а для счётчика производителей нужны те, кто
+//                       выпускает продукт сейчас. Заметно уменьшает базу
+//   --stats             прочитать файл целиком и сказать, сколько в нём строк
+//                       и сколько места займёт база. Ничего не записывает —
+//                       можно запускать на переполненном диске
 //   --dry-run           ничего не писать: показать, как разобрались колонки,
 //                       и первые строки
 //
@@ -280,7 +286,6 @@ function createDb(out) {
       id          INTEGER PRIMARY KEY,
       name        TEXT NOT NULL,
       name_norm   TEXT NOT NULL,
-      name_stem   TEXT NOT NULL,
       okpd2       TEXT,
       tnved       TEXT,
       producer    TEXT NOT NULL,
@@ -313,10 +318,19 @@ function createDb(out) {
 /* ────────────────────────────── запуск ────────────────────────────── */
 
 function parseArgs(argv) {
-  const args = { file: null, out: DEFAULT_DB_PATH, dryRun: false, limit: 0 };
+  const args = {
+    file: null,
+    out: DEFAULT_DB_PATH,
+    dryRun: false,
+    stats: false,
+    onlyActive: false,
+    limit: 0,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") args.dryRun = true;
+    else if (a === "--only-active") args.onlyActive = true;
+    else if (a === "--stats") args.stats = true;
     else if (a === "--out") args.out = argv[++i];
     else if (a === "--actual-at") args.actualAt = argv[++i];
     else if (a === "--limit") args.limit = Number(argv[++i]) || 0;
@@ -386,6 +400,36 @@ async function main() {
   }
 
   const finish = (mapping, rowsSeen, db, stats) => {
+    if (args.stats) {
+      // Размер базы примерно в полтора раза больше объёма текста в ней:
+      // остальное — служебные байты строк, индекс точных названий и
+      // полнотекстовый индекс. Множитель снят с готовых баз — 1,41 и 1,40 на
+      // двух разных. Оценка нужна, чтобы решить вопрос «влезет ли», не записав
+      // на диск ни байта.
+      const mb = (n) => (n / 1048576).toFixed(0);
+      const archived = tally.rows - tally.active;
+
+      console.log("\nЧто в файле:");
+      console.log(`  строк реестра:        ${tally.rows}`);
+      console.log(`  из них действующих:   ${tally.active}`);
+      console.log(`  прекращённых:         ${archived}` +
+        (tally.rows ? `  (${Math.round((archived * 100) / tally.rows)}%)` : ""));
+      console.log(`  уникальных продуктов: ${tally.names.size}`);
+
+      console.log("\nСколько займёт база:");
+      console.log(`  со всеми записями:    ~${mb(tally.bytes * 1.41)} МБ`);
+      if (archived) {
+        const activeShare = tally.rows ? tally.active / tally.rows : 1;
+        console.log(`  только действующие:   ~${mb(tally.bytes * 1.41 * activeShare)} МБ   (ключ --only-active)`);
+      }
+      console.log(
+        "\nВ конце импорт пробует сжать базу — на это нужно столько же места\n" +
+          "сверху. Места не хватит — импорт не упадёт, база просто останется\n" +
+          "несжатой.",
+      );
+      return;
+    }
+
     if (args.dryRun) {
       console.log("\nЭто сухой прогон: база не записана.");
       console.log("Если соответствие колонок верное — повторите без --dry-run.");
@@ -407,11 +451,6 @@ async function main() {
         args.actualAt,
       );
     }
-
-    console.log("\nСтроим полнотекстовый индекс…");
-    db.exec(
-      "INSERT INTO products_fts(rowid, name_stem) SELECT id, name_stem FROM products",
-    );
 
     // Сжатие переписывает базу целиком во временный файл, то есть на время
     // требует места вдвое больше её размера. Если места нет — не беда: база уже
@@ -440,14 +479,20 @@ async function main() {
         `  строк реестра: ${counts.entries}\n` +
         `  уникальных продуктов: ${counts.products}\n` +
         `  производителей (по ИНН): ${counts.producers}\n` +
-        `  пропущено строк без названия или производителя: ${stats.skipped}`,
+        `  пропущено строк без названия или производителя: ${stats.skipped}` +
+        (stats.skippedArchived
+          ? `\n  пропущено прекращённых записей: ${stats.skippedArchived}`
+          : ""),
     );
   };
 
   let mapping = null;
   let db = null;
   let insert = null;
-  const stats = { skipped: 0, written: 0 };
+  let ftsInsert = null;
+  const stats = { skipped: 0, skippedArchived: 0, written: 0 };
+  const writing = !args.dryRun && !args.stats;
+  const tally = { rows: 0, active: 0, bytes: 0, names: new Set() };
   const preview = [];
 
   const setup = (headerRow) => {
@@ -502,15 +547,24 @@ async function main() {
       );
     }
 
-    if (!args.dryRun) {
+    if (writing) {
       db = createDb(args.out);
       insert = db.prepare(
         `INSERT INTO products
-           (name, name_norm, name_stem, okpd2, tnved, producer, inn, region,
+           (name, name_norm, okpd2, tnved, producer, inn, region,
             reg_number, reg_date, valid_until, ended_at, status, status_raw, url)
-         VALUES (@name, @name_norm, @name_stem, @okpd2, @tnved, @producer, @inn,
+         VALUES (@name, @name_norm, @okpd2, @tnved, @producer, @inn,
                  @region, @reg_number, @reg_date, @valid_until, @ended_at,
                  @status, @status_raw, @url)`,
+      );
+      // Усечённые слова нужны только полнотекстовому индексу. Раньше они лежали
+      // ещё и колонкой в products, откуда индекс собирался одним запросом в
+      // конце — это примерно десятая часть текста базы, хранимая впустую.
+      // Пишем прямо в индекс: тогда колонку не приходится ни заводить, ни потом
+      // выбрасывать (а выбросить её без сжатия базы всё равно не вышло бы, а
+      // сжатие требует места вдвое больше самой базы).
+      ftsInsert = db.prepare(
+        "INSERT INTO products_fts(rowid, name_stem) VALUES (?, ?)",
       );
       db.exec("BEGIN");
     }
@@ -534,7 +588,6 @@ async function main() {
     const record = {
       name,
       name_norm: normalizeName(name),
-      name_stem: stemName(name),
       okpd2: get("okpd2"),
       tnved: get("tnved"),
       producer,
@@ -549,9 +602,31 @@ async function main() {
       url: get("url"),
     };
 
+    // Прекращённые записи в счётчике производителей всё равно не участвуют:
+    // важно, кто выпускает продукт сейчас. На тесном диске их можно не хранить.
+    if (args.onlyActive && record.status !== "active") {
+      stats.skippedArchived += 1;
+      return true;
+    }
+
     if (preview.length < 3) preview.push(record);
-    if (!args.dryRun) {
-      insert.run(record);
+
+    if (args.stats) {
+      tally.rows += 1;
+      if (record.status === "active") tally.active += 1;
+      tally.names.add(record.name_norm);
+      for (const v of Object.values(record)) {
+        if (v) tally.bytes += Buffer.byteLength(String(v), "utf8");
+      }
+      if (tally.rows % 100000 === 0) {
+        console.log(`  прочитано строк: ${tally.rows}`);
+      }
+      return true;
+    }
+
+    if (writing) {
+      const { lastInsertRowid } = insert.run(record);
+      ftsInsert.run(lastInsertRowid, stemName(name));
       stats.written += 1;
       if (stats.written % 100000 === 0) {
         console.log(`  обработано строк: ${stats.written}`);
