@@ -16,6 +16,7 @@
   "dependencies": {
     "@dagrejs/dagre": "^1.0.0",
     "axios": "^1.13.2",
+    "better-sqlite3": "^13.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",

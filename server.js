@@ -16,6 +16,7 @@ const stepBuild = require("./routes/step/build");
 const transformationBetween = require("./routes/transformation-between/transformation-between");
 const techDescription = require("./routes/tech-description/tech-description");
 const shareRoutes = require("./routes/share/share");
+const industryRoutes = require("./routes/industry/industry");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -95,6 +96,8 @@ app.use("/api/graphs", stepBuild);
 app.use("/api/graphs", transformationBetween);
 app.use("/api/graphs", techDescription);
 app.use("/api/graphs", shareRoutes);
+// Слой промышленных данных (ГИСП) — свой префикс: это не про графы.
+app.use("/api", industryRoutes);
 
 // Health check
 app.get("/api/health", async (req, res) => {
