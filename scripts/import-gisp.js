@@ -132,12 +132,12 @@ function detectMapping(header) {
   const loose = new Set();
   const taken = new Set();
 
-  for (const [field, all] of Object.entries(ALIASES)) {
-    // Пустой псевдоним содержится в любом заголовке, поэтому одно поле забрало
-    // бы первую попавшуюся колонку, второе — вторую, и так по порядку. Сам по
-    // себе список такой не бывает — но станет, если файл скрипта испортить при
-    // переносе: кириллица превратится в мусор, и от названий ничего не
-    // останется. Молча сопоставлять колонки после этого нельзя.
+  // Пустой псевдоним содержится в любом заголовке, поэтому одно поле забрало бы
+  // первую попавшуюся колонку, второе — вторую, и так по порядку. Сам по себе
+  // список таким не бывает — но станет, если файл скрипта испортить при
+  // переносе: кириллица превратится в мусор, и от названий ничего не
+  // останется. Молча сопоставлять колонки после этого нельзя.
+  const table = Object.entries(ALIASES).map(([field, all]) => {
     const aliases = all.filter((a) => a.length >= 3);
     if (aliases.length !== all.length) {
       throw new Error(
@@ -147,31 +147,41 @@ function detectMapping(header) {
           "двоичном (binary) режиме или заберите через git.",
       );
     }
-    // Сначала точное совпадение по всем полям сразу было бы правильнее, но
-    // порядок полей в ALIASES и так идёт от самых узких названий к широким.
-    let hit = normalized.find(
+    return [field, aliases];
+  });
+
+  const claim = (field, hit, isLoose) => {
+    mapping[field] = hit.raw;
+    taken.add(hit.raw);
+    if (isLoose) loose.add(field);
+  };
+
+  // Сначала точные совпадения по всем полям, и только потом — по вхождению.
+  // Иначе поле, стоящее в списке раньше, уводит колонку у того, которому она
+  // подходит точно: «Фактическая дата прекращения действия реестровой записи»
+  // доставалась дате записи по слову «дата», а поле ended_at оставалось ни с
+  // чем — и все записи выходили действующими.
+  for (const [field, aliases] of table) {
+    const hit = normalized.find(
       (h) => !taken.has(h.raw) && h.norm && aliases.includes(h.norm),
     );
+    if (hit) claim(field, hit, false);
+  }
 
-    if (!hit) {
-      hit = normalized.find(
-        (h) =>
-          !taken.has(h.raw) &&
-          // Пустой заголовок содержится в любом псевдониме, а короткий —
-          // в слишком многих. Без этого условия первое же поле забирало бы
-          // себе безымянную колонку.
-          h.norm.length >= 4 &&
-          aliases.some(
-            (a) => h.norm.includes(a) || (a.includes(h.norm) && h.norm.length >= 4),
-          ),
-      );
-      if (hit) loose.add(field);
-    }
-
-    if (hit) {
-      mapping[field] = hit.raw;
-      taken.add(hit.raw);
-    }
+  for (const [field, aliases] of table) {
+    if (mapping[field]) continue;
+    const hit = normalized.find(
+      (h) =>
+        !taken.has(h.raw) &&
+        // Пустой заголовок содержится в любом псевдониме, а короткий —
+        // в слишком многих. Без этого условия первое же поле забирало бы
+        // себе безымянную колонку.
+        h.norm.length >= 4 &&
+        aliases.some(
+          (a) => h.norm.includes(a) || (a.includes(h.norm) && h.norm.length >= 4),
+        ),
+    );
+    if (hit) claim(field, hit, true);
   }
 
   return { mapping, loose };
