@@ -16,6 +16,7 @@ const {
   stemName,
   words,
 } = require("./normalize");
+const { regionByInn } = require("./regions");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
 
@@ -133,7 +134,12 @@ function toEntry(row) {
   return {
     producer: row.producer,
     inn: row.inn || null,
-    region: row.region || null,
+    // Регион берём из выгрузки, а если там пусто — выводим из ИНН. В реестре
+    // ПП №719 адрес не заполнен ни у одной записи, так что на деле работает
+    // второй путь; признак regionFromInn говорит интерфейсу, что это место
+    // учёта организации, а не обязательно место производства.
+    region: row.region || regionByInn(row.inn),
+    regionFromInn: !row.region && Boolean(regionByInn(row.inn)),
     product: row.name,
     okpd2: row.okpd2 || null,
     status: row.status,
@@ -285,7 +291,10 @@ function summarize(rows) {
   for (const row of rows) {
     if (row.status === "active") anyActive = true;
     if (!okpd2 && row.okpd2) okpd2 = row.okpd2;
-    if (row.region) regions.add(row.region);
+    // Считаем по тому же региону, что показываем: в выгрузке адреса нет, и
+    // регион выводится из ИНН — иначе счётчик регионов всегда был бы нулём.
+    const region = row.region || regionByInn(row.inn);
+    if (region) regions.add(region);
 
     // Один производитель может стоять в нескольких записях реестра: считаем его
     // один раз, но показываем действующую запись, а не первую попавшуюся.
