@@ -29,6 +29,8 @@ const MAX_ENTRIES_PER_PRODUCT = 200;
 
 let db = null;
 let openedPath = null;
+// Почему базу не удалось открыть — показываем в интерфейсе вместо пустоты.
+let openError = null;
 
 /**
  * Разобранные ответы по названию продукта.
@@ -55,20 +57,43 @@ function getDb() {
     cache.clear();
   }
 
+  openError = null;
   if (!fs.existsSync(file)) return null;
 
   // Требуем модуль лениво: без него сервер обязан подниматься как прежде.
   const Database = require("better-sqlite3");
-  db = new Database(file, { readonly: true, fileMustExist: true });
-  openedPath = file;
-  return db;
+  try {
+    const conn = new Database(file, { readonly: true, fileMustExist: true });
+    // Открыть мало: недописанная база от прерванного импорта открывается, а
+    // падает уже на первом запросе — рядом с ней лежит журнал, и SQLite хочет
+    // его откатить, чего в режиме чтения сделать не может. Поэтому пробуем
+    // прямо здесь, пока ошибку ещё есть куда деть.
+    conn.prepare("SELECT COUNT(*) FROM sqlite_master").get();
+    db = conn;
+    openedPath = file;
+    return db;
+  } catch (e) {
+    // Файл есть, а открыть нельзя: чаще всего это недописанная база от
+    // прерванного импорта. Слой промышленных данных должен в таком случае
+    // просто не работать — а не ронять каждый запрос к продуктам.
+    db = null;
+    openedPath = null;
+    openError = e.message;
+    return null;
+  }
 }
 
 /** Сведения о подключённой базе — для интерфейса и диагностики. */
 function status() {
   const conn = getDb();
   if (!conn) {
-    return { ready: false, path: dbPath(), reason: "Файл базы ГИСП не найден" };
+    return {
+      ready: false,
+      path: dbPath(),
+      reason: openError
+        ? `Файл базы ГИСП не читается: ${openError}. Похоже на недописанную базу — повторите импорт.`
+        : "Файл базы ГИСП не найден",
+    };
   }
 
   try {
@@ -209,7 +234,10 @@ function keepBestOverlap(rows, rawName) {
 
   let best = 0;
   const scored = rows.map((row) => {
-    const rowStems = new Set(words(row.name_stem || ""));
+    // Усечённые слова считаем из названия на месте: колонки name_stem в базе
+    // нет — она нужна была только полнотекстовому индексу и место занимала
+    // впустую. Строк тут не больше двух сотен, и ответ кладётся в кэш.
+    const rowStems = new Set(words(stemName(row.name || "")));
     let score = 0;
     for (const s of queryStems) if (rowStems.has(s)) score += 1;
     if (score > best) best = score;

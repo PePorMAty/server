@@ -75,6 +75,14 @@ const ALIASES = {
     "местонахождение",
     "адрес",
   ],
+  // Запасной адрес. В выгрузке их два, и «фактический адрес производителя»
+  // заполнен не всегда: у части записей место указано только адресом
+  // производственных помещений. Берём его, когда основной пуст.
+  region_alt: [
+    "адрес производственных помещений",
+    "адрес производства",
+    "адрес места производства",
+  ],
   okpd2: ["окпд2", "окпд 2", "код окпд2", "код окпд"],
   tnved: ["тнвэд", "тн вэд", "код тн вэд"],
   reg_number: [
@@ -416,6 +424,23 @@ async function main() {
         (tally.rows ? `  (${Math.round((archived * 100) / tally.rows)}%)` : ""));
       console.log(`  уникальных продуктов: ${tally.names.size}`);
 
+      // Поле, пустое у большинства строк, обычно значит не «данных нет», а
+      // «взяли не ту колонку»: в выгрузке одно и то же сведение бывает
+      // разложено по двум, и заполнена вторая.
+      const sparse = Object.entries(tally.empty)
+        .filter(([, n]) => n > tally.rows / 2)
+        .sort((a, b) => b[1] - a[1]);
+
+      if (sparse.length) {
+        console.log("\nПоля, пустые больше чем у половины строк:");
+        for (const [field, n] of sparse) {
+          console.log(
+            `  ${field.padEnd(12)} пусто у ${n} из ${tally.rows}` +
+              ` (${Math.round((n * 100) / tally.rows)}%)`,
+          );
+        }
+      }
+
       console.log("\nСколько займёт база:");
       console.log(`  со всеми записями:    ~${mb(tally.bytes * 1.41)} МБ`);
       if (archived) {
@@ -492,7 +517,30 @@ async function main() {
   let ftsInsert = null;
   const stats = { skipped: 0, skippedArchived: 0, written: 0 };
   const writing = !args.dryRun && !args.stats;
-  const tally = { rows: 0, active: 0, bytes: 0, names: new Set() };
+
+  // Импорт долгий, и его вполне могут прервать с клавиатуры. Недописанная база
+  // остаётся на диске, но открыть её нельзя: сервер на такой файл отвечал бы
+  // ошибкой на каждый запрос к продуктам. Убираем за собой сами.
+  let done = false;
+  const cleanup = (signal) => {
+    if (done || !writing) process.exit(130);
+    done = true;
+    try {
+      if (db) db.close();
+    } catch {
+      // Соединение уже нерабочее — файл всё равно удаляем.
+    }
+    try {
+      if (fs.existsSync(args.out)) fs.unlinkSync(args.out);
+      console.log(`\n\nИмпорт прерван (${signal}). Недописанная база удалена.`);
+    } catch (e) {
+      console.error(`\n\nИмпорт прерван. Удалите ${args.out} вручную: ${e.message}`);
+    }
+    process.exit(130);
+  };
+  process.on("SIGINT", () => cleanup("Ctrl+C"));
+  process.on("SIGTERM", () => cleanup("SIGTERM"));
+  const tally = { rows: 0, active: 0, bytes: 0, names: new Set(), empty: {} };
   const preview = [];
 
   const setup = (headerRow) => {
@@ -567,6 +615,9 @@ async function main() {
         "INSERT INTO products_fts(rowid, name_stem) VALUES (?, ?)",
       );
       db.exec("BEGIN");
+      // Выгрузка на 150 МБ читается с полминуты, и до первой сотни тысяч строк
+      // экран молчал — со стороны это неотличимо от зависшей программы.
+      console.log(`\nПишем базу в ${args.out}. Это займёт минуту-две.`);
     }
   };
 
@@ -592,7 +643,7 @@ async function main() {
       tnved: get("tnved"),
       producer,
       inn: cleanInn(get("inn")),
-      region: extractRegion(get("region")),
+      region: extractRegion(get("region") || get("region_alt")),
       reg_number: get("reg_number"),
       reg_date: get("reg_date"),
       valid_until: get("valid_until"),
@@ -615,10 +666,13 @@ async function main() {
       tally.rows += 1;
       if (record.status === "active") tally.active += 1;
       tally.names.add(record.name_norm);
-      for (const v of Object.values(record)) {
+      for (const [k, v] of Object.entries(record)) {
         if (v) tally.bytes += Buffer.byteLength(String(v), "utf8");
+        // Пустое поле у большинства строк — повод перепроверить колонку:
+        // в выгрузке одно и то же сведение бывает разложено по двум.
+        else tally.empty[k] = (tally.empty[k] ?? 0) + 1;
       }
-      if (tally.rows % 100000 === 0) {
+      if (tally.rows % 25000 === 0) {
         console.log(`  прочитано строк: ${tally.rows}`);
       }
       return true;
@@ -628,8 +682,8 @@ async function main() {
       const { lastInsertRowid } = insert.run(record);
       ftsInsert.run(lastInsertRowid, stemName(name));
       stats.written += 1;
-      if (stats.written % 100000 === 0) {
-        console.log(`  обработано строк: ${stats.written}`);
+      if (stats.written % 25000 === 0) {
+        console.log(`  записано строк: ${stats.written}`);
       }
     }
 
