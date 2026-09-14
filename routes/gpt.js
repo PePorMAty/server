@@ -4,7 +4,11 @@ const axios = require("axios");
 
 // Общий транспорт к моделям: умеет выбирать провайдера (OpenAI/DashScope) и
 // модель, присланные клиентом, и приводит ответ к единому виду.
-const { callOpenAIResponsesRaw, extractOutputText } = require("./sources/utils");
+const {
+  callOpenAIResponsesRaw,
+  extractOutputText,
+  explainBadAnswer,
+} = require("./sources/utils");
 const {
   PROMPT_LAYOUT_FILE,
   readJson,
@@ -69,6 +73,8 @@ router.post("/gpt", async (req, res) => {
       promptLayout?.trim() || process.env.GPT_PROMT_LAYOUT || "";
     const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
+    const ai = aiChoice(req.body);
+
     const gptResponse = await callOpenAIResponsesRaw({
       payload: {
         model: "gpt-4.1",
@@ -78,14 +84,16 @@ router.post("/gpt", async (req, res) => {
       },
       // лучше не бесконечно:
       timeoutMs: 35 * 60 * 1000,
-      ...aiChoice(req.body),
+      ...ai,
     });
 
     if (aborted) return;
 
     const text = extractOutputText(gptResponse);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("GPT did not return JSON");
+    if (!jsonMatch) {
+      throw new Error(explainBadAnswer(gptResponse, text, ai.model));
+    }
 
     const parsedJSON = JSON.parse(jsonMatch[0]);
 
@@ -175,6 +183,8 @@ ${leafNodes.join(", ")}
 }
 `;
 
+    const ai = aiChoice(req.body);
+
     const gptResponse = await callOpenAIResponsesRaw({
       payload: {
         model: "gpt-4.1",
@@ -182,13 +192,15 @@ ${leafNodes.join(", ")}
         temperature: 0.2,
         max_output_tokens: 6000,
       },
-      ...aiChoice(req.body),
+      ...ai,
     });
 
     const text = extractOutputText(gptResponse);
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("GPT did not return JSON");
+    if (!jsonMatch) {
+      throw new Error(explainBadAnswer(gptResponse, text, ai.model));
+    }
 
     const parsedJSON = JSON.parse(jsonMatch[0]);
 

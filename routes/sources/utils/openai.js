@@ -98,7 +98,15 @@ function responsesToChatParams(params) {
 }
 
 function chatToResponsesFormat(chatResp) {
-  const content = chatResp.choices?.[0]?.message?.content || "";
+  const choice = chatResp.choices?.[0];
+  const content = choice?.message?.content || "";
+
+  // Рассуждающие модели DashScope кладут размышления отдельным полем. Когда
+  // весь бюджет токенов уходит туда, content приходит пустым — без этого
+  // признака причину пустого ответа было не отличить от любой другой.
+  const reasoning = choice?.message?.reasoning_content || "";
+  const cutByLimit = choice?.finish_reason === "length";
+
   return {
     output_text: content,
     output: [
@@ -108,7 +116,11 @@ function chatToResponsesFormat(chatResp) {
         content: [{ type: "output_text", text: content }],
       },
     ],
-    status: "completed",
+    status: cutByLimit ? "incomplete" : "completed",
+    ...(cutByLimit
+      ? { incomplete_details: { reason: "max_output_tokens" } }
+      : {}),
+    reasoningOnly: !content.trim() && reasoning.trim().length > 0,
   };
 }
 
@@ -132,6 +144,50 @@ function extractOutputText(resp) {
   }
 
   return parts.join("\n").trim();
+}
+
+/**
+ * Почему ответ модели не годится — человеческим языком.
+ *
+ * Прежние сообщения («GPT did not return JSON») не говорили пользователю
+ * ничего: непонятно, виноват сервер, сеть или выбранная модель. Здесь
+ * различаются реальные причины, и текст уходит прямо в интерфейс.
+ *
+ * @param resp   ответ транспорта (уже приведённый к виду Responses API)
+ * @param text   извлечённый из него текст
+ * @param model  модель, которой отправляли запрос
+ */
+function explainBadAnswer(resp, text, model) {
+  const who = model ? `Модель «${model}»` : "Модель";
+
+  const cutByLimit =
+    resp?.status === "incomplete" &&
+    resp?.incomplete_details?.reason === "max_output_tokens";
+
+  // Рассуждающие модели умеют потратить весь бюджет на размышления и не
+  // написать ответа: у DashScope это отдельное поле, у OpenAI — блок reasoning
+  // в output без текстового сообщения.
+  const reasoningOnly =
+    resp?.reasoningOnly === true ||
+    (!text &&
+      Array.isArray(resp?.output) &&
+      resp.output.some((item) => item?.type === "reasoning"));
+
+  if (!text) {
+    if (reasoningOnly) {
+      return `${who} израсходовала весь запас токенов на размышления и не выдала ответ. Выберите модель попроще или сократите запрос.`;
+    }
+    if (cutByLimit) {
+      return `${who} упёрлась в предел длины ответа и не успела ничего вернуть. Сократите запрос или выберите другую модель.`;
+    }
+    return `${who} вернула пустой ответ. Попробуйте повторить запрос или выбрать другую модель.`;
+  }
+
+  if (cutByLimit) {
+    return `Ответ модели «${model}» оборвался на пределе длины — граф из него не собрать. Сократите запрос или выберите другую модель.`;
+  }
+
+  return `${who} ответила обычным текстом вместо графа в формате JSON. Попробуйте повторить запрос или выбрать другую модель.`;
 }
 
 function safeJsonParse(text) {
@@ -399,6 +455,7 @@ function pickTechnologyBlocksFromSources(sources, max = 5) {
 
 module.exports = {
   extractOutputText,
+  explainBadAnswer,
   safeJsonParse,
   callOpenAIResponses,
   callOpenAIResponsesRaw,

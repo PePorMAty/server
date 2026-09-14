@@ -8,6 +8,7 @@ const {
 
 const {
   extractOutputText,
+  explainBadAnswer,
   safeJsonParse,
   callOpenAIResponses,
   callOpenAIResponsesRaw,
@@ -76,6 +77,7 @@ module.exports = {
   buildSourcesPromptUp,
   buildAggregatePrompts,
   extractOutputText,
+  explainBadAnswer,
   safeJsonParse,
   callOpenAIResponses,
   callOpenAIResponsesRaw,
