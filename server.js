@@ -3,7 +3,9 @@ const { sequelize } = require("./models");
 require("dotenv").config();
 
 const graphRoutes = require("./routes/gpt");
-const graphFileRoutes = require("./routes/graph-files");
+const graphFileRoutes = require("./routes/graph-files/graph-files");
+const graphBookmarks = require("./routes/graph-files/bookmarks");
+const graphHistory = require("./routes/graph-files/history");
 const graphSources = require("./routes/sources/sources");
 const graphAggregate = require("./routes/sources/aggregate");
 const chainRoutes = require("./routes/chain/chain");
@@ -81,7 +83,11 @@ app.use("/api/graphs", graphRoutes);
 app.use("/api/graphs", graphSources);
 app.use("/api/graphs", graphAggregate);
 app.use("/api/graphs", chainRoutes);
+// Закладки и история монтируются на тот же префикс: их пути на сегмент длиннее
+// (/:id/bookmarks), поэтому с «/:id» графов не конфликтуют.
 app.use("/api/graph-files", graphFileRoutes);
+app.use("/api/graph-files", graphBookmarks);
+app.use("/api/graph-files", graphHistory);
 app.use("/api/graphs", fillCardRouter);
 app.use("/api/graphs", stepSources);
 app.use("/api/graphs", stepAggregate);
