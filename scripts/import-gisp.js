@@ -13,9 +13,8 @@
 //   --dry-run           ничего не писать: показать, как разобрались колонки,
 //                       и первые строки
 //
-// Поддерживаются CSV, TSV, JSON (массив) и JSONL. XLSX сначала сохраните как
-// CSV: разбор книги Excel потянул бы за собой тяжёлую зависимость ради одного
-// скрипта.
+// Поддерживаются XLSX, CSV, TSV, JSON (массив) и JSONL. Книга Excel читается
+// потоком: распакованный лист на сотни тысяч строк в память не помещается.
 //
 // Первым делом прогоните с --dry-run: скрипт покажет найденные заголовки и то,
 // как он их понял. Если поле не опознано — добавьте его в ALIASES ниже или
@@ -25,6 +24,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { detectDelimiter, peek, forEachRow } = require("./lib/csv-stream");
+const { forEachXlsxRow } = require("./lib/xlsx-stream");
 const { normalizeName, stemName } = require("../routes/industry/utils/normalize");
 const { DEFAULT_DB_PATH } = require("../routes/industry/utils/store");
 
@@ -106,10 +106,21 @@ function normalizeStatus(raw) {
   return "active";
 }
 
-/** ИНН в выгрузках приходит и числом, и с пробелами. */
+/**
+ * ИНН в выгрузках приходит и числом, и с пробелами.
+ *
+ * У ИНН ровно 10 цифр (организация) или 12 (ИП), и он вполне может начинаться
+ * с нуля: Башкортостан — 02, Бурятия — 03. Excel хранит такую ячейку числом и
+ * ведущий ноль теряет, поэтому 0266010001 приезжает как 266010001. Возвращаем
+ * недостающий ноль, если длина отличается от нормы ровно на единицу: по ИНН мы
+ * склеиваем производителей между собой, и обрезанный номер разводит одну
+ * компанию на две.
+ */
 function cleanInn(raw) {
   const digits = String(raw ?? "").replace(/\D+/g, "");
-  return digits || null;
+  if (!digits) return null;
+  if (digits.length === 9 || digits.length === 11) return digits.padStart(digits.length + 1, "0");
+  return digits;
 }
 
 /* ───────────────────────────── чтение файла ───────────────────────────── */
@@ -223,15 +234,15 @@ async function main() {
   }
 
   const ext = path.extname(args.file).toLowerCase();
-  if (ext === ".xlsx" || ext === ".xls") {
+  if (ext === ".xls") {
     console.error(
-      "Книги Excel скрипт не читает. Сохраните лист как CSV (UTF-8) и\n" +
-        "передайте его — разбор .xlsx потянул бы тяжёлую зависимость ради\n" +
-        "одного скрипта.",
+      "Старый формат .xls скрипт не читает. Сохраните файл как .xlsx или\n" +
+        "как CSV (UTF-8).",
     );
     process.exit(1);
   }
 
+  const isXlsx = ext === ".xlsx";
   const isJson = ext === ".json" || ext === ".jsonl" || ext === ".ndjson";
 
   /* ── заголовки и соответствие колонок ── */
@@ -240,7 +251,9 @@ async function main() {
   let delimiter = ";";
   let jsonRows = null;
 
-  if (isJson) {
+  if (isXlsx) {
+    header = null; // заголовок придёт с первой непустой строкой листа
+  } else if (isJson) {
     jsonRows = readJsonRows(args.file);
     header = Object.keys(jsonRows[0] ?? {});
   } else {
@@ -386,7 +399,9 @@ async function main() {
     return true;
   };
 
-  if (isJson) {
+  if (isXlsx) {
+    await forEachXlsxRow(args.file, { onHeader: setup, onRow: handleRow });
+  } else if (isJson) {
     setup(header);
     for (let i = 0; i < jsonRows.length; i++) {
       if (handleRow(jsonRows[i], i + 1) === false) break;
