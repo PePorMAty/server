@@ -42,11 +42,13 @@ router.post("/gpt/chain", async (req, res) => {
         .status(400)
         .json({ success: false, error: "techText is required" });
     }
-    if (!process.env.GPT_API_KEY) {
-      return res
-        .status(500)
-        .json({ success: false, error: "GPT_API_KEY is not set in env" });
-    }
+    // Провайдера и модель выбирает пользователь на клиенте; ключ проверяет сам
+    // транспорт — у каждого провайдера он свой, и проверка GPT_API_KEY здесь
+    // отбивала бы запросы к DashScope.
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
 
     let extra = "";
     let last = null;
@@ -56,6 +58,7 @@ router.post("/gpt/chain", async (req, res) => {
       const USER = buildChainUserContent(techText, extra);
 
       const payload = {
+        // Дефолт на случай, если клиент модель не прислал.
         model: "gpt-5-mini",
         max_output_tokens: 12000,
         truncation: "auto",
@@ -68,9 +71,10 @@ router.post("/gpt/chain", async (req, res) => {
       };
 
       const resp = await callOpenAIResponsesRaw({
-        apiKey: process.env.GPT_API_KEY,
         payload,
         timeoutMs: 10 * 60 * 1000,
+        provider,
+        model,
       });
 
       if (resp?.status !== "completed") {

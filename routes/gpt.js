@@ -1,7 +1,25 @@
 // server/routes/graphs.js
 const express = require("express");
 const axios = require("axios");
+
+// Общий транспорт к моделям: умеет выбирать провайдера (OpenAI/DashScope) и
+// модель, присланные клиентом, и приводит ответ к единому виду.
+const { callOpenAIResponsesRaw, extractOutputText } = require("./sources/utils");
+const {
+  PROMPT_LAYOUT_FILE,
+  readJson,
+  writeJson,
+} = require("./graph-files/utils");
+
 const router = express.Router();
+
+/** Провайдер и модель из тела запроса. Пусто — транспорт возьмёт свои дефолты. */
+function aiChoice(body) {
+  return {
+    provider: body?.provider ? String(body.provider).trim() : undefined,
+    model: body?.model ? String(body.model).trim() : undefined,
+  };
+}
 
 // Основной endpoint для создания графа
 router.post("/gpt", async (req, res) => {
@@ -51,27 +69,21 @@ router.post("/gpt", async (req, res) => {
       promptLayout?.trim() || process.env.GPT_PROMT_LAYOUT || "";
     const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
-    const gptResponse = await axios.post(
-      "https://api.openai.com/v1/responses",
-      {
+    const gptResponse = await callOpenAIResponsesRaw({
+      payload: {
         model: "gpt-4.1",
         input: fullPrompt,
         temperature: 0.3,
         max_output_tokens: 12000,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.GPT_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        // лучше не бесконечно:
-        timeout: 35 * 60 * 1000,
-      },
-    );
+      // лучше не бесконечно:
+      timeoutMs: 35 * 60 * 1000,
+      ...aiChoice(req.body),
+    });
 
     if (aborted) return;
 
-    const text = gptResponse.data.output?.[0]?.content?.[0]?.text || "";
+    const text = extractOutputText(gptResponse);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("GPT did not return JSON");
 
@@ -94,10 +106,41 @@ router.post("/gpt", async (req, res) => {
   }
 });
 
-router.get("/prompt-layout", (req, res) => {
-  res.json({
-    promptLayout: process.env.GPT_PROMT_LAYOUT || "",
-  });
+// Шаблон промта для раздела «Создание графа». Пользователь может его править,
+// поэтому правка живёт в файле, а переменная окружения остаётся дефолтом: без
+// файла (и после его удаления) отдаём то же, что и раньше.
+router.get("/prompt-layout", async (req, res) => {
+  try {
+    const stored = await readJson(PROMPT_LAYOUT_FILE);
+    res.json({
+      promptLayout:
+        typeof stored?.promptLayout === "string"
+          ? stored.promptLayout
+          : process.env.GPT_PROMT_LAYOUT || "",
+    });
+  } catch (e) {
+    console.error("Read prompt layout error:", e);
+    res.status(500).json({ error: "Failed to read prompt layout" });
+  }
+});
+
+router.put("/prompt-layout", async (req, res) => {
+  try {
+    const { promptLayout } = req.body ?? {};
+    if (typeof promptLayout !== "string") {
+      return res.status(400).json({ error: "promptLayout must be a string" });
+    }
+
+    await writeJson(PROMPT_LAYOUT_FILE, {
+      promptLayout,
+      updatedAt: new Date().toISOString(),
+    });
+
+    res.json({ success: true, promptLayout });
+  } catch (e) {
+    console.error("Save prompt layout error:", e);
+    res.status(500).json({ error: "Failed to save prompt layout" });
+  }
 });
 
 // --------------------------
@@ -132,24 +175,17 @@ ${leafNodes.join(", ")}
 }
 `;
 
-    const gptResponse = await axios.post(
-      "https://api.openai.com/v1/responses",
-      {
+    const gptResponse = await callOpenAIResponsesRaw({
+      payload: {
         model: "gpt-4.1",
         input: prompt,
         temperature: 0.2,
         max_output_tokens: 6000,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.GPT_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 0,
-      },
-    );
+      ...aiChoice(req.body),
+    });
 
-    const text = gptResponse.data.output[0].content[0].text;
+    const text = extractOutputText(gptResponse);
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("GPT did not return JSON");
