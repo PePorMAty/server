@@ -47,13 +47,28 @@ const ALIASES = {
   producer: [
     "наименование производителя",
     "производитель",
+    "предприятие",
+    "наименование предприятия",
+    "изготовитель",
     "наименование организации",
     "организация",
     "заявитель",
     "наименование юридического лица",
   ],
   inn: ["инн"],
-  region: ["регион", "субъект", "субъект рф", "местонахождение", "адрес"],
+  // Отдельной колонки региона в выгрузке ПП №719 нет: субъект приходится брать
+  // из адреса производителя. Точные названия идут первыми, чтобы совпадение
+  // считалось надёжным, а не догадкой по слову «адрес».
+  region: [
+    "регион",
+    "субъект",
+    "субъект рф",
+    "фактический адрес производителя",
+    "адрес производителя",
+    "юридический адрес",
+    "местонахождение",
+    "адрес",
+  ],
   okpd2: ["окпд2", "окпд 2", "код окпд2", "код окпд"],
   tnved: ["тнвэд", "тн вэд", "код тн вэд"],
   reg_number: [
@@ -63,8 +78,21 @@ const ALIASES = {
     "реестровая запись",
     "номер заключения",
   ],
-  reg_date: ["дата реестровой записи", "дата записи", "дата включения", "дата"],
+  reg_date: [
+    "дата реестровой записи",
+    "дата внесения в реестр",
+    "дата записи",
+    "дата включения",
+    "дата",
+  ],
   valid_until: ["срок действия", "действует до", "дата окончания"],
+  // Колонки со статусом в выгрузке ПП №719 тоже нет. Зато есть дата, когда
+  // запись прекратила действовать: заполнена — значит, запись уже не работает.
+  ended_at: [
+    "фактическая дата прекращения действия реестровой записи",
+    "дата прекращения действия",
+    "дата прекращения",
+  ],
   status_raw: ["статус", "состояние", "статус записи"],
   url: ["ссылка", "url", "адрес записи"],
 };
@@ -130,12 +158,65 @@ function detectMapping(header) {
   return { mapping, loose };
 }
 
-/** «Действует» / «В архиве» → устойчивый признак. */
-function normalizeStatus(raw) {
+/**
+ * «Действует» / «В архиве» → устойчивый признак.
+ *
+ * Колонки со статусом в выгрузке может не быть вовсе — в реестре ПП №719 её
+ * нет. Тогда смотрим на дату прекращения действия записи: заполнена — запись
+ * уже не работает. Признак важен не только для показа: по нему из нескольких
+ * записей одного производителя выбирается действующая.
+ */
+function normalizeStatus(raw, endedAt) {
   const s = normalizeName(raw);
-  if (!s) return "active";
+  if (!s) return String(endedAt ?? "").trim() ? "archived" : "active";
   if (/архив|истек|аннулир|прекращ|недейств|отозв/.test(s)) return "archived";
   return "active";
+}
+
+// Города федерального значения субъектами не выглядят: у них нет слова
+// «область» или «край», по которому субъект узнаётся в адресе.
+const FEDERAL_CITIES = ["москва", "санкт петербург", "севастополь", "байконур"];
+
+// Сравниваем по целым словам, а не выражением с \b: в JavaScript эта граница
+// считается по латинице, и «\bкрай\b» с кириллицей просто никогда не совпадёт.
+const SUBJECT_WORDS = new Set([
+  "республика", "республике", "респ",
+  "край", "крае",
+  "область", "обл", "области",
+  "округ", "округе", "ао",
+  "автономная", "автономный", "автономного",
+]);
+
+/**
+ * Субъект РФ из адреса производителя.
+ *
+ * Отдельной колонки региона в выгрузке ПП №719 нет — есть только полный адрес
+ * вида «453256, Республика Башкортостан, г. Салават, ул. Молодогвардейцев, 30».
+ * В карточке продукта нужен субъект, а не улица с индексом.
+ *
+ * Если разобрать адрес не вышло, возвращаем его целиком: показать лишнее лучше,
+ * чем молча потерять единственное указание на место.
+ */
+function extractRegion(address) {
+  const raw = String(address ?? "").trim();
+  if (!raw) return null;
+
+  const parts = raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    // Почтовый индекс и страна субъект не называют.
+    .filter((p) => !/^\d{6}$/.test(p) && !/^росси/i.test(normalizeName(p)));
+
+  const hit = parts.find((p) => {
+    const norm = normalizeName(p);
+    return (
+      norm.split(" ").some((w) => SUBJECT_WORDS.has(w)) ||
+      FEDERAL_CITIES.some((c) => norm === c || norm === `г ${c}`)
+    );
+  });
+
+  return hit ?? raw;
 }
 
 /**
@@ -208,6 +289,7 @@ function createDb(out) {
       reg_number  TEXT,
       reg_date    TEXT,
       valid_until TEXT,
+      ended_at    TEXT,
       status      TEXT NOT NULL,
       status_raw  TEXT,
       url         TEXT
@@ -425,10 +507,10 @@ async function main() {
       insert = db.prepare(
         `INSERT INTO products
            (name, name_norm, name_stem, okpd2, tnved, producer, inn, region,
-            reg_number, reg_date, valid_until, status, status_raw, url)
+            reg_number, reg_date, valid_until, ended_at, status, status_raw, url)
          VALUES (@name, @name_norm, @name_stem, @okpd2, @tnved, @producer, @inn,
-                 @region, @reg_number, @reg_date, @valid_until, @status,
-                 @status_raw, @url)`,
+                 @region, @reg_number, @reg_date, @valid_until, @ended_at,
+                 @status, @status_raw, @url)`,
       );
       db.exec("BEGIN");
     }
@@ -457,12 +539,13 @@ async function main() {
       tnved: get("tnved"),
       producer,
       inn: cleanInn(get("inn")),
-      region: get("region"),
+      region: extractRegion(get("region")),
       reg_number: get("reg_number"),
       reg_date: get("reg_date"),
       valid_until: get("valid_until"),
+      ended_at: get("ended_at"),
       status_raw: get("status_raw"),
-      status: normalizeStatus(get("status_raw")),
+      status: normalizeStatus(get("status_raw"), get("ended_at")),
       url: get("url"),
     };
 

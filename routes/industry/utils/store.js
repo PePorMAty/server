@@ -115,6 +115,10 @@ function toEntry(row) {
     statusLabel: row.status_raw || (row.status === "active" ? "Действует" : "В архиве"),
     regNumber: row.reg_number || null,
     regDate: row.reg_date || null,
+    // Дата, когда запись перестала действовать. В выгрузке ПП №719 колонки со
+    // статусом нет, и признак «в архиве» выводится как раз отсюда — значит,
+    // стоит показать и саму дату, а не только ярлык.
+    endedAt: row.ended_at || null,
     url: row.url || null,
   };
 }
