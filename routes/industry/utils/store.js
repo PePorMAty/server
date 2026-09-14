@@ -17,6 +17,7 @@ const {
   words,
 } = require("./normalize");
 const { regionByInn } = require("./regions");
+const { shortenCompany } = require("./company");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
 
@@ -132,7 +133,11 @@ function status() {
 /** Строка реестра → вид, в котором её ждёт интерфейс. */
 function toEntry(row) {
   return {
-    producer: row.producer,
+    // Показываем сокращённое название, полное отдаём рядом: в таблице
+    // «ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ТЕХНОКЕРАМИКА"» занимает три
+    // строки, но в подсказке оно нужно как есть — это официальное имя.
+    producer: shortenCompany(row.producer),
+    producerFull: row.producer,
     inn: row.inn || null,
     // Регион берём из выгрузки, а если там пусто — выводим из ИНН. В реестре
     // ПП №719 адрес не заполнен ни у одной записи, так что на деле работает
