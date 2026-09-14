@@ -18,6 +18,10 @@ router.post("/gpt/fill-card", async (req, res) => {
 
   try {
     const nodeType = String(req.body?.nodeType || "product").trim(); // ✅
+    const provider = req.body?.provider
+      ? String(req.body.provider).trim()
+      : undefined;
+    const model = req.body?.model ? String(req.body.model).trim() : undefined;
     if (!["product", "transformation"].includes(nodeType)) {
       return res.status(400).json({
         success: false,
@@ -63,12 +67,6 @@ router.post("/gpt/fill-card", async (req, res) => {
       });
     }
 
-    if (!process.env.GPT_API_KEY) {
-      return res
-        .status(500)
-        .json({ success: false, error: "GPT_API_KEY is not set in env" });
-    }
-
     const systemPrompt = customSystemPrompt
       ? String(customSystemPrompt)
       : buildFillCardSystemPrompt({ nodeType, productName });
@@ -76,7 +74,8 @@ router.post("/gpt/fill-card", async (req, res) => {
     const useWebSearch = !!req.body?.useWebSearch;
 
     const openaiResp = await callOpenAIFillCard({
-      apiKey: process.env.GPT_API_KEY,
+      provider,
+      model,
       systemPrompt,
       userPrompt,
       nodeType,
@@ -84,10 +83,16 @@ router.post("/gpt/fill-card", async (req, res) => {
       useWebSearch,
     });
 
+    // Модель называем в тексте ошибки: без неё в UI не видно, какая именно не
+    // справилась, а провайдеров и моделей теперь несколько.
+    const usedBy = `${provider || process.env.AI_PROVIDER || "openai"}/${
+      model || "по умолчанию"
+    }`;
+
     if (openaiResp?.status !== "completed") {
       return res.status(502).json({
         success: false,
-        error: "OpenAI response status is not completed",
+        error: `Модель ${usedBy}: ответ не завершён`,
         debug: {
           status: openaiResp?.status,
           incomplete_details: openaiResp?.incomplete_details ?? null,
@@ -100,9 +105,14 @@ router.post("/gpt/fill-card", async (req, res) => {
     const card = parsed?.productCard;
 
     if (!card || typeof card !== "object") {
+      // Пустой ответ и ответ не по схеме — разные причины и разные лечения:
+      // первое обычно значит, что весь бюджет токенов ушёл в размышления,
+      // второе — что модель проигнорировала json_schema.
       return res.status(502).json({
         success: false,
-        error: "OpenAI did not return productCard",
+        error: text
+          ? `Модель ${usedBy} вернула ответ не по схеме (нет productCard)`
+          : `Модель ${usedBy} вернула пустой ответ`,
         debug: { output_text_preview: (text || "").slice(0, 1200) },
       });
     }
@@ -189,18 +199,12 @@ module.exports = router;
       });
     }
 
-    if (!process.env.GPT_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: "GPT_API_KEY is not set in env",
-      });
-    }
-
     const systemPrompt = buildFillCardSystemPrompt(productName);
     const userPrompt = buildFillCardUserPrompt(inputText);
 
     const openaiResp = await callOpenAIFillCard({
-      apiKey: process.env.GPT_API_KEY,
+      provider,
+      model,
       systemPrompt,
       userPrompt,
     });
