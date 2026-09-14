@@ -127,7 +127,11 @@ function cleanInn(raw) {
 
 /** Прочитать JSON или JSONL целиком (такие выгрузки обычно заметно меньше). */
 function readJsonRows(file) {
-  const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
+  // U+FEFF — метка кодировки в начале файла. Пишем её escape-последовательностью,
+  // а не самим символом: символ невидим, и любой инструмент, который тронет
+  // кодировку файла, молча превратит его в вопросительный знак — регулярное
+  // выражение станет /^?/, и скрипт перестанет разбираться целиком.
+  const text = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
   const trimmed = text.trimStart();
 
   if (trimmed.startsWith("[")) {
