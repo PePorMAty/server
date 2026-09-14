@@ -71,32 +71,63 @@ const ALIASES = {
 
 const REQUIRED = ["name", "producer"];
 
-/** Опознать колонки выгрузки. Возвращает { поле: заголовок }. */
+/**
+ * Опознать колонки выгрузки.
+ *
+ * Возвращает { поле: заголовок } и отдельно набор полей, опознанных только по
+ * вхождению слова. Такое совпадение — догадка: в выгрузке реестра «Фактический
+ * адрес производителя» ничем не хуже подходит под слово «адрес», чем настоящая
+ * колонка региона. Помечаем их, чтобы в сухом прогоне было видно, чему верить.
+ */
 function detectMapping(header) {
   const normalized = header.map((h) => ({ raw: h, norm: normalizeName(h) }));
   const mapping = {};
+  const loose = new Set();
   const taken = new Set();
 
-  for (const [field, aliases] of Object.entries(ALIASES)) {
-    // Сначала точное совпадение, потом вхождение — иначе «Адрес записи»
-    // перехватил бы поле региона у «Адрес».
+  for (const [field, all] of Object.entries(ALIASES)) {
+    // Пустой псевдоним содержится в любом заголовке, поэтому одно поле забрало
+    // бы первую попавшуюся колонку, второе — вторую, и так по порядку. Сам по
+    // себе список такой не бывает — но станет, если файл скрипта испортить при
+    // переносе: кириллица превратится в мусор, и от названий ничего не
+    // останется. Молча сопоставлять колонки после этого нельзя.
+    const aliases = all.filter((a) => a.length >= 3);
+    if (aliases.length !== all.length) {
+      throw new Error(
+        "Таблица названий колонок повреждена — в ней пустые значения.\n" +
+          "Скорее всего, файл scripts/import-gisp.js перенесли на сервер в\n" +
+          "текстовом режиме и кириллица в нём испорчена. Перенесите заново в\n" +
+          "двоичном (binary) режиме или заберите через git.",
+      );
+    }
+    // Сначала точное совпадение по всем полям сразу было бы правильнее, но
+    // порядок полей в ALIASES и так идёт от самых узких названий к широким.
     let hit = normalized.find(
-      (h) => !taken.has(h.raw) && aliases.includes(h.norm),
+      (h) => !taken.has(h.raw) && h.norm && aliases.includes(h.norm),
     );
+
     if (!hit) {
       hit = normalized.find(
         (h) =>
           !taken.has(h.raw) &&
-          aliases.some((a) => h.norm.includes(a) || a.includes(h.norm)),
+          // Пустой заголовок содержится в любом псевдониме, а короткий —
+          // в слишком многих. Без этого условия первое же поле забирало бы
+          // себе безымянную колонку.
+          h.norm.length >= 4 &&
+          aliases.some(
+            (a) => h.norm.includes(a) || (a.includes(h.norm) && h.norm.length >= 4),
+          ),
       );
+      if (hit) loose.add(field);
     }
+
     if (hit) {
       mapping[field] = hit.raw;
       taken.add(hit.raw);
     }
   }
 
-  return mapping;
+  return { mapping, loose };
 }
 
 /** «Действует» / «В архиве» → устойчивый признак. */
@@ -213,13 +244,18 @@ function parseArgs(argv) {
   return args;
 }
 
+/** Разобрать --map. Возвращает поля, заданные вручную: им догадки не нужны. */
 function applyManualMap(mapping, spec) {
+  const set = new Set();
   for (const pair of String(spec).split(",")) {
     const [field, ...rest] = pair.split("=");
     const column = rest.join("=").trim();
-    if (field && column) mapping[field.trim()] = column;
+    if (field && column) {
+      mapping[field.trim()] = column;
+      set.add(field.trim());
+    }
   }
-  return mapping;
+  return set;
 }
 
 async function main() {
@@ -334,26 +370,54 @@ async function main() {
 
   const setup = (headerRow) => {
     header = headerRow;
-    mapping = detectMapping(header);
-    if (args.map) mapping = applyManualMap(mapping, args.map);
+    const detected = detectMapping(header);
+    mapping = detected.mapping;
+    const loose = detected.loose;
+    if (args.map) {
+      for (const field of applyManualMap(mapping, args.map)) loose.delete(field);
+    }
+
+    // Сначала — все колонки файла, как они названы. Без этого списка, когда
+    // сопоставление уехало, не из чего составить --map: выгрузки бывают на
+    // три десятка колонок, и глазами в файл лезть неоткуда.
+    const byColumn = new Map();
+    for (const [field, col] of Object.entries(mapping)) byColumn.set(col, field);
 
     console.log(`Колонок в файле: ${header.length}`);
-    console.log("Соответствие полей:");
+    console.log("\nКолонки и то, чем они признаны:");
+    header.forEach((col, i) => {
+      const field = byColumn.get(col);
+      const tail = field
+        ? loose.has(field)
+          ? `→ ${field}  (догадка, проверьте)`
+          : `→ ${field}`
+        : "";
+      console.log(`  ${String(i + 1).padStart(2)}. ${col || "(без названия)"}   ${tail}`);
+    });
+
+    console.log("\nПоля импорта:");
     for (const field of Object.keys(ALIASES)) {
       const col = mapping[field];
-      const mark = col ? "✅" : REQUIRED.includes(field) ? "❌" : "—";
-      console.log(`  ${mark} ${field.padEnd(12)} ${col ?? "(не найдено)"}`);
+      const mark = col ? (loose.has(field) ? "?" : "+") : REQUIRED.includes(field) ? "!" : "-";
+      const note = col ? (loose.has(field) ? `${col}   (догадка)` : col) : "(не найдено)";
+      console.log(`  ${mark} ${field.padEnd(12)} ${note}`);
     }
 
     const missing = REQUIRED.filter((f) => !mapping[f]);
     if (missing.length) {
       console.error(
         `\nНе найдены обязательные поля: ${missing.join(", ")}.\n` +
-          `Заголовки файла:\n  ${header.join("\n  ")}\n\n` +
-          `Задайте вручную, например:\n` +
-          `  --map "name=Наименование продукции,producer=Изготовитель"`,
+          `Задайте их вручную по списку колонок выше, например:\n` +
+          `  --map "name=Наименование продукции,producer=Предприятие"`,
       );
       process.exit(1);
+    }
+
+    if (loose.size) {
+      console.log(
+        `\nПометка «догадка» значит, что колонка подошла лишь по части названия.\n` +
+          `Если поле определено неверно — поправьте: --map "поле=Точное название колонки"`,
+      );
     }
 
     if (!args.dryRun) {
