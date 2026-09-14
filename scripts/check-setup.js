@@ -19,13 +19,14 @@ const FILES = [
   "scripts/import-gisp.js",
   "scripts/lib/csv-stream.js",
   "scripts/lib/xlsx-stream.js",
+  "scripts/lib/zip-read.js",
   "routes/industry/industry.js",
   "routes/industry/utils/normalize.js",
   "routes/industry/utils/store.js",
 ];
 
-/** better-sqlite3 нужен и серверу, exceljs — только импорту (devDependencies). */
-const PACKAGES = ["better-sqlite3", "exceljs"];
+/** Единственный внешний пакет слоя: и серверу для поиска, и импорту для записи. */
+const PACKAGES = ["better-sqlite3"];
 
 const root = process.cwd();
 let problems = 0;
@@ -69,7 +70,7 @@ if (problems) {
   console.log(`\n  Проблем: ${problems}.`);
   console.log("  «НЕТ» у файла — его не перенесли; «БИТ» — перенесли в");
   console.log("  текстовом режиме и испортили, нужен двоичный (binary).");
-  console.log("  «НЕТ» у пакета — выполните: npm install --include=dev");
+  console.log("  «НЕТ» у пакета — выполните: npm install");
   process.exitCode = 1;
 } else {
   console.log("\n  Всё на месте. Можно запускать импорт:");
