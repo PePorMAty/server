@@ -10,6 +10,11 @@
 //                       показываем в карточке продукта)
 //   --map поле=Колонка  задать соответствие вручную, через запятую
 //   --limit <N>         обработать только первые N строк
+//   --okpd2 19,20,21    оставить только продукцию этих классов ОКПД2. Реестр
+//                       охватывает всю промышленность, а графу нужна своя
+//                       отрасль — остальное занимает место и никогда не
+//                       спрашивается. 19 — нефтепродукты, 20 — химия,
+//                       21 — фармацевтика, 22 — резина и пластмассы
 //   --only-active       не брать записи, прекратившие действие: реестр хранит
 //                       и старые, а для счётчика производителей нужны те, кто
 //                       выпускает продукт сейчас. Заметно уменьшает базу
@@ -332,12 +337,17 @@ function parseArgs(argv) {
     dryRun: false,
     stats: false,
     onlyActive: false,
+    okpd2: null,
     limit: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") args.dryRun = true;
     else if (a === "--only-active") args.onlyActive = true;
+    else if (a === "--okpd2") args.okpd2 = String(argv[++i] ?? "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
     else if (a === "--stats") args.stats = true;
     else if (a === "--out") args.out = argv[++i];
     else if (a === "--actual-at") args.actualAt = argv[++i];
@@ -441,6 +451,30 @@ async function main() {
         }
       }
 
+      const CLASS_NAMES = {
+        "10": "пищевые продукты", "13": "текстиль", "14": "одежда",
+        "16": "дерево", "17": "бумага", "19": "нефтепродукты",
+        "20": "химия", "21": "фармацевтика", "22": "резина и пластмассы",
+        "23": "стекло, керамика, бетон", "24": "металлургия",
+        "25": "металлоизделия", "26": "электроника", "27": "электрооборудование",
+        "28": "машины и оборудование", "29": "автотранспорт", "30": "прочий транспорт",
+        "32": "прочая продукция", "58": "издательство", "62": "программы",
+      };
+
+      const top = [...tally.byClass.entries()]
+        .sort((a, b) => b[1].rows - a[1].rows)
+        .slice(0, 12);
+
+      console.log("\nКрупнейшие классы ОКПД2:");
+      for (const [cls, acc] of top) {
+        console.log(
+          `  ${cls.padEnd(3)} ${(CLASS_NAMES[cls] ?? "").padEnd(24)}` +
+            ` ${String(acc.rows).padStart(8)} строк` +
+            `  ~${(acc.bytes * 1.41 / 1048576).toFixed(0).padStart(4)} МБ`,
+        );
+      }
+      console.log("  (отобрать нужные: --okpd2 19,20,21,22)");
+
       console.log("\nСколько займёт база:");
       console.log(`  со всеми записями:    ~${mb(tally.bytes * 1.41)} МБ`);
       if (archived) {
@@ -507,6 +541,9 @@ async function main() {
         `  пропущено строк без названия или производителя: ${stats.skipped}` +
         (stats.skippedArchived
           ? `\n  пропущено прекращённых записей: ${stats.skippedArchived}`
+          : "") +
+        (stats.skippedOkpd2
+          ? `\n  пропущено чужих классов ОКПД2: ${stats.skippedOkpd2}`
           : ""),
     );
   };
@@ -515,7 +552,7 @@ async function main() {
   let db = null;
   let insert = null;
   let ftsInsert = null;
-  const stats = { skipped: 0, skippedArchived: 0, written: 0 };
+  const stats = { skipped: 0, skippedArchived: 0, skippedOkpd2: 0, written: 0 };
   const writing = !args.dryRun && !args.stats;
 
   // Импорт долгий, и его вполне могут прервать с клавиатуры. Недописанная база
@@ -540,7 +577,10 @@ async function main() {
   };
   process.on("SIGINT", () => cleanup("Ctrl+C"));
   process.on("SIGTERM", () => cleanup("SIGTERM"));
-  const tally = { rows: 0, active: 0, bytes: 0, names: new Set(), empty: {} };
+  const tally = {
+    rows: 0, active: 0, bytes: 0, names: new Set(), empty: {},
+    byClass: new Map(), // класс ОКПД2 → { строк, байт }
+  };
   const preview = [];
 
   const setup = (headerRow) => {
@@ -653,6 +693,17 @@ async function main() {
       url: get("url"),
     };
 
+    // Реестр охватывает всю промышленность — от абразивов до электроники.
+    // Графу нужна одна отрасль, и записи чужих классов только занимают место:
+    // их названия никогда не окажутся в запросе.
+    if (args.okpd2) {
+      const code = String(record.okpd2 ?? "").trim();
+      if (!args.okpd2.some((prefix) => code.startsWith(prefix))) {
+        stats.skippedOkpd2 += 1;
+        return true;
+      }
+    }
+
     // Прекращённые записи в счётчике производителей всё равно не участвуют:
     // важно, кто выпускает продукт сейчас. На тесном диске их можно не хранить.
     if (args.onlyActive && record.status !== "active") {
@@ -666,8 +717,18 @@ async function main() {
       tally.rows += 1;
       if (record.status === "active") tally.active += 1;
       tally.names.add(record.name_norm);
+      // Раскладка по классам ОКПД2 нужна, чтобы решать отбор по цифрам:
+      // реестр охватывает всю промышленность, а графу нужна одна отрасль.
+      const cls = String(record.okpd2 ?? "").slice(0, 2) || "—";
+      const acc = tally.byClass.get(cls) ?? { rows: 0, bytes: 0 };
+      acc.rows += 1;
+      tally.byClass.set(cls, acc);
       for (const [k, v] of Object.entries(record)) {
-        if (v) tally.bytes += Buffer.byteLength(String(v), "utf8");
+        if (v) {
+          const n = Buffer.byteLength(String(v), "utf8");
+          tally.bytes += n;
+          acc.bytes += n;
+        }
         // Пустое поле у большинства строк — повод перепроверить колонку:
         // в выгрузке одно и то же сведение бывает разложено по двум.
         else tally.empty[k] = (tally.empty[k] ?? 0) + 1;
