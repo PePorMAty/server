@@ -457,10 +457,10 @@ async function main() {
         .sort((a, b) => b[1] - a[1]);
 
       if (sparse.length) {
-        console.log("\nПоля, пустые больше чем у половины строк:");
+        console.log("\nКолонки, пустые больше чем у половины строк:");
         for (const [field, n] of sparse) {
           console.log(
-            `  ${field.padEnd(12)} пусто у ${n} из ${tally.rows}` +
+            `  ${field.padEnd(34)} пусто у ${n} из ${tally.rows}` +
               ` (${Math.round((n * 100) / tally.rows)}%)`,
           );
         }
@@ -738,15 +738,24 @@ async function main() {
       const acc = tally.byClass.get(cls) ?? { rows: 0, bytes: 0 };
       acc.rows += 1;
       tally.byClass.set(cls, acc);
-      for (const [k, v] of Object.entries(record)) {
-        if (v) {
-          const n = Buffer.byteLength(String(v), "utf8");
-          tally.bytes += n;
-          acc.bytes += n;
-        }
-        // Пустое поле у большинства строк — повод перепроверить колонку:
-        // в выгрузке одно и то же сведение бывает разложено по двум.
-        else tally.empty[k] = (tally.empty[k] ?? 0) + 1;
+      for (const v of Object.values(record)) {
+        if (!v) continue;
+        const n = Buffer.byteLength(String(v), "utf8");
+        tally.bytes += n;
+        acc.bytes += n;
+      }
+      // Считаем пустоту по КОЛОНКАМ файла, а не по полям записи.
+      //
+      // Раньше считалось по записи — и отчёт молчал ровно о том, ради чего
+      // писался. Поля-дублёры (region_alt: «Адрес производственных помещений»)
+      // в запись не попадают: они лишь подставляются, когда основное пусто.
+      // В итоге про запасную колонку в отчёте не было ни строки, и её пустоту
+      // можно было принять за заполненность.
+      for (const [field, col] of Object.entries(mapping)) {
+        if (!col) continue;
+        if (String(row[col] ?? "").trim()) continue;
+        const key = `${field} · ${col}`;
+        tally.empty[key] = (tally.empty[key] ?? 0) + 1;
       }
       if (tally.rows % 25000 === 0) {
         console.log(`  прочитано строк: ${tally.rows}`);
