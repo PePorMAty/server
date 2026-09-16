@@ -18,6 +18,7 @@ const {
 } = require("./normalize");
 const { regionByInn } = require("./regions");
 const { shortenCompany } = require("./company");
+const { okpd2Name, tnvedName } = require("./classifiers");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
 
@@ -146,7 +147,12 @@ function toEntry(row) {
     region: row.region || regionByInn(row.inn),
     regionFromInn: !row.region && Boolean(regionByInn(row.inn)),
     product: row.name,
+    // Код и его расшифровка рядом: «20.16.10.110» сам по себе ничего не
+    // говорит, а название классификатора объясняет, к чему запись отнесена.
     okpd2: row.okpd2 || null,
+    okpd2Name: okpd2Name(row.okpd2),
+    tnved: row.tnved || null,
+    tnvedName: tnvedName(row.tnved)?.name ?? null,
     status: row.status,
     statusLabel: row.status_raw || (row.status === "active" ? "Действует" : "В архиве"),
     regNumber: row.reg_number || null,
@@ -321,6 +327,7 @@ function summarize(rows) {
     regionCount: regions.size,
     status: anyActive ? "active" : "archived",
     okpd2,
+    okpd2Name: okpd2Name(okpd2),
     producers,
   };
 }
