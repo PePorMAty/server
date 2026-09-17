@@ -105,7 +105,8 @@ function main() {
   );
   console.log(
     reg.ready
-      ? `Реестр: ${reg.entries} записей${reg.actualAt ? `, актуально на ${reg.actualAt}` : ""}`
+      ? `Реестр: ${reg.entries} записей${reg.actualAt ? `, актуально на ${reg.actualAt}` : ""}` +
+          `; слово считается общим от ${reg.rareWordLimit} записей`
       : `Реестр не подключён: ${reg.reason}`,
   );
 
@@ -130,8 +131,13 @@ function main() {
       found: hit ? hit.found : null,
       match: hit?.match ?? null,
       matchedAs: hit?.matchedAs ?? null,
-      // Название записи реестра, за которую зацепились: по нему и видно,
-      // попадание это или случайное общее слово.
+      // Слова, по которым совпало, и самое редкое из них. Название записи
+      // показывать бессмысленно: производители отсортированы по алфавиту, и
+      // первый из них может быть вовсе не тем, за кого зацепились. А слова —
+      // ровно то, на чём поиск и держится.
+      shared: hit?.sharedWords ?? [],
+      rarestWord: hit?.rarestWord ?? null,
+      rarestFreq: hit?.rarestFreq ?? null,
       sample: hit?.producers?.[0]?.product ?? null,
       entryCount: hit?.entryCount ?? 0,
     });
@@ -199,8 +205,13 @@ function main() {
     if (!weak.length) console.log("  пусто");
     for (const r of weak) {
       const via = r.matchedAs ? ` через «${r.matchedAs}»` : "";
+      const rare =
+        r.rarestWord != null
+          ? `совпало по «${r.rarestWord}» (в ${r.rarestFreq} запис.)`
+          : `совпало по: ${r.shared.join(", ")}`;
       console.log(`  ${r.label}${via}`);
-      console.log(`      → «${r.sample}» и ещё ${Math.max(r.entryCount - 1, 0)} запис.`);
+      console.log(`      ${rare}; записей: ${r.entryCount}`);
+      if (r.sample) console.log(`      напр. «${String(r.sample).slice(0, 90)}»`);
     }
   }
 

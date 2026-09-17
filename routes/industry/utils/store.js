@@ -40,6 +40,19 @@ const MAX_ENTRIES_PER_PRODUCT = 200;
  */
 const STRICT_LEVELS = new Set(["all-words", "core-words"]);
 
+/** Ступени, где совпасть могло одно-единственное слово из запроса. */
+const LOOSE_LEVELS = new Set(["partial", "prefix"]);
+
+/**
+ * Насколько редким должно быть слово, чтобы совпадение по нему что-то значило.
+ *
+ * Доля от всего реестра. Слово, встречающееся в каждой сотой записи, — это
+ * «газ», «кислота», «масло», «мастер»: совпадение по такому не говорит ни о
+ * чём. На маленькой базе доля вырождается, поэтому снизу стоит абсолютный пол.
+ */
+const RARE_SHARE = 0.01;
+const RARE_MIN = 50;
+
 let db = null;
 let openedPath = null;
 // Почему базу не удалось открыть — показываем в интерфейсе вместо пустоты.
@@ -68,6 +81,9 @@ function getDb() {
     db = null;
     openedPath = null;
     cache.clear();
+    // Частоты слов считаны по старой базе — к новой они отношения не имеют.
+    dfCache.clear();
+    rareLimitCache = null;
   }
 
   openError = null;
@@ -135,6 +151,11 @@ function status() {
       actualAt: meta.actual_at || null,
       importedAt: meta.imported_at || null,
       source: meta.source || null,
+      /**
+       * Порог редкости слова для мягких ступеней поиска. Совпадение по слову,
+       * встречающемуся чаще, ни о чём не говорит и не засчитывается.
+       */
+      rareWordLimit: rareLimit(conn),
     };
   } catch (e) {
     return { ready: false, path: dbPath(), reason: e.message };
@@ -272,12 +293,35 @@ function lookupProduct(rawName) {
 
   // Отбор может отклонить всё найденное: полнотекстовый индекс ищет по словам
   // и не знает, что слово было частью сложного прилагательного.
-  const kept = rows.length ? keepBestOverlap(rows, matchedAs) : [];
+  const picked = rows.length
+    ? keepBestOverlap(rows, matchedAs)
+    : { rows: [], shared: [] };
+
+  // Мягкая ступень могла зацепиться за одно-единственное общее слово:
+  // «Синтез-газ» приводил к «Заглушке ПЭ 100 — ГАЗ», «Элементарная сера» —
+  // к «Краске художественной серой». Отличить попадание от случайности можно
+  // по редкости слова: «хладон» встречается в реестре десятки раз и потому
+  // что-то значит, «газ» — тысячи раз и не значит ничего. Требуем, чтобы
+  // среди совпавших слов было хотя бы одно редкое.
+  let kept = picked.rows;
+  let rarest = null;
+  if (kept.length && LOOSE_LEVELS.has(match)) {
+    const limit = rareLimit(conn);
+    const freqs = picked.shared.map((s) => ({ stem: s, df: docFreq(conn, s) }));
+    freqs.sort((a, b) => a.df - b.df);
+    rarest = freqs[0] ?? null;
+    if (!rarest || rarest.df > limit) kept = [];
+  }
+
   const result = kept.length
     ? {
         ...summarize(kept),
         found: true,
         match,
+        // По каким словам совпало и насколько они редки — видно, чему верить.
+        sharedWords: picked.shared,
+        rarestWord: rarest?.stem ?? null,
+        rarestFreq: rarest?.df ?? null,
         // Нашли под другим названием — скажем, под каким: иначе в карточке
         // непонятно, почему на «ПЭНД» приехали записи про полиэтилен.
         matchedAs: normalizeName(matchedAs) === normalized ? null : matchedAs,
@@ -317,6 +361,40 @@ function dropCompoundModifiers(name) {
 }
 
 /**
+ * В скольких записях реестра встречается слово.
+ *
+ * Считается по полнотекстовому индексу, один раз на слово и на всё время
+ * работы: слова запросов повторяются от продукта к продукту, а база между
+ * переоткрытиями не меняется.
+ */
+const dfCache = new Map();
+function docFreq(conn, stem) {
+  const cached = dfCache.get(stem);
+  if (cached !== undefined) return cached;
+  let n = 0;
+  try {
+    n = conn
+      .prepare("SELECT COUNT(*) AS n FROM products_fts WHERE products_fts MATCH ?")
+      .get(`"${stem.replace(/"/g, '""')}"`).n;
+  } catch {
+    // Слово, которое индекс не принимает как запрос. Считаем редким: пусть
+    // решает совпадение, а не сбой разбора.
+    n = 0;
+  }
+  dfCache.set(stem, n);
+  return n;
+}
+
+/** Порог редкости для текущей базы. Считается один раз: база не меняется. */
+let rareLimitCache = null;
+function rareLimit(conn) {
+  if (rareLimitCache !== null) return rareLimitCache;
+  const total = conn.prepare("SELECT COUNT(*) AS n FROM products").get().n;
+  rareLimitCache = Math.max(RARE_MIN, Math.round(total * RARE_SHARE));
+  return rareLimitCache;
+}
+
+/**
  * Оставить из найденного только самое похожее.
  *
  * Последняя ступень лестницы ищет по любому из слов, и на общем слове
@@ -324,10 +402,13 @@ function dropCompoundModifiers(name) {
  * Считаем, сколько слов запроса есть в названии записи, и оставляем только
  * записи с наибольшим совпадением. Не совпало ни одного — значит, запись
  * нашлась по слову внутри сложного прилагательного, и это не наш продукт.
+ *
+ * Возвращает вместе с записями слова, по которым они совпали: на мягких
+ * ступенях по ним решается, значит ли совпадение хоть что-нибудь.
  */
 function keepBestOverlap(rows, rawName) {
   const queryStems = new Set(words(stemName(rawName)));
-  if (!queryStems.size) return rows;
+  if (!queryStems.size) return { rows, shared: [] };
 
   let best = 0;
   const scored = rows.map((row) => {
@@ -335,14 +416,19 @@ function keepBestOverlap(rows, rawName) {
     // нет — она нужна была только полнотекстовому индексу и место занимала
     // впустую. Строк тут не больше двух сотен, и ответ кладётся в кэш.
     const rowStems = new Set(words(stemName(dropCompoundModifiers(row.name || ""))));
-    let score = 0;
-    for (const s of queryStems) if (rowStems.has(s)) score += 1;
-    if (score > best) best = score;
-    return { row, score };
+    const shared = [];
+    for (const s of queryStems) if (rowStems.has(s)) shared.push(s);
+    if (shared.length > best) best = shared.length;
+    return { row, shared };
   });
 
-  if (!best) return [];
-  return scored.filter((s) => s.score === best).map((s) => s.row);
+  if (!best) return { rows: [], shared: [] };
+  const kept = scored.filter((s) => s.shared.length === best);
+  return {
+    rows: kept.map((s) => s.row),
+    // Слова, по которым совпало: объединение по оставшимся записям.
+    shared: [...new Set(kept.flatMap((s) => s.shared))],
+  };
 }
 
 /** Свернуть строки реестра в сводку по продукту. */
