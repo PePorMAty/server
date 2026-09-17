@@ -19,6 +19,7 @@ const {
 const { regionByInn } = require("./regions");
 const { shortenCompany } = require("./company");
 const { okpd2Name, tnvedName } = require("./classifiers");
+const { identify, spellingsOf } = require("./synonyms");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
 
@@ -29,6 +30,15 @@ function dbPath() {
 
 /** Сколько записей реестра тянем на один продукт. Больше в карточку не влезет. */
 const MAX_ENTRIES_PER_PRODUCT = 200;
+
+/**
+ * Ступени лестницы, которым можно доверять чужое написание вещества.
+ *
+ * Требуют совпадения всех значимых слов. Мягкие ступени («любое из слов»,
+ * «по приставке») на синонимах дают ложные попадания и потому применяются
+ * только к тому названию, которое спросили.
+ */
+const STRICT_LEVELS = new Set(["all-words", "core-words"]);
 
 let db = null;
 let openedPath = null;
@@ -173,6 +183,11 @@ function toEntry(row) {
  * первой ступени, что-то нашедшей. Уровень совпадения возвращаем вместе с
  * данными: «нашлось по одному слову» и «нашлось целиком» — разные вещи, и в
  * интерфейсе их стоит различать.
+ *
+ * Ищем не только по спрошенному названию, но и по всем известным написаниям
+ * вещества: реестр заполняют люди, и запись стоит под тем названием, какое было
+ * у заявителя. По «ПЭНД» не находится ничего, по «полиэтилену низкого давления»
+ * — находится, а вещество одно.
  */
 function lookupProduct(rawName) {
   const conn = getDb();
@@ -195,42 +210,80 @@ function lookupProduct(rawName) {
   const cached = cache.get(normalized);
   if (cached) return cached;
 
-  let rows = conn
-    .prepare(
-      `SELECT * FROM products WHERE name_norm = ? LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
-    )
-    .all(normalized);
-  let match = rows.length ? "exact" : null;
+  const spellings = spellingsOf(rawName);
+  const known = identify(rawName);
 
+  const exactStmt = conn.prepare(
+    `SELECT * FROM products WHERE name_norm = ? LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
+  );
+  const ftsStmt = conn.prepare(
+    `SELECT p.* FROM products_fts f
+     JOIN products p ON p.id = f.rowid
+     WHERE products_fts MATCH ?
+     ORDER BY rank
+     LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
+  );
+
+  let rows = [];
+  let match = null;
+  // Написание, которым нашли: по нему же считается отбор. Искали «ПЭНД», нашли
+  // по «полиэтилену низкого давления» — сверять найденное надо со вторым,
+  // иначе совпадений слов не будет ни одного и отбор выбросит всё.
+  let matchedAs = rawName;
+
+  // Точное совпадение по любому из написаний — самое надёжное, что есть.
+  for (const spelling of spellings) {
+    const found = exactStmt.all(normalizeName(spelling));
+    if (found.length) {
+      rows = found;
+      match = "exact";
+      matchedAs = spelling;
+      break;
+    }
+  }
+
+  // Лестницу проходим по написаниям целиком: сперва все точные (выше), потом
+  // все мягкие. Иначе «похоже» по первому написанию побеждало бы «точно» по
+  // второму.
   if (!rows.length) {
-    const ftsStmt = conn.prepare(
-      `SELECT p.* FROM products_fts f
-       JOIN products p ON p.id = f.rowid
-       WHERE products_fts MATCH ?
-       ORDER BY rank
-       LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
-    );
-
-    for (const step of buildQueryLadder(rawName)) {
-      try {
-        const found = ftsStmt.all(step.query);
-        if (found.length) {
-          rows = found;
-          match = step.level;
-          break;
+    outer: for (const spelling of spellings) {
+      const own = normalizeName(spelling) === normalized;
+      for (const step of buildQueryLadder(spelling)) {
+        // Мягкие ступени ищут по любому из слов, и на синонимах это даёт
+        // ложные попадания: «Незамерзайка» через «стеклоомывающую жидкость»
+        // цеплялась за «Жидкость тормозная» по общему слову. Нечёткость
+        // допустима один раз, а не дважды подряд — по чужим написаниям идём
+        // только строгими ступенями.
+        if (!own && !STRICT_LEVELS.has(step.level)) continue;
+        try {
+          const found = ftsStmt.all(step.query);
+          if (found.length) {
+            rows = found;
+            match = step.level;
+            matchedAs = spelling;
+            break outer;
+          }
+        } catch {
+          // Кривой запрос к индексу — просто пробуем следующую ступень.
         }
-      } catch {
-        // Кривой запрос к индексу — просто пробуем следующую ступень.
       }
     }
   }
 
   // Отбор может отклонить всё найденное: полнотекстовый индекс ищет по словам
   // и не знает, что слово было частью сложного прилагательного.
-  const kept = rows.length ? keepBestOverlap(rows, rawName) : [];
+  const kept = rows.length ? keepBestOverlap(rows, matchedAs) : [];
   const result = kept.length
-    ? { ...summarize(kept), found: true, match }
-    : empty;
+    ? {
+        ...summarize(kept),
+        found: true,
+        match,
+        // Нашли под другим названием — скажем, под каким: иначе в карточке
+        // непонятно, почему на «ПЭНД» приехали записи про полиэтилен.
+        matchedAs: normalizeName(matchedAs) === normalized ? null : matchedAs,
+        canon: known?.canon ?? null,
+      }
+    : { ...empty, canon: known?.canon ?? null };
 
   // Кэш растёт только на новых названиях; когда упрётся в предел — начинаем
   // заново, вытеснять по одному тут нечего оптимизировать.

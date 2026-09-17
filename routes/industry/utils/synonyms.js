@@ -1,0 +1,154 @@
+// routes/industry/utils/synonyms.js
+//
+// Справочник синонимов: «ИПБ», «Кумол» и «Изопропилбензол» — одно вещество.
+//
+// Зачем он нужен. Названием продукта пользуются как признаком равенства: по
+// нему узлы графа схлопываются при объединении и при построении по шагам, по
+// нему же ищется запись в реестре. Но у вещества названий несколько, и каждый
+// автор графа пишет своё — одно и то же вещество расползалось на три узла, а
+// поиск по реестру не находил его там, где запись была.
+//
+// Справочник лежит в reference/synonyms.txt рядом с классификаторами: он
+// правится человеком и приезжает с кодом, поэтому читается из файла, а не из
+// базы. Чтение ленивое, при первом обращении; полторы сотни строк остаются в
+// памяти. Файла нет — всё работает как раньше, просто без синонимов.
+
+const fs = require("fs");
+const path = require("path");
+
+const { normalizeName } = require("./normalize");
+
+const FILE = path.resolve(__dirname, "../../../reference/synonyms.txt");
+
+/** Нормализованное написание → запись. null, пока не читали. */
+let index = null;
+/** Что получилось при разборе файла — для страницы состояния и диагностики. */
+let stats = null;
+
+/**
+ * Разобрать файл справочника.
+ *
+ * Конфликты — когда одно написание приписано двум веществам — не сливаем и не
+ * выбираем молча: побеждает первая запись, а остальные откладываем в stats.
+ * Молчаливое слияние здесь было бы худшим из возможных поведений: два разных
+ * вещества стали бы одним узлом графа, и заметить это было бы нечем.
+ */
+function load() {
+  const map = new Map();
+  const conflicts = [];
+  let lines = 0;
+
+  let text;
+  try {
+    // BOM в начале: файл правят в том числе windows-редакторами, и первое
+    // название иначе получило бы невидимый символ впереди.
+    text = fs.readFileSync(FILE, "utf8").replace(/^﻿/, "").replace(/\r\n/g, "\n");
+  } catch {
+    stats = { entries: 0, spellings: 0, conflicts: [], file: FILE, loaded: false };
+    return map;
+  }
+
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const parts = line
+      .split("|")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (!parts.length) continue;
+
+    const canon = parts[0];
+    lines += 1;
+    const entry = { canon, spellings: parts };
+
+    for (const spelling of parts) {
+      const key = normalizeName(spelling);
+      if (!key) continue;
+      const prev = map.get(key);
+      if (prev) {
+        // То же вещество, записанное дважды, — не конфликт, а повтор.
+        if (prev.canon !== canon) {
+          conflicts.push({ spelling, kept: prev.canon, ignored: canon });
+        }
+        continue;
+      }
+      map.set(key, entry);
+    }
+  }
+
+  stats = {
+    entries: lines,
+    spellings: map.size,
+    conflicts,
+    file: FILE,
+    loaded: true,
+  };
+  return map;
+}
+
+function ensure() {
+  if (index === null) index = load();
+  return index;
+}
+
+/**
+ * Опознать продукт по названию.
+ *
+ * Возвращает каноническое название в том написании, в каком оно стоит в
+ * справочнике, — именно оно становится идентификатором продукта на графе.
+ * Написание нарочно не приводится к нижнему регистру: идентификатор видит
+ * человек в карточке узла, и «Изопропилбензол» читается, а «изопропилбензол»
+ * выглядит опечаткой.
+ *
+ * null — вещества в справочнике нет. Это штатно: справочник покрывает ходовые
+ * названия, а не всю химию.
+ */
+function identify(rawName) {
+  const map = ensure();
+  const key = normalizeName(rawName);
+  if (!key) return null;
+
+  const hit = map.get(key);
+  if (!hit) return null;
+
+  return {
+    id: hit.canon,
+    canon: hit.canon,
+    /** Совпало само каноническое название или один из синонимов. */
+    exact: normalizeName(hit.canon) === key,
+    spellings: hit.spellings,
+  };
+}
+
+/**
+ * Все написания вещества — для поиска по реестру.
+ *
+ * Реестр заполняют люди, и запись может стоять под любым из названий: по
+ * «ПЭНД» не находилось ничего, тогда как «полиэтилен низкого давления» в
+ * реестре есть. Возвращаем и само спрошенное название — оно могло не попасть в
+ * справочник, но найтись в реестре.
+ */
+function spellingsOf(rawName) {
+  const name = String(rawName ?? "").trim();
+  const hit = identify(name);
+  if (!hit) return name ? [name] : [];
+
+  const out = [];
+  const seen = new Set();
+  for (const spelling of [name, ...hit.spellings]) {
+    const key = normalizeName(spelling);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(spelling);
+  }
+  return out;
+}
+
+/** Что удалось прочитать — для страницы состояния. */
+function synonymsStatus() {
+  ensure();
+  return { ...stats };
+}
+
+module.exports = { identify, spellingsOf, synonymsStatus };
