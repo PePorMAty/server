@@ -5,6 +5,7 @@
 //   node scripts/audit-products.js              — сводка
 //   node scripts/audit-products.js --missing    — список для справочника
 //   node scripts/audit-products.js --absent     — вещества, которых нет в реестре
+//   node scripts/audit-products.js --weak       — совпадения, которым верить рано
 //   node scripts/audit-products.js --graph <id> — только по одному графу
 //
 // Зачем. Справочник синонимов я наполнял по ходовым названиям — то есть
@@ -29,6 +30,15 @@ const { identify, synonymsStatus } = require("../routes/industry/utils/synonyms"
 const { lookupProduct, status } = require("../routes/industry/utils/store");
 
 const GRAPHS_DIR = path.resolve(__dirname, "../data/saved-graphs");
+
+/** Ступени лестницы поиска на человеческом языке — те же, что в query-gisp. */
+const MATCH_LABELS = {
+  exact: "точно",
+  "all-words": "все слова",
+  "core-words": "значимые слова",
+  partial: "часть слов",
+  prefix: "по началу слова",
+};
 
 /** Сохранённый граф → список названий продуктов (с повторами внутри графа не считаем). */
 function productLabels(file) {
@@ -80,6 +90,7 @@ function main() {
   const args = process.argv.slice(2);
   const wantMissing = args.includes("--missing");
   const wantAbsent = args.includes("--absent");
+  const wantWeak = args.includes("--weak");
   const graphArg = args.indexOf("--graph");
   const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
 
@@ -111,8 +122,19 @@ function main() {
     const known = identify(label);
     // Реестр спрашиваем только если он подключён: без базы все были бы
     // «не найдено», и картина вышла бы ложной.
-    const found = reg.ready ? lookupProduct(label).found : null;
-    rows.push({ label, freq, canon: known?.canon ?? null, found });
+    const hit = reg.ready ? lookupProduct(label) : null;
+    rows.push({
+      label,
+      freq,
+      canon: known?.canon ?? null,
+      found: hit ? hit.found : null,
+      match: hit?.match ?? null,
+      matchedAs: hit?.matchedAs ?? null,
+      // Название записи реестра, за которую зацепились: по нему и видно,
+      // попадание это или случайное общее слово.
+      sample: hit?.producers?.[0]?.product ?? null,
+      entryCount: hit?.entryCount ?? 0,
+    });
   }
   rows.sort((a, b) => b.freq - a.freq || a.label.localeCompare(b.label, "ru"));
 
@@ -120,6 +142,12 @@ function main() {
   const foundCount = rows.filter((r) => r.found).length;
   const neither = rows.filter((r) => !r.canon && !r.found);
   const absent = rows.filter((r) => r.canon && r.found === false);
+
+  // Совпадения по самым мягким ступеням лестницы — «нашлось по одному из
+  // слов» и «по началу слова». Они и ошибаются чаще всего: на общем слове
+  // вроде «жидкость» цепляется чужая запись. Их надо смотреть глазами.
+  const WEAK = new Set(["partial", "prefix"]);
+  const weak = rows.filter((r) => r.found && WEAK.has(r.match));
 
   console.log(`Справочник знает:  ${knownCount} из ${rows.length}`);
   if (reg.ready) {
@@ -129,6 +157,24 @@ function main() {
       `Знаем, но в реестре нет: ${absent.length}` +
         " — это нормально: в ГИСП только товарная продукция",
     );
+
+    const byLevel = new Map();
+    for (const r of rows) {
+      if (!r.found) continue;
+      byLevel.set(r.match, (byLevel.get(r.match) ?? 0) + 1);
+    }
+    const order = ["exact", "all-words", "core-words", "partial", "prefix"];
+    const levels = order
+      .filter((l) => byLevel.has(l))
+      .map((l) => `${MATCH_LABELS[l] ?? l}: ${byLevel.get(l)}`)
+      .join(", ");
+    if (levels) console.log(`Как нашлось:       ${levels}`);
+    if (weak.length) {
+      console.log(
+        `Верить рано:       ${weak.length}` +
+          " — нашлось по части слов, смотрите --weak",
+      );
+    }
   }
 
   if (wantMissing) {
@@ -148,8 +194,21 @@ function main() {
     }
   }
 
-  if (!wantMissing && !wantAbsent) {
-    console.log("\nСписки: --missing (дописать в справочник), --absent (нет в реестре)");
+  if (wantWeak) {
+    console.log("\n── Нашлось по части слов: проверьте, то ли это вещество ──");
+    if (!weak.length) console.log("  пусто");
+    for (const r of weak) {
+      const via = r.matchedAs ? ` через «${r.matchedAs}»` : "";
+      console.log(`  ${r.label}${via}`);
+      console.log(`      → «${r.sample}» и ещё ${Math.max(r.entryCount - 1, 0)} запис.`);
+    }
+  }
+
+  if (!wantMissing && !wantAbsent && !wantWeak) {
+    console.log(
+      "\nСписки: --missing (дописать в справочник), --absent (нет в реестре)," +
+        " --weak (сомнительные совпадения)",
+    );
   }
 }
 
