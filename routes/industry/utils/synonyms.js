@@ -109,7 +109,7 @@ function identify(rawName) {
   const key = normalizeName(rawName);
   if (!key) return null;
 
-  const hit = map.get(key);
+  const hit = map.get(key) ?? identifyParenthesized(map, rawName);
   if (!hit) return null;
 
   return {
@@ -119,6 +119,31 @@ function identify(rawName) {
     exact: normalizeName(hit.canon) === key,
     spellings: hit.spellings,
   };
+}
+
+/**
+ * Подпись вида «Название (сокращение)»: «Изопропилбензол (ИПБ)».
+ *
+ * Узлы так подписывают часто, а справочнику целая строка незнакома. Берём обе
+ * половины — но засчитываем, только если КАЖДАЯ из них известна и обе про одно
+ * вещество. Это и есть проверка, что в скобках синоним, а не уточнение.
+ *
+ * Одной половины мало. У «Полиэтилен (вторичный)» головное слово известно, а
+ * продукт это другой: приняв его за полиэтилен, мы слили бы в один узел
+ * первичное сырьё и вторичное. Скобки уточняют чаще, чем поясняют, поэтому
+ * согласие обеих половин — единственное, на что тут можно опереться.
+ */
+function identifyParenthesized(map, rawName) {
+  const text = String(rawName ?? "");
+  const open = text.indexOf("(");
+  if (open < 1) return null;
+  const close = text.indexOf(")", open + 1);
+  if (close < 0) return null;
+
+  const head = map.get(normalizeName(text.slice(0, open)));
+  const inner = map.get(normalizeName(text.slice(open + 1, close)));
+  if (!head || !inner) return null;
+  return head.canon === inner.canon ? head : null;
 }
 
 /**
