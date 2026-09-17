@@ -6,6 +6,7 @@
 //   node scripts/audit-products.js --missing    — список для справочника
 //   node scripts/audit-products.js --absent     — вещества, которых нет в реестре
 //   node scripts/audit-products.js --weak       — совпадения, которым верить рано
+//   node scripts/audit-products.js --twins      — подписи-близнецы (буквы-двойники)
 //   node scripts/audit-products.js --graph <id> — только по одному графу
 //
 // Зачем. Справочник синонимов я наполнял по ходовым названиям — то есть
@@ -28,6 +29,7 @@ const path = require("path");
 
 const { identify, synonymsStatus } = require("../routes/industry/utils/synonyms");
 const { lookupProduct, status } = require("../routes/industry/utils/store");
+const { foldLookalikes, normalizeName } = require("../routes/industry/utils/normalize");
 
 const GRAPHS_DIR = path.resolve(__dirname, "../data/saved-graphs");
 
@@ -91,6 +93,7 @@ function main() {
   const wantMissing = args.includes("--missing");
   const wantAbsent = args.includes("--absent");
   const wantWeak = args.includes("--weak");
+  const wantTwins = args.includes("--twins");
   const graphArg = args.indexOf("--graph");
   const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
 
@@ -215,10 +218,36 @@ function main() {
     }
   }
 
-  if (!wantMissing && !wantAbsent && !wantWeak) {
+  // Подписи, различающиеся только неотличимыми на вид буквами: «Бисфенол A» с
+  // латинской A и «Бисфенол А» с кириллической. Такие узлы не схлопнутся
+  // никогда, а увидеть разницу на экране невозможно — только так и найдёшь.
+  const twins = new Map();
+  for (const r of rows) {
+    const key = foldLookalikes(normalizeName(r.label));
+    if (!key) continue;
+    if (!twins.has(key)) twins.set(key, new Set());
+    twins.get(key).add(r.label);
+  }
+  const twinGroups = [...twins.values()].filter((set) => set.size > 1);
+  if (twinGroups.length) {
+    console.log(
+      `Подписи-близнецы:  ${twinGroups.length}` +
+        " — различаются невидимой буквой, смотрите --twins",
+    );
+  }
+
+  if (wantTwins) {
+    console.log("\n── Различаются только неотличимыми на вид буквами ──");
+    if (!twinGroups.length) console.log("  пусто");
+    for (const set of twinGroups) {
+      console.log(`  ${[...set].map((s) => `«${s}»`).join("  =  ")}`);
+    }
+  }
+
+  if (!wantMissing && !wantAbsent && !wantWeak && !wantTwins) {
     console.log(
       "\nСписки: --missing (дописать в справочник), --absent (нет в реестре)," +
-        " --weak (сомнительные совпадения)",
+        " --weak (сомнительные совпадения), --twins (подписи-близнецы)",
     );
   }
 }

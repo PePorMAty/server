@@ -16,7 +16,17 @@
 const fs = require("fs");
 const path = require("path");
 
-const { normalizeName } = require("./normalize");
+const { foldLookalikes, normalizeName } = require("./normalize");
+
+/**
+ * Ключ справочника.
+ *
+ * Сверх обычной нормализации сводим неотличимые на вид буквы: «Бисфенол A»
+ * с латинской A и «Бисфенол А» с кириллической — на экране одна строка, и
+ * справочник обязан отвечать на обе одинаково. Базы реестра это не касается:
+ * справочник читается из файла, и обе стороны сравнения приводятся здесь же.
+ */
+const dictKey = (raw) => foldLookalikes(normalizeName(raw));
 
 const FILE = path.resolve(__dirname, "../../../reference/synonyms.txt");
 
@@ -63,7 +73,7 @@ function load() {
     const entry = { canon, spellings: parts };
 
     for (const spelling of parts) {
-      const key = normalizeName(spelling);
+      const key = dictKey(spelling);
       if (!key) continue;
       const prev = map.get(key);
       if (prev) {
@@ -106,7 +116,7 @@ function ensure() {
  */
 function identify(rawName) {
   const map = ensure();
-  const key = normalizeName(rawName);
+  const key = dictKey(rawName);
   if (!key) return null;
 
   const hit = map.get(key) ?? identifyParenthesized(map, rawName);
@@ -116,7 +126,7 @@ function identify(rawName) {
     id: hit.canon,
     canon: hit.canon,
     /** Совпало само каноническое название или один из синонимов. */
-    exact: normalizeName(hit.canon) === key,
+    exact: dictKey(hit.canon) === key,
     spellings: hit.spellings,
   };
 }
@@ -140,8 +150,8 @@ function identifyParenthesized(map, rawName) {
   const close = text.indexOf(")", open + 1);
   if (close < 0) return null;
 
-  const head = map.get(normalizeName(text.slice(0, open)));
-  const inner = map.get(normalizeName(text.slice(open + 1, close)));
+  const head = map.get(dictKey(text.slice(0, open)));
+  const inner = map.get(dictKey(text.slice(open + 1, close)));
   if (!head || !inner) return null;
   return head.canon === inner.canon ? head : null;
 }
@@ -162,7 +172,7 @@ function spellingsOf(rawName) {
   const out = [];
   const seen = new Set();
   for (const spelling of [name, ...hit.spellings]) {
-    const key = normalizeName(spelling);
+    const key = dictKey(spelling);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(spelling);
