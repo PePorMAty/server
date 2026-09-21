@@ -17,9 +17,15 @@
 //
 // Почему СПРАШИВАЕМ ПРО СВОИ ПРОДУКТЫ, а не скачиваем всё. Запрос «все
 // вещества с номером CAS» публичная точка не отдаёт — сущностей сотни тысяч, и
-// он отваливается по таймауту (проверено). Да и незачем: нам нужны названия,
-// которые реально стоят на графах. Их шестьсот с небольшим, и каждое
-// спрашивается отдельным лёгким запросом.
+// он отваливается по таймауту (проверено). Да и незачем: нужны названия,
+// которые реально стоят на графах.
+//
+// Как спрашиваем. Сперва пачками по полусотне через русскую Википедию: она
+// отдаёт коды элементов и сама разворачивает перенаправления, так что шестьсот
+// названий укладываются в дюжину запросов. Остаток — поиском по Wikidata, по
+// одному. Такой порядок взят не для красоты: поиск по одному упирался в
+// ограничение частоты (429), и лекарство от него — не частить, а спрашивать
+// пачками.
 //
 // Как отбираем. Поиск по названию возвращает кандидатов; оставляем тех, у кого
 // ЕСТЬ номер CAS (это отсекает всё нехимическое) и чьё русское название или
@@ -37,40 +43,146 @@ const {
   normalizeName,
 } = require("../routes/industry/utils/normalize");
 
-// Адрес можно подменить: так скрипт целиком прогоняется на заглушке, не
-// трогая живую Wikidata.
+// Адреса можно подменить: так скрипт целиком прогоняется на заглушке, не
+// трогая живую Wikimedia.
 const API = process.env.WIKIDATA_API || "https://www.wikidata.org/w/api.php";
+const WIKI_API = process.env.RUWIKI_API || "https://ru.wikipedia.org/w/api.php";
 const OUT = path.resolve(__dirname, "../reference/synonyms-wikidata.txt");
 
-/** Пауза между запросами: точка публичная, вести себя надо прилично. */
-const DELAY_MS = 250;
+/**
+ * Пауза между запросами.
+ *
+ * Четыре запроса в секунду Wikimedia не терпит — отвечает 429 и просит
+ * помедленнее. Начинаем с секунды и подстраиваемся по ответам.
+ */
+const DELAY_START_MS = 1100;
+const DELAY_MAX_MS = 6000;
+let delayMs = DELAY_START_MS;
+
 /** Сколько ждём один ответ. */
 const TIMEOUT_MS = 30_000;
+/** Сколько раз повторяем запрос, упёршийся в ограничение частоты. */
+const RETRIES = 5;
 /** Сколько кандидатов смотрим на одно название. */
 const CANDIDATES = 5;
 /** По скольку элементов забираем за раз (предел API — 50). */
 const BATCH = 40;
+/** По скольку названий спрашиваем у Википедии (предел тот же). */
+const TITLE_BATCH = 50;
 
 /** Ключ сравнения — тот же, что у справочника. */
 const key = (s) => foldLookalikes(normalizeName(s));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(params) {
-  const url = `${API}?${new URLSearchParams({ format: "json", ...params })}`;
-  const res = await fetch(url, {
-    headers: {
-      // Wikidata просит представляться; безымянные запросы она режет. Только
-      // латиница: HTTP-заголовки кириллицу не принимают.
-      "User-Agent": "gpt-graph/1.0 (chemical synonyms by CAS)",
-      Accept: "application/json",
-    },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+/** Сколько запросов подряд прошло без замечаний — по ним отпускаем тормоз. */
+let calm = 0;
+
+/**
+ * Запрос к Wikimedia с уважением к ограничению частоты.
+ *
+ * 429 — это «помедленнее», а не «нет доступа»: ждём столько, сколько просят
+ * заголовком Retry-After (или по нарастающей), увеличиваем паузу для всех
+ * следующих запросов и пробуем снова. Ровно этим прошлый заход и захлебнулся:
+ * 429 считался отказом, счётчик неудач добирал до предела, и скрипт бросал
+ * работу, советуя проверить доступ, которого на самом деле хватало.
+ */
+async function request(endpoint, params) {
+  const url = `${endpoint}?${new URLSearchParams({ format: "json", ...params })}`;
+
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      headers: {
+        // Wikimedia просит представляться; безымянные запросы она режет.
+        // Только латиница: HTTP-заголовки кириллицу не принимают.
+        "User-Agent": "gpt-graph/1.0 (chemical synonyms by CAS)",
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+
+    // Слишком часто или сервер занят — это повод подождать, а не сдаться.
+    if (res.status === 429 || res.status === 503) {
+      calm = 0;
+      delayMs = Math.min(Math.round(delayMs * 1.6), DELAY_MAX_MS);
+      if (attempt >= RETRIES) {
+        throw new Error(
+          `Wikidata держит ограничение частоты (${res.status}) даже после ${RETRIES} попыток`,
+        );
+      }
+      const askedFor = Number(res.headers.get("retry-after"));
+      const wait = Number.isFinite(askedFor) && askedFor > 0
+        ? askedFor * 1000
+        : Math.min(2000 * 2 ** attempt, 30_000);
+      process.stdout.write(`\r  притормаживаю на ${Math.round(wait / 1000)} с…            `);
+      await sleep(wait);
+      continue;
+    }
+
+    if (!res.ok) {
+      throw new Error(`ответ ${res.status} ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error.info ?? data.error.code);
+
+    // Долго идёт гладко — понемногу возвращаем скорость.
+    if (++calm >= 25 && delayMs > DELAY_START_MS) {
+      delayMs = Math.max(Math.round(delayMs * 0.8), DELAY_START_MS);
+      calm = 0;
+    }
+    return data;
+  }
+}
+
+const api = (params) => request(API, params);
+
+/**
+ * Коды элементов по названиям — пачкой, через русскую Википедию.
+ *
+ * Поиск по Wikidata умеет только по одному названию за запрос, и на шестистах
+ * продуктах это шестьсот запросов, в которые мы и упёрлись ограничением
+ * частоты. А Википедия отдаёт коды элементов сразу по полусотне заголовков и
+ * заодно разворачивает перенаправления: «Кумол» приводит к той же статье, что
+ * «Изопропилбензол».
+ *
+ * Что не нашлось статьёй — доспрашиваем поиском по одному. Если этот путь
+ * почему-то не сработает вовсе, потеряется только скорость: всё уйдёт в
+ * медленный поиск, как раньше.
+ */
+async function idsByTitles(titles) {
+  const data = await request(WIKI_API, {
+    action: "query",
+    formatversion: "2",
+    prop: "pageprops",
+    ppprop: "wikibase_item",
+    redirects: "1",
+    titles: titles.join("|"),
   });
-  if (!res.ok) throw new Error(`Wikidata ответила ${res.status} ${res.statusText}`);
-  const data = await res.json();
-  if (data?.error) throw new Error(`Wikidata: ${data.error.info ?? data.error.code}`);
-  return data;
+
+  // Википедия отвечает про КОНЕЧНЫЕ заголовки, а спрашивали мы про исходные:
+  // по дороге их могли нормализовать и провести через перенаправление.
+  // Разматываем цепочку обратно, иначе ответ не с чем сопоставить.
+  const backwards = new Map();
+  for (const step of [
+    ...(data?.query?.normalized ?? []),
+    ...(data?.query?.redirects ?? []),
+  ]) {
+    if (step?.from && step?.to) backwards.set(step.to, step.from);
+  }
+  const original = (title) => {
+    let cur = title;
+    for (let i = 0; i < 5 && backwards.has(cur); i++) cur = backwards.get(cur);
+    return cur;
+  };
+
+  const out = new Map();
+  for (const page of data?.query?.pages ?? []) {
+    const qid = page?.pageprops?.wikibase_item;
+    if (!qid || !page?.title) continue;
+    out.set(original(page.title), qid);
+  }
+  return out;
 }
 
 /** Кандидаты по русскому названию. */
@@ -159,41 +271,80 @@ async function main() {
     return;
   }
 
-  console.log(
-    `\nСпрашиваю Wikidata про ${names.length} названий, по одному запросу на каждое.`,
-  );
-  // Оценка грубая: к опросу названий добавляется разбор кандидатов пачками.
-  const seconds = Math.ceil((names.length * DELAY_MS * 1.3) / 1000);
-  const eta =
-    seconds < 90 ? `${seconds} с` : `${Math.ceil(seconds / 60)} мин`;
-  console.log(`Пауза ${DELAY_MS} мс — уйдёт примерно ${eta}.\n`);
+  console.log(`\nНазваний к опросу: ${names.length}.`);
 
-  // ── 1) кандидаты по каждому названию ──
   const candidatesByName = new Map();
   const allIds = new Set();
   let failed = 0;
+  let inARow = 0;
 
-  for (let i = 0; i < names.length; i++) {
-    const name = names[i];
-    try {
-      const ids = await search(name);
-      candidatesByName.set(name, ids);
-      for (const id of ids) allIds.add(id);
-    } catch (e) {
-      failed += 1;
-      if (failed <= 3) console.error(`\n  «${name}»: ${e.message}`);
-      if (failed === 10) {
-        console.error(
-          "\nДесять запросов подряд не прошли — дальше нет смысла.\n" +
-            "Проверьте, открыт ли с этой машины www.wikidata.org.",
-        );
-        break;
-      }
+  /** Единая реакция на сорвавшийся запрос: считаем и знаем, когда сдаться. */
+  const note = (what, e) => {
+    failed += 1;
+    inARow += 1;
+    if (failed <= 3) console.error(`\n  ${what}: ${e.message}`);
+    if (inARow === 12) {
+      console.error(
+        `\n  Двенадцать запросов подряд не прошли — дальше нет смысла.` +
+          `\n  Последняя ошибка: ${e.message}`,
+      );
+      return true;
     }
-    process.stdout.write(`\rспрошено: ${i + 1} из ${names.length}`);
-    await sleep(DELAY_MS);
+    return false;
+  };
+
+  // ── 1) быстрый проход: коды элементов пачками через Википедию ──
+  // Он и есть лекарство от 429: шестьсот запросов превращаются в дюжину.
+  const batches = Math.ceil(names.length / TITLE_BATCH);
+  console.log(`Сперва пачками через Википедию: ${batches} запрос(ов).`);
+
+  let byTitle = new Map();
+  for (let i = 0; i < names.length; i += TITLE_BATCH) {
+    const chunk = names.slice(i, i + TITLE_BATCH);
+    try {
+      const got = await idsByTitles(chunk);
+      for (const [title, qid] of got) byTitle.set(title, qid);
+      inARow = 0;
+    } catch (e) {
+      if (note(`пачка заголовков ${i / TITLE_BATCH + 1}`, e)) break;
+    }
+    process.stdout.write(
+      `\rстатей разобрано: ${Math.min(i + TITLE_BATCH, names.length)} из ${names.length}, нашлось ${byTitle.size}   `,
+    );
+    await sleep(delayMs);
   }
   console.log("");
+
+  for (const [name, qid] of byTitle) {
+    candidatesByName.set(name, [qid]);
+    allIds.add(qid);
+  }
+
+  // ── 2) чего не нашлось статьёй — доспрашиваем поиском, по одному ──
+  const rest = names.filter((n) => !byTitle.has(n));
+  if (rest.length) {
+    const seconds = Math.ceil((rest.length * delayMs) / 1000);
+    const eta = seconds < 90 ? `${seconds} с` : `${Math.ceil(seconds / 60)} мин`;
+    console.log(`Остальные ${rest.length} — поиском по одному, примерно ${eta}.`);
+    inARow = 0;
+
+    for (let i = 0; i < rest.length; i++) {
+      const name = rest[i];
+      try {
+        const ids = await search(name);
+        candidatesByName.set(name, ids);
+        for (const id of ids) allIds.add(id);
+        inARow = 0;
+      } catch (e) {
+        if (note(`«${name}»`, e)) break;
+      }
+      process.stdout.write(
+        `\rспрошено: ${i + 1} из ${rest.length} (пауза ${delayMs} мс)   `,
+      );
+      await sleep(delayMs);
+    }
+    console.log("");
+  }
 
   if (!allIds.size) {
     console.error("\nНи одного кандидата не нашлось — записывать нечего.");
@@ -211,7 +362,7 @@ async function main() {
       console.error(`\n  пачка со смещения ${i}: ${e.message}`);
     }
     process.stdout.write(`\rразобрано элементов: ${info.size} из ${ids.length}`);
-    await sleep(DELAY_MS);
+    await sleep(delayMs);
   }
   console.log("\n");
 
