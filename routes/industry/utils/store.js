@@ -369,8 +369,18 @@ function lookupProduct(rawName) {
             matchedWords: picked.shared.length,
             records: shares.length,
             head: shares.find((s) => s.at === 0)?.name ?? null,
-            parens: shares.find((s) => s.inParens)?.name ?? null,
+            parens: shares.find((s) => s.parens === "synonym")?.name ?? null,
             pair: shares.find((s) => s.strong >= 2 && s.at >= 0 && s.at <= 2)?.name ?? null,
+            // Второе слово названия засчитываем, только если совпадение
+            // объяснило заметную часть записи: «Противостаритель 6PPD М» и
+            // «Термопластичные полиуретаны "Пикопан"» — это сам продукт с
+            // категорией или прилагательным впереди. А «Ароматизатор воздуха
+            // картонный Grass» при том же месте покрывает вчетверо меньше.
+            second:
+              shares.find((s) => s.at === 1 && s.strong >= 1 && s.share >= 1 / 3)
+                ?.name ?? null,
+            // Препаративная форма: вещество названо в составе, с дозировкой.
+            formulation: shares.find((s) => s.parens === "formulation")?.name ?? null,
           }
         : null,
     };
@@ -451,32 +461,85 @@ const QUANTITY_RE =
   /\d[\d.,]*\s*(?:%|мг|мкг|кг|мл|г\/л|г|л|моль|ppm)(?![а-яёa-z])/i;
 
 /**
- * Совпало ли внутри короткой скобки.
+ * Сколько значимых слов может стоять ДО скобки-синонима.
  *
- * В названиях реестра скобка после продукта — это второе его имя:
+ * Замер показал, что одной короткой скобки мало: она бывает и торговым именем
+ * («Набор реагентов … концентрации этанола в крови (ЭТАНОЛ-ОЛЬВЕКС)»), и
+ * наполнителем («Армлен ПП СК 20-4МС-875 (графит)»), и количеством («Носки …
+ * (25 пар)»). Второе имя продукта стоит сразу после него, а не в хвосте
+ * длинного названия — по этому они и различаются.
+ */
+const SYNONYM_PARENS_AFTER = 3;
+
+/**
+ * Что означает совпадение внутри скобки: "synonym", "formulation" или null.
+ *
+ * В названиях реестра скобка сразу после продукта — это второе его имя:
  * «Изопропилбензол (кумол)», «2-Пропанол (изопропиловый спирт, изопропанол)»,
  * «Мел химически осажденный (карбонат кальция)». Совпадение внутри такой
- * скобки — это совпадение с самим продуктом, и место в названии тут неважно.
+ * скобки — это совпадение с самим продуктом.
  *
- * Длинную скобку так считать нельзя: «ТОРНАДО, ВР (360 г/л глифосата к-ты)» —
- * это состав препарата, а не другое имя для глифосата. Граница по числу слов
- * грубая, но скобка-синоним коротка по своей природе — это имя, а не фраза.
+ * Скобка с количеством — не имя, а состав: «ТОРНАДО, ВР (360 г/л глифосата
+ * к-ты)», «ГЕРБИТОКС, ВРК (500 г/л МЦПА кислоты)». Это препаративная форма
+ * самого вещества, и заказчик решил считать её присутствием в реестре — но
+ * отдельной пометкой, потому что ОКПД2 у неё пестицидный, а не глифосатный.
  */
-function matchedInShortParens(rawName, queryStems) {
+function matchedInParens(rawName, queryStems) {
   const text = String(rawName ?? "");
-  if (!text.includes("(")) return false;
+  if (!text.includes("(")) return null;
 
-  for (const m of text.matchAll(/\(([^()]*)\)/g)) {
-    if (QUANTITY_RE.test(m[1])) continue;
-    const inner = words(stemName(m[1]));
+  let formulation = null;
+  for (const m of topLevelParens(text)) {
+    const inner = words(stemName(m.text));
+    if (!inner.some((w) => queryStems.has(w))) continue;
+
+    if (QUANTITY_RE.test(m.text)) {
+      formulation = "formulation";
+      continue;
+    }
+
     // Длину меряем по значимым словам: «(1,2-пропиленгликоль, пропандиол-1,2)»
     // распадается на шесть кусков, из которых четыре — обрывки цифр, и по
     // ним скобка-синоним ошибочно выглядела бы длинной.
     const meaningful = inner.filter((w) => w.length > 1);
     if (!meaningful.length || meaningful.length > SYNONYM_PARENS_WORDS) continue;
-    if (inner.some((w) => queryStems.has(w))) return true;
+
+    const before = words(stemName(text.slice(0, m.at))).filter(
+      (w) => w.length > 1,
+    ).length;
+    if (before > SYNONYM_PARENS_AFTER) continue;
+
+    return "synonym";
   }
-  return false;
+  return formulation;
+}
+
+/**
+ * Содержимое скобок верхнего уровня, вместе с вложенными.
+ *
+ * Регулярным выражением это не берётся: скобки в реестре вкладываются —
+ * «ТОРНАДО, ВР (360 г/л глифосата к-ты (изопропиламинная соль))». Выражение
+ * «(без скобок внутри)» нашло бы там только «изопропиламинную соль», то есть
+ * ровно не ту часть, по которой запись и опознаётся.
+ */
+function topLevelParens(text) {
+  const out = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === ")" && depth > 0) {
+      depth -= 1;
+      if (depth === 0) out.push({ at: start, text: text.slice(start + 1, i) });
+    }
+  }
+  // Скобка открыта и не закрыта — берём хвост: обрезанные названия в реестре
+  // не редкость, и терять из-за этого содержимое незачем.
+  if (depth > 0 && start >= 0) out.push({ at: start, text: text.slice(start + 1) });
+  return out;
 }
 
 /**
@@ -559,7 +622,7 @@ function keepBestOverlap(rows, rawName) {
       // Значимые совпавшие слова: «2,4 Д» цеплялась за «Пакеты д/ЗАМОРОЗКИ
       // ПНД» тремя «словами» — «2», «4» и «д». Совпадением это не назовёшь.
       strong: shared.filter((s) => s.length > 2).length,
-      inParens: matchedInShortParens(row.name || "", queryStems),
+      parens: matchedInParens(row.name || "", queryStems),
     };
   });
 
@@ -575,7 +638,7 @@ function keepBestOverlap(rows, rawName) {
       share: s.rowWords ? s.shared.length / s.rowWords : 0,
       at: s.at,
       strong: s.strong,
-      inParens: s.inParens,
+      parens: s.parens,
     })),
   };
 }
@@ -585,11 +648,16 @@ function summarize(rows) {
   const byProducer = new Map();
   const regions = new Set();
   let anyActive = false;
-  let okpd2 = null;
+  // Код ОКПД2 у каждой записи свой, и брать первый попавшийся нельзя: на
+  // «Водороде» так выходило 20.13.63.000 «Пероксид водорода» — чужое вещество,
+  // и вдобавок код, исключённый из классификатора. Считаем, какой код у
+  // записей встречается чаще, и говорим, сколько их всего: если кодов много,
+  // это само по себе признак, что записи собрались разные.
+  const okpd2Counts = new Map();
 
   for (const row of rows) {
     if (row.status === "active") anyActive = true;
-    if (!okpd2 && row.okpd2) okpd2 = row.okpd2;
+    if (row.okpd2) okpd2Counts.set(row.okpd2, (okpd2Counts.get(row.okpd2) ?? 0) + 1);
     // Считаем по тому же региону, что показываем: в выгрузке адреса нет, и
     // регион выводится из ИНН — иначе счётчик регионов всегда был бы нулём.
     const region = row.region || regionByInn(row.inn);
@@ -609,6 +677,12 @@ function summarize(rows) {
     return String(a.producer).localeCompare(String(b.producer), "ru");
   });
 
+  // При равенстве берём меньший код: лишь бы ответ не плавал от порядка строк.
+  const ranked = [...okpd2Counts].sort(
+    (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])),
+  );
+  const okpd2 = ranked[0]?.[0] ?? null;
+
   return {
     entryCount: rows.length,
     producerCount: producers.length,
@@ -616,6 +690,10 @@ function summarize(rows) {
     status: anyActive ? "active" : "archived",
     okpd2,
     okpd2Name: okpd2Name(okpd2),
+    /** У скольких записей из найденных именно этот код. */
+    okpd2Share: ranked[0]?.[1] ?? 0,
+    /** Сколько ещё разных кодов у остальных записей. */
+    okpd2Others: Math.max(0, ranked.length - 1),
     producers,
   };
 }

@@ -382,8 +382,15 @@ function main() {
     //   — совпали два и более значимых слова в начале названия («Фракция
     //     альфа-олефинов C₈»).
     // Иначе это слово, случайно оказавшееся в середине чужого названия.
-    const verdict = (c) =>
-      c.head ? "первое слово" : c.parens ? "скобка-синоним" : c.pair ? "два слова" : null;
+    const REASONS = [
+      ["первое слово", (c) => c.head],
+      ["скобка-синоним", (c) => c.parens],
+      ["два слова", (c) => c.pair],
+      ["второе слово", (c) => c.second],
+      ["в составе препарата", (c) => c.formulation],
+    ];
+    const verdict = (c) => REASONS.find(([, has]) => has(c))?.[0] ?? null;
+    const evidence = (c) => REASONS.find(([, has]) => has(c))?.[1](c) ?? "";
 
     const confirmed = rows.filter((r) => r.found && r.coverage);
     const dropped = confirmed.filter((r) => !verdict(r.coverage));
@@ -418,8 +425,8 @@ function main() {
       const v = verdict(r.coverage);
       if (!v || v === "первое слово") continue;
       console.log(
-        `    ${v.padEnd(14)}  «${r.label}»` +
-          `  →  «${((v === "скобка-синоним" ? r.coverage.parens : r.coverage.pair) ?? "").slice(0, 80)}»`,
+        `    ${v.padEnd(19)}  «${r.label}»` +
+          `  →  «${String(evidence(r.coverage)).slice(0, 80)}»`,
       );
     }
     console.log("");
