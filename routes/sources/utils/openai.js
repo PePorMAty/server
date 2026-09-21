@@ -13,7 +13,9 @@ const PROVIDERS = {
       process.env.QWEN_BASE_URL ||
       "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     apiKeyEnv: "QWEN_API_KEY",
-    defaultModel: process.env.QWEN_MODEL || "qwen-plus",
+    // qwen-plus нашему ключу недоступен (403 AccessDenied.Unpurchased) —
+    // дефолтом берём модель из доступных аккаунту.
+    defaultModel: process.env.QWEN_MODEL || "qwen3.7-plus",
   },
 };
 
@@ -24,11 +26,22 @@ function getClient(providerName) {
   const cfg = PROVIDERS[name];
   if (!cfg) throw new Error(`Unknown AI provider: "${name}"`);
 
-  const apiKey = process.env[cfg.apiKeyEnv];
+  // Ключ из .env/секретов часто приезжает с пробелом, переводом строки или
+  // кавычками по краям — провайдер на такой ключ отвечает "Incorrect API key",
+  // что выглядит как неверный ключ, хотя он верный.
+  const rawKey = process.env[cfg.apiKeyEnv];
+  const apiKey = String(rawKey ?? "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
   if (!apiKey) throw new Error(`${cfg.apiKeyEnv} is not set in env`);
 
   const cacheKey = `${name}:${apiKey}`;
   if (!clientCache[cacheKey]) {
+    // Логируем длину, а не сам ключ: этого хватает, чтобы поймать обрезанный
+    // или частично скопированный ключ, и не утекает секрет.
+    console.log(
+      `[${name}] client init: baseURL=${cfg.baseURL}, keyLen=${apiKey.length}, keyPrefix=${apiKey.slice(0, 6)}…`,
+    );
     clientCache[cacheKey] = new OpenAI({ apiKey, baseURL: cfg.baseURL });
   }
 
@@ -44,6 +57,29 @@ function getClient(providerName) {
 // DashScope не поддерживает /v1/responses, поэтому для Qwen используем
 // /v1/chat/completions через client.chat.completions.create()
 // ---------------------------------------------------------------------------
+
+// DashScope отклоняет response_format, если ни в одном сообщении нет слова
+// "json" (InternalError.Algo.InvalidParameter). Дефолтные промпты его содержат,
+// но пользователь может отредактировать промпт в UI и убрать — подстраховываемся.
+function ensureJsonMention(messages) {
+  const mentioned = messages.some(
+    (m) => typeof m?.content === "string" && /json/i.test(m.content),
+  );
+  if (mentioned) return messages;
+
+  const note = "Ответ верни строго в формате JSON по заданной схеме.";
+  const sysIndex = messages.findIndex(
+    (m) => m?.role === "system" && typeof m?.content === "string",
+  );
+  if (sysIndex === -1) return [{ role: "system", content: note }, ...messages];
+
+  const patched = messages.slice();
+  patched[sysIndex] = {
+    ...patched[sysIndex],
+    content: `${patched[sysIndex].content}\n\n${note}`,
+  };
+  return patched;
+}
 
 function responsesToChatParams(params) {
   const messages = [];
@@ -76,8 +112,13 @@ function responsesToChatParams(params) {
       json_schema: {
         name: params.text.format.name,
         schema: params.text.format.schema,
+        // Без strict модель вправе вернуть JSON произвольной формы: проверено
+        // на qwen3.6-flash — вместо схемы приходил свободный ответ, и разбор
+        // ломался. Роуты передают strict: true, раньше он терялся здесь.
+        strict: params.text.format.strict !== false,
       },
     };
+    chatParams.messages = ensureJsonMention(chatParams.messages);
   }
 
   // DashScope Chat Completions: enable_search вместо tools: [web_search]
@@ -275,7 +316,7 @@ async function callOpenAIResponses({
     }
     const chatParams = {
       model: effectiveModel,
-      messages: [{ role: "user", content: prompt }],
+      messages: ensureJsonMention([{ role: "user", content: prompt }]),
       max_tokens: 16000,
       enable_search: true,
       response_format: {
@@ -283,6 +324,7 @@ async function callOpenAIResponses({
         json_schema: {
           name: "technology_sources",
           schema: buildSourcesSchema(maxItems),
+          strict: true,
         },
       },
     };
@@ -361,7 +403,11 @@ async function callOpenAIResponsesRaw({
   const { client, defaultModel, name } = getClient(provider);
   const isQwen = name === "qwen";
 
-  const effectiveModel = model || payload.model || defaultModel;
+  // payload.model роуты задают хардкодом ("gpt-5-mini") — это дефолт OpenAI.
+  // Для другого провайдера такое имя модели бессмысленно (DashScope ответит
+  // AccessDenied), поэтому подставляем дефолт самого провайдера.
+  const effectiveModel =
+    model || (name === "openai" ? payload.model : null) || defaultModel;
 
   if (isQwen) {
     const chatParams = responsesToChatParams({
