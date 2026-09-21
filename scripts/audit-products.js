@@ -108,6 +108,26 @@ function main() {
           (syn.renames ? `, разошлись в каноне: ${syn.renames}` : "")
       : "Справочник не прочитан — проверьте reference/synonyms.txt",
   );
+  // Конфликт — одно написание у двух РАЗНЫХ веществ, то есть готовое слияние
+  // несовместимого в один узел. Прятать его за флагом нельзя: тревога, которую
+  // нельзя прочитать, — не тревога. Печатаем всегда и поимённо.
+  if (syn.conflicts?.length) {
+    console.log("\n── КОНФЛИКТЫ: одно написание у разных веществ ──");
+    for (const c of syn.conflicts.slice(0, 20)) {
+      console.log(
+        `  «${c.spelling}»: оставлено «${c.kept}» (${c.keptFrom}),` +
+          ` отброшено «${c.ignored}» (${c.ignoredFrom})`,
+      );
+    }
+    if (syn.conflicts.length > 20) {
+      console.log(`  … и ещё ${syn.conflicts.length - 20}`);
+    }
+    console.log(
+      "  Побеждает запись из файла, прочитанного первым. Если победил не тот —" +
+        "\n  поправьте reference/synonyms.txt: он читается раньше собранного машиной.\n",
+    );
+  }
+
   console.log(
     reg.ready
       ? `Реестр: ${reg.entries} записей${reg.actualAt ? `, актуально на ${reg.actualAt}` : ""}`
