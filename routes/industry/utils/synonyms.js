@@ -28,7 +28,17 @@ const { foldLookalikes, normalizeName, GENERIC_WORDS } = require("./normalize");
  */
 const dictKey = (raw) => foldLookalikes(normalizeName(raw));
 
-const FILE = path.resolve(__dirname, "../../../reference/synonyms.txt");
+/**
+ * Файлы справочника, в порядке доверия.
+ *
+ * Первый — правленный человеком, он и побеждает при расхождениях. Второй
+ * собирается скриптом из Wikidata по номеру CAS и в репозитории может
+ * отсутствовать: справочник должен работать и без него.
+ */
+const FILES = [
+  path.resolve(__dirname, "../../../reference/synonyms.txt"),
+  path.resolve(__dirname, "../../../reference/synonyms-wikidata.txt"),
+];
 
 /** Нормализованное написание → запись. null, пока не читали. */
 let index = null;
@@ -46,53 +56,109 @@ let stats = null;
 function load() {
   const map = new Map();
   const conflicts = [];
+  // Пары записей, уже разобранные: одна пара даёт столько столкновений,
+  // сколько у неё общих написаний, а сообщать о ней надо один раз.
+  const seenPairs = new Set();
+  // Несогласие о том, какое имя каноническое, — не конфликт по существу.
+  let renames = 0;
+
+  /**
+   * Разобраться, что за столкновение.
+   *
+   * Считаем, сколько написаний у записей общих. Два независимых источника,
+   * сошедшиеся на двух и более именах, говорят об одном веществе и разошлись
+   * лишь в том, какое имя главное, — это не ошибка данных, побеждает первый
+   * файл. А совпадение ровно в ОДНОМ написании при расхождении во всём
+   * остальном — это и есть опасный случай: одно имя у двух разных веществ.
+   * Его надо видеть поимённо.
+   *
+   * Ошибиться тут лучше в сторону тревоги: лишняя строка в отчёте ничего не
+   * стоит, а пропущенное столкновение молча сольёт два вещества в один узел.
+   */
+  const clash = (kept, incoming, spelling) => {
+    const pair = `${kept.canon}\u0000${incoming.canon}`;
+    if (seenPairs.has(pair)) return;
+    seenPairs.add(pair);
+
+    const keptKeys = new Set(kept.spellings.map(dictKey));
+    const shared = incoming.spellings
+      .map(dictKey)
+      .filter((k) => k && keptKeys.has(k)).length;
+
+    if (shared > 1) {
+      renames += 1;
+      return;
+    }
+    conflicts.push({
+      spelling,
+      kept: kept.canon,
+      keptFrom: kept.source,
+      ignored: incoming.canon,
+      ignoredFrom: incoming.source,
+    });
+  };
+
+  const sources = [];
   let lines = 0;
 
-  let text;
-  try {
-    // BOM в начале: файл правят в том числе windows-редакторами, и первое
-    // название иначе получило бы невидимый символ впереди.
-    text = fs.readFileSync(FILE, "utf8").replace(/^﻿/, "").replace(/\r\n/g, "\n");
-  } catch {
-    stats = { entries: 0, spellings: 0, conflicts: [], file: FILE, loaded: false };
-    return map;
-  }
-
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-
-    const parts = line
-      .split("|")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    if (!parts.length) continue;
-
-    const canon = parts[0];
-    lines += 1;
-    const entry = { canon, spellings: parts };
-
-    for (const spelling of parts) {
-      const key = dictKey(spelling);
-      if (!key) continue;
-      const prev = map.get(key);
-      if (prev) {
-        // То же вещество, записанное дважды, — не конфликт, а повтор.
-        if (prev.canon !== canon) {
-          conflicts.push({ spelling, kept: prev.canon, ignored: canon });
-        }
-        continue;
-      }
-      map.set(key, entry);
+  for (const file of FILES) {
+    let text;
+    try {
+      // BOM в начале: файл правят в том числе windows-редакторами, и первое
+      // название иначе получило бы невидимый символ впереди.
+      text = fs
+        .readFileSync(file, "utf8")
+        .replace(/^﻿/, "")
+        .replace(/\r\n/g, "\n");
+    } catch {
+      // Файла нет — штатно для того, что собирается скриптом.
+      continue;
     }
+
+    let fileLines = 0;
+    for (const rawLine of text.split("\n")) {
+      // Хвостовой комментарий несёт происхождение записи: «# CAS 98-82-8 Q…».
+      const hash = rawLine.indexOf("#");
+      const body = (hash >= 0 ? rawLine.slice(0, hash) : rawLine).trim();
+      const note = hash >= 0 ? rawLine.slice(hash + 1).trim() : "";
+      if (!body) continue;
+
+      const parts = body
+        .split("|")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      if (!parts.length) continue;
+
+      const canon = parts[0];
+      lines += 1;
+      fileLines += 1;
+      const cas = /CAS\s+([0-9]{2,7}-[0-9]{2}-[0-9])/i.exec(note)?.[1] ?? null;
+      const entry = { canon, spellings: parts, cas, source: path.basename(file) };
+
+      for (const spelling of parts) {
+        const key = dictKey(spelling);
+        if (!key) continue;
+        const prev = map.get(key);
+        if (prev) {
+          // То же вещество, записанное дважды, — не конфликт, а повтор.
+          if (prev.canon !== canon) clash(prev, entry, spelling);
+          continue;
+        }
+        map.set(key, entry);
+      }
+    }
+    sources.push({ file: path.basename(file), entries: fileLines });
   }
 
   stats = {
     entries: lines,
     spellings: map.size,
     conflicts,
-    file: FILE,
-    loaded: true,
+    /** Сколько раз файлы разошлись лишь в выборе канонического имени. */
+    renames,
+    sources,
+    file: FILES[0],
+    loaded: sources.length > 0,
   };
   return map;
 }

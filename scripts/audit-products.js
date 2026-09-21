@@ -103,7 +103,9 @@ function main() {
   console.log(
     syn.loaded
       ? `Справочник: ${syn.entries} веществ, ${syn.spellings} написаний` +
-          (syn.conflicts.length ? `, конфликтов: ${syn.conflicts.length}` : "")
+          ` (${(syn.sources ?? []).map((s) => `${s.file}: ${s.entries}`).join(", ")})` +
+          (syn.conflicts.length ? `, КОНФЛИКТОВ: ${syn.conflicts.length}` : "") +
+          (syn.renames ? `, разошлись в каноне: ${syn.renames}` : "")
       : "Справочник не прочитан — проверьте reference/synonyms.txt",
   );
   console.log(
