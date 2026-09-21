@@ -7,6 +7,7 @@
 //   node scripts/audit-products.js --absent     — вещества, которых нет в реестре
 //   node scripts/audit-products.js --weak       — совпадения, которым верить рано
 //   node scripts/audit-products.js --twins      — подписи-близнецы (буквы-двойники)
+//   node scripts/audit-products.js --merged     — какие строки справочника слились
 //   node scripts/audit-products.js --graph <id> — только по одному графу
 //
 // Зачем. Справочник синонимов я наполнял по ходовым названиям — то есть
@@ -94,6 +95,7 @@ function main() {
   const wantAbsent = args.includes("--absent");
   const wantWeak = args.includes("--weak");
   const wantTwins = args.includes("--twins");
+  const wantMerged = args.includes("--merged");
   const graphArg = args.indexOf("--graph");
   const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
 
@@ -105,7 +107,7 @@ function main() {
       ? `Справочник: ${syn.entries} веществ, ${syn.spellings} написаний` +
           ` (${(syn.sources ?? []).map((s) => `${s.file}: ${s.entries}`).join(", ")})` +
           (syn.conflicts.length ? `, КОНФЛИКТОВ: ${syn.conflicts.length}` : "") +
-          (syn.renames ? `, разошлись в каноне: ${syn.renames}` : "")
+          (syn.merged?.length ? `, слито строк: ${syn.merged.length}` : "")
       : "Справочник не прочитан — проверьте reference/synonyms.txt",
   );
   // Конфликт — одно написание у двух РАЗНЫХ веществ, то есть готовое слияние
@@ -125,6 +127,23 @@ function main() {
     console.log(
       "  Побеждает запись из файла, прочитанного первым. Если победил не тот —" +
         "\n  поправьте reference/synonyms.txt: он читается раньше собранного машиной.\n",
+    );
+  }
+
+  // Слияние тише конфликта, но последствие у него то же: два названия станут
+  // одним узлом. Прячем за флагом, а не за молчанием — счётчик в шапке уже
+  // сказал, что слияния были, и посмотреть их должно быть чем.
+  if (wantMerged && syn.merged?.length) {
+    console.log("\n── СЛИТО: одно вещество под разными главными именами ──");
+    for (const m of syn.merged) {
+      console.log(
+        `  «${m.ignored}» (${m.ignoredFrom}) → «${m.kept}» (${m.keptFrom}),` +
+          ` общих написаний: ${m.shared}`,
+      );
+    }
+    console.log(
+      "  Если слились РАЗНЫЕ вещества — уберите общие написания из строки в" +
+        "\n  reference/synonyms.txt: родство считается по их числу.\n",
     );
   }
 
@@ -281,10 +300,11 @@ function main() {
     }
   }
 
-  if (!wantMissing && !wantAbsent && !wantWeak && !wantTwins) {
+  if (!wantMissing && !wantAbsent && !wantWeak && !wantTwins && !wantMerged) {
     console.log(
       "\nСписки: --missing (дописать в справочник), --absent (нет в реестре)," +
-        " --weak (сомнительные совпадения), --twins (подписи-близнецы)",
+        " --weak (сомнительные совпадения), --twins (подписи-близнецы)," +
+        " --merged (слитые строки справочника)",
     );
   }
 }
