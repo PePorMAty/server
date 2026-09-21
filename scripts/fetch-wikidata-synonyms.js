@@ -7,6 +7,7 @@
 //   node scripts/fetch-wikidata-synonyms.js --missing-only  — только незнакомые справочнику
 //   node scripts/fetch-wikidata-synonyms.js --names "Бензол,Кумол"
 //   node scripts/fetch-wikidata-synonyms.js --limit 50      — оборвать после N названий
+//   node scripts/fetch-wikidata-synonyms.js --fast          — только пачками, без поиска по одному
 //
 // Зачем Wikidata. Номер CAS — единственный ходовой идентификатор ВЕЩЕСТВА:
 // ОКПД2 и ТН ВЭД классифицируют товарные категории, и под одним их кодом лежат
@@ -106,6 +107,27 @@ const STOP = loadStopList();
 const FOOD_CODE = /^[ЕE]\s?\d{2,4}$/i;
 
 /**
+ * Похоже ли написание на химическую формулу, а не на английское слово.
+ *
+ * Различать приходится: формула — законный ключ, на графах сплошь «Диоксид
+ * серы (SO2)», «Хлорид лития (LiCl)», «Оксиды азота (NOx)», и опознаются они
+ * как раз по скобке. А английское слово ключом брать опасно: «oil» или
+ * «water» стянут к себе что угодно.
+ *
+ * Формула складывается из символов элементов: заглавная буква, иногда строчная
+ * следом, иногда индекс. «SiCl4» — это Si + Cl4, «NOx» — N + Ox. Английское
+ * слово так не раскладывается: в «Formaldehyde» после «Fo» идёт вторая строчная
+ * подряд, а «AdBlue» спотыкается на «ue».
+ */
+function looksLikeFormula(name) {
+  const bare = String(name ?? "").replace(/\s+/g, "");
+  if (!bare) return false;
+  if (/^([A-Z][a-z]?\d*)+$/.test(bare)) return true;
+  // Сокращения и обозначения без строчных букв: «PET», «2,4-D», «L-SBR».
+  return /^[A-Z0-9,.()\-]+$/.test(bare);
+}
+
+/**
  * Годится ли написание ключом равенства.
  *
  * Возвращает причину отказа — её показываем, чтобы отсев был виден, а не
@@ -113,13 +135,20 @@ const FOOD_CODE = /^[ЕE]\s?\d{2,4}$/i;
  */
 function rejectReason(name) {
   if (!name || name.length < 3) return "слишком короткое";
-  if (!/[а-яё]/i.test(name)) return "не по-русски";
   if (/^\d+$/.test(name)) return "одни цифры";
+  if (FOOD_CODE.test(name)) return "код пищевой добавки";
+  // Латиницей пишут и формулы, и английские названия. Формула — законный
+  // ключ: на графах сплошь «Диоксид серы (SO2)», «Хлорид лития (LiCl)», и
+  // опознаются они как раз по скобке. А английское слово ключом брать
+  // опасно: «oil» или «water» стянут к себе что угодно. Отличаем по виду —
+  // в формуле есть цифра либо она набрана прописными.
+  if (!/[а-яё]/i.test(name) && !looksLikeFormula(name)) {
+    return "английское слово, не формула";
+  }
   // По длине короткое НЕ отсеиваем. Соблазн был: «фен» у бензола — это и
   // причёска, и вещество. Но той же меркой улетели бы ТДИ, МДИ, МДА, ПВХ —
   // ровно те сокращения, ради которых справочник и заводился. Отдельные
   // опасные короткие слова идут поимённо в synonyms-stop.txt.
-  if (FOOD_CODE.test(name)) return "код пищевой добавки";
   if (STOP.has(key(name))) return "класс веществ, не вещество";
   return null;
 }
@@ -294,6 +323,10 @@ async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
   const missingOnly = args.includes("--missing-only");
+  // Поиск по одному стоит дорого и даёт мало: на шестидесяти названиях
+  // Википедия дала 22 кода, а 38 медленных запросов добавили пять кандидатов.
+  // Кому нужна скорость, а не последние проценты, — этот флаг.
+  const fast = args.includes("--fast");
   const namesArg = args.indexOf("--names");
   const limitArg = args.indexOf("--limit");
   const limit = limitArg >= 0 ? Number(args[limitArg + 1]) : Infinity;
@@ -373,7 +406,11 @@ async function main() {
   }
 
   // ── 2) чего не нашлось статьёй — доспрашиваем поиском, по одному ──
-  const rest = names.filter((n) => !byTitle.has(n));
+  const rest = fast ? [] : names.filter((n) => !byTitle.has(n));
+  if (fast) {
+    const skipped = names.length - byTitle.size;
+    console.log(`--fast: поиском по одному не идём, пропущено ${skipped} названий.`);
+  }
   if (rest.length) {
     const seconds = Math.ceil((rest.length * delayMs) / 1000);
     const eta = seconds < 90 ? `${seconds} с` : `${Math.ceil(seconds / 60)} мин`;
