@@ -218,29 +218,52 @@ function main() {
     }
   }
 
-  // Подписи, различающиеся только неотличимыми на вид буквами: «Бисфенол A» с
-  // латинской A и «Бисфенол А» с кириллической. Такие узлы не схлопнутся
-  // никогда, а увидеть разницу на экране невозможно — только так и найдёшь.
+  // Подписи, сходящиеся к одному названию. Важно разделить два случая:
+  //
+  //   • регистр, дефисы, лишние пробелы — сходились и раньше, это не проблема,
+  //     а просто разнобой в подписях;
+  //   • неотличимые на вид буквы («Бисфенол A» с латинской A против
+  //     «Бисфенол А» с кириллической) — вот это ломало схлопывание, и увидеть
+  //     разницу на экране невозможно.
+  //
+  // Валить их в одну кучу нечестно: получилось бы, будто свод букв починил и
+  // то, что и без него работало.
   const twins = new Map();
   for (const r of rows) {
     const key = foldLookalikes(normalizeName(r.label));
     if (!key) continue;
-    if (!twins.has(key)) twins.set(key, new Set());
-    twins.get(key).add(r.label);
+    if (!twins.has(key)) twins.set(key, []);
+    twins.get(key).push(r.label);
   }
-  const twinGroups = [...twins.values()].filter((set) => set.size > 1);
-  if (twinGroups.length) {
+
+  const lookalikeGroups = [];
+  let plainGroups = 0;
+  for (const labels of twins.values()) {
+    if (labels.length < 2) continue;
+    // Если без свода букв подписи тоже сходятся — дело в регистре и знаках.
+    const plain = new Set(labels.map((l) => normalizeName(l)));
+    if (plain.size > 1) lookalikeGroups.push(labels);
+    else plainGroups += 1;
+  }
+
+  if (lookalikeGroups.length) {
     console.log(
-      `Подписи-близнецы:  ${twinGroups.length}` +
-        " — различаются невидимой буквой, смотрите --twins",
+      `Буквы-двойники:    ${lookalikeGroups.length}` +
+        " — подписи не сходились бы без свода букв, смотрите --twins",
+    );
+  }
+  if (plainGroups) {
+    console.log(
+      `Разнобой в подписи: ${plainGroups}` +
+        " — регистр и знаки; сходятся и так, чинить нечего",
     );
   }
 
   if (wantTwins) {
-    console.log("\n── Различаются только неотличимыми на вид буквами ──");
-    if (!twinGroups.length) console.log("  пусто");
-    for (const set of twinGroups) {
-      console.log(`  ${[...set].map((s) => `«${s}»`).join("  =  ")}`);
+    console.log("\n── Различаются неотличимыми на вид буквами ──");
+    if (!lookalikeGroups.length) console.log("  пусто");
+    for (const labels of lookalikeGroups) {
+      console.log(`  ${labels.map((s) => `«${s}»`).join("  =  ")}`);
     }
   }
 
