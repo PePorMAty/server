@@ -372,6 +372,57 @@ function main() {
       );
     }
     console.log("");
+
+    // Примерка правила. Ничего не меняет — только показывает, что было бы.
+    //
+    // Подтверждаем продукт, если нашлась запись, где выполнено хотя бы одно:
+    //   — совпадение с ПЕРВОГО слова названия («Полиэтилен высокого давления»);
+    //   — совпадение внутри короткой скобки, то есть с синонимом продукта
+    //     («Изопропилбензол (кумол)»);
+    //   — совпали два и более значимых слова в начале названия («Фракция
+    //     альфа-олефинов C₈»).
+    // Иначе это слово, случайно оказавшееся в середине чужого названия.
+    const verdict = (c) =>
+      c.head ? "первое слово" : c.parens ? "скобка-синоним" : c.pair ? "два слова" : null;
+
+    const confirmed = rows.filter((r) => r.found && r.coverage);
+    const dropped = confirmed.filter((r) => !verdict(r.coverage));
+
+    console.log("── ПРИМЕРКА ПРАВИЛА (ничего не меняет) ──\n");
+    console.log(
+      `  Было подтверждено: ${confirmed.length}` +
+        `   ·   осталось бы: ${confirmed.length - dropped.length}` +
+        `   ·   отсеялось бы: ${dropped.length}`,
+    );
+
+    const byReason = new Map();
+    for (const r of confirmed) {
+      const v = verdict(r.coverage);
+      if (v) byReason.set(v, (byReason.get(v) ?? 0) + 1);
+    }
+    console.log(
+      `  Чем удержались: ${[...byReason].map(([k, n]) => `${k}: ${n}`).join(", ")}`,
+    );
+
+    console.log("\n  ОТСЕЯЛОСЬ БЫ — проверьте, нет ли тут нужного:");
+    for (const r of dropped) {
+      console.log(
+        `    слово ${String(r.coverage.at + 1).padStart(2)}  «${r.label}»` +
+          `  →  «${(r.coverage.name ?? "").slice(0, 80)}»`,
+      );
+    }
+
+    // Удержавшиеся не первым словом — второе место, где правило может ошибаться.
+    console.log("\n  УДЕРЖАЛОСЬ БЫ не первым словом — проверьте, нет ли тут мусора:");
+    for (const r of confirmed) {
+      const v = verdict(r.coverage);
+      if (!v || v === "первое слово") continue;
+      console.log(
+        `    ${v.padEnd(14)}  «${r.label}»` +
+          `  →  «${((v === "скобка-синоним" ? r.coverage.parens : r.coverage.pair) ?? "").slice(0, 80)}»`,
+      );
+    }
+    console.log("");
   }
 
   if (
