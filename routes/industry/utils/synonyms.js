@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const { foldLookalikes, normalizeName } = require("./normalize");
+const { foldLookalikes, normalizeName, GENERIC_WORDS } = require("./normalize");
 
 /**
  * Ключ справочника.
@@ -150,10 +150,43 @@ function identifyParenthesized(map, rawName) {
   const close = text.indexOf(")", open + 1);
   if (close < 0) return null;
 
-  const head = map.get(dictKey(text.slice(0, open)));
-  const inner = map.get(dictKey(text.slice(open + 1, close)));
+  const head = lookupHalf(map, text.slice(0, open));
+  const inner = lookupHalf(map, text.slice(open + 1, close));
   if (!head || !inner) return null;
   return head.canon === inner.canon ? head : null;
+}
+
+/**
+ * Найти половину подписи в справочнике, не спотыкаясь о довески.
+ *
+ * Половина редко бывает чистым названием: «Изопропилбензола гидропероксид
+ * технический», «LPG, пропан/бутан». Пробуем по очереди — как есть, без слов
+ * вроде «технический» и «марки» (они и в поиске по реестру объявлены
+ * незначащими), и первым элементом перечисления.
+ *
+ * Послабления касаются только того, ЧТО искать. Правило, что обе половины
+ * должны сойтись на одном веществе, остаётся: «Бензол (толуол, ксилол)» так и
+ * не пройдёт, сколько половинки ни чисти.
+ */
+function lookupHalf(map, text) {
+  const raw = String(text ?? "");
+  const candidates = [raw];
+
+  const words = dictKey(raw).split(" ").filter(Boolean);
+  const meaningful = words.filter((w) => !GENERIC_WORDS.has(w));
+  if (meaningful.length && meaningful.length !== words.length) {
+    candidates.push(meaningful.join(" "));
+  }
+
+  // Перечисление: «LPG, пропан/бутан» — первым идёт само название.
+  const firstItem = raw.split(/[,;/]/)[0];
+  if (firstItem && firstItem !== raw) candidates.push(firstItem);
+
+  for (const candidate of candidates) {
+    const hit = map.get(dictKey(candidate));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /**
