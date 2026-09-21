@@ -1,20 +1,20 @@
 const { Node, Edge, GraphNode, Graph } = require('../models');
 
-// Íîğìàëèçàöèÿ íàçâàíèÿ äëÿ ïîèñêà äóáëèêàòîâ
+// ĞĞ¾Ñ€Ğ¼Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ğ½Ğ°Ğ·Ğ²Ğ°Ğ½Ğ¸Ñ Ğ´Ğ»Ñ Ğ¿Ğ¾Ğ¸ÑĞºĞ° Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚Ğ¾Ğ²
 function normalizeLabel(label) {
   return label
     .toLowerCase()
     .trim()
-    .replace(/[^\w\sà-ÿÀ-ß]/g, '')
+    .replace(/[^\w\sĞ°-ÑĞ-Ğ¯]/g, '')
     .replace(/\s+/g, '_')
     .substring(0, 200);
 }
 
-// Ñîçäàíèå èëè ïîëó÷åíèå ñóùåñòâóşùåãî óçëà
+// Ğ¡Ğ¾Ğ·Ğ´Ğ°Ğ½Ğ¸Ğµ Ğ¸Ğ»Ğ¸ Ğ¿Ğ¾Ğ»ÑƒÑ‡ĞµĞ½Ğ¸Ğµ ÑÑƒÑ‰ĞµÑÑ‚Ğ²ÑƒÑÑ‰ĞµĞ³Ğ¾ ÑƒĞ·Ğ»Ğ°
 async function findOrCreateNode(nodeData, transaction) {
   const normalizedLabel = normalizeLabel(nodeData.data.label);
   
-  // Èùåì ñóùåñòâóşùèé óçåë
+  // Ğ˜Ñ‰ĞµĞ¼ ÑÑƒÑ‰ĞµÑÑ‚Ğ²ÑƒÑÑ‰Ğ¸Ğ¹ ÑƒĞ·ĞµĞ»
   let node = await Node.findOne({
     where: { 
       normalizedLabel,
@@ -24,24 +24,24 @@ async function findOrCreateNode(nodeData, transaction) {
   });
 
   if (node) {
-    // Óâåëè÷èâàåì ñ÷åò÷èê èñïîëüçîâàíèÿ
+    // Ğ£Ğ²ĞµĞ»Ğ¸Ñ‡Ğ¸Ğ²Ğ°ĞµĞ¼ ÑÑ‡ĞµÑ‚Ñ‡Ğ¸Ğº Ğ¸ÑĞ¿Ğ¾Ğ»ÑŒĞ·Ğ¾Ğ²Ğ°Ğ½Ğ¸Ñ
     await node.increment('usageCount', { transaction });
-    console.log(`?? Èñïîëüçîâàí ñóùåñòâóşùèé óçåë: "${nodeData.data.label}"`);
+    console.log(`?? Ğ˜ÑĞ¿Ğ¾Ğ»ÑŒĞ·Ğ¾Ğ²Ğ°Ğ½ ÑÑƒÑ‰ĞµÑÑ‚Ğ²ÑƒÑÑ‰Ğ¸Ğ¹ ÑƒĞ·ĞµĞ»: "${nodeData.data.label}"`);
   } else {
-    // Ñîçäàåì íîâûé óçåë
+    // Ğ¡Ğ¾Ğ·Ğ´Ğ°ĞµĞ¼ Ğ½Ğ¾Ğ²Ñ‹Ğ¹ ÑƒĞ·ĞµĞ»
     node = await Node.create({
       normalizedLabel,
       type: nodeData.type,
       data: nodeData.data,
       usageCount: 1
     }, { transaction });
-    console.log(`? Ñîçäàí íîâûé óçåë: "${nodeData.data.label}"`);
+    console.log(`? Ğ¡Ğ¾Ğ·Ğ´Ğ°Ğ½ Ğ½Ğ¾Ğ²Ñ‹Ğ¹ ÑƒĞ·ĞµĞ»: "${nodeData.data.label}"`);
   }
 
   return node;
 }
 
-// Ïîëó÷åíèå ïîëíîãî ãğàôà ñ îáùèìè óçëàìè
+// ĞŸĞ¾Ğ»ÑƒÑ‡ĞµĞ½Ğ¸Ğµ Ğ¿Ğ¾Ğ»Ğ½Ğ¾Ğ³Ğ¾ Ğ³Ñ€Ğ°Ñ„Ğ° Ñ Ğ¾Ğ±Ñ‰Ğ¸Ğ¼Ğ¸ ÑƒĞ·Ğ»Ğ°Ğ¼Ğ¸
 async function getGraphWithSharedNodes(graphId) {
   const graph = await Graph.findByPk(graphId, {
     include: [
@@ -73,7 +73,7 @@ async function getGraphWithSharedNodes(graphId) {
     return null;
   }
 
-  // Ïğåîáğàçóåì â ôîğìàò React Flow
+  // ĞŸÑ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·ÑƒĞµĞ¼ Ğ² Ñ„Ğ¾Ñ€Ğ¼Ğ°Ñ‚ React Flow
   const nodes = graph.nodes.map(node => ({
     id: node.id,
     type: node.type,
@@ -100,7 +100,7 @@ async function getGraphWithSharedNodes(graphId) {
   };
 }
 
-// Ïîèñê ñâÿçàííûõ ãğàôîâ ÷åğåç îáùèå óçëû
+// ĞŸĞ¾Ğ¸ÑĞº ÑĞ²ÑĞ·Ğ°Ğ½Ğ½Ñ‹Ñ… Ğ³Ñ€Ğ°Ñ„Ğ¾Ğ² Ñ‡ĞµÑ€ĞµĞ· Ğ¾Ğ±Ñ‰Ğ¸Ğµ ÑƒĞ·Ğ»Ñ‹
 async function findRelatedGraphs(graphId, limit = 5) {
   const graph = await Graph.findByPk(graphId, {
     include: [{ model: Node, as: 'nodes' }]
@@ -110,7 +110,7 @@ async function findRelatedGraphs(graphId, limit = 5) {
 
   const nodeIds = graph.nodes.map(node => node.id);
 
-  // Íàõîäèì ãğàôû, êîòîğûå èñïîëüçóşò òå æå óçëû
+  // ĞĞ°Ñ…Ğ¾Ğ´Ğ¸Ğ¼ Ğ³Ñ€Ğ°Ñ„Ñ‹, ĞºĞ¾Ñ‚Ğ¾Ñ€Ñ‹Ğµ Ğ¸ÑĞ¿Ğ¾Ğ»ÑŒĞ·ÑƒÑÑ‚ Ñ‚Ğµ Ğ¶Ğµ ÑƒĞ·Ğ»Ñ‹
   const { Sequelize } = require('sequelize');
   const relatedGraphs = await Graph.findAll({
     where: {
@@ -131,7 +131,7 @@ async function findRelatedGraphs(graphId, limit = 5) {
   return relatedGraphs;
 }
 
-// Ïîëó÷åíèå íåñêîëüêèõ ãğàôîâ äëÿ îáúåäèíåíèÿ íà îäíîì õîëñòå
+// ĞŸĞ¾Ğ»ÑƒÑ‡ĞµĞ½Ğ¸Ğµ Ğ½ĞµÑĞºĞ¾Ğ»ÑŒĞºĞ¸Ñ… Ğ³Ñ€Ğ°Ñ„Ğ¾Ğ² Ğ´Ğ»Ñ Ğ¾Ğ±ÑŠĞµĞ´Ğ¸Ğ½ĞµĞ½Ğ¸Ñ Ğ½Ğ° Ğ¾Ğ´Ğ½Ğ¾Ğ¼ Ñ…Ğ¾Ğ»ÑÑ‚Ğµ
 async function getMultipleGraphs(graphNames) {
   const graphs = await Graph.findAll({
     where: {
@@ -150,7 +150,7 @@ async function getMultipleGraphs(graphNames) {
     ]
   });
 
-  // Îáúåäèíÿåì óçëû è ñâÿçè âñåõ ãğàôîâ
+  // ĞĞ±ÑŠĞµĞ´Ğ¸Ğ½ÑĞµĞ¼ ÑƒĞ·Ğ»Ñ‹ Ğ¸ ÑĞ²ÑĞ·Ğ¸ Ğ²ÑĞµÑ… Ğ³Ñ€Ğ°Ñ„Ğ¾Ğ²
   const allNodes = new Map();
   const allEdges = [];
   const graphInfos = [];
@@ -163,7 +163,7 @@ async function getMultipleGraphs(graphNames) {
       edgeCount: graph.edgeCount
     });
 
-    // Äîáàâëÿåì óçëû (èçáåãàåì äóáëèêàòîâ)
+    // Ğ”Ğ¾Ğ±Ğ°Ğ²Ğ»ÑĞµĞ¼ ÑƒĞ·Ğ»Ñ‹ (Ğ¸Ğ·Ğ±ĞµĞ³Ğ°ĞµĞ¼ Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚Ğ¾Ğ²)
     graph.nodes.forEach(node => {
       if (!allNodes.has(node.id)) {
         allNodes.set(node.id, {
@@ -175,7 +175,7 @@ async function getMultipleGraphs(graphNames) {
       }
     });
 
-    // Äîáàâëÿåì ñâÿçè
+    // Ğ”Ğ¾Ğ±Ğ°Ğ²Ğ»ÑĞµĞ¼ ÑĞ²ÑĞ·Ğ¸
     graph.edges.forEach(edge => {
       allEdges.push({
         id: edge.id,

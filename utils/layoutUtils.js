@@ -4,7 +4,7 @@ function autoLayoutNodes(nodes, edges) {
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(() => ({}));
 
-  // Настройки layout
+  // РќР°СЃС‚СЂРѕР№РєРё layout
   g.setGraph({
     rankdir: 'TB',
     nodesep: 100,
@@ -13,7 +13,7 @@ function autoLayoutNodes(nodes, edges) {
     marginy: 50
   });
 
-  // Добавляем узлы
+  // Р”РѕР±Р°РІР»СЏРµРј СѓР·Р»С‹
   nodes.forEach(node => {
     g.setNode(node.id, {
       width: 200,
@@ -21,21 +21,21 @@ function autoLayoutNodes(nodes, edges) {
     });
   });
 
-  // Добавляем связи
+  // Р”РѕР±Р°РІР»СЏРµРј СЃРІСЏР·Рё
   edges.forEach(edge => {
     g.setEdge(edge.source, edge.target);
   });
 
-  // Вычисляем layout
+  // Р’С‹С‡РёСЃР»СЏРµРј layout
   dagre.layout(g);
 
-  // Применяем позиции
+  // РџСЂРёРјРµРЅСЏРµРј РїРѕР·РёС†РёРё
   return nodes.map(node => {
     const nodeWithPosition = g.node(node.id);
     return {
       ...node,
       position: {
-        x: nodeWithPosition.x - 100, // Центрируем
+        x: nodeWithPosition.x - 100, // Р¦РµРЅС‚СЂРёСЂСѓРµРј
         y: nodeWithPosition.y - 50
       },
       data: {
