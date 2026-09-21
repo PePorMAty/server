@@ -286,7 +286,7 @@ function lookupProduct(rawName) {
   // и не знает, что слово было частью сложного прилагательного.
   const picked = rows.length
     ? keepBestOverlap(rows, matchedAs)
-    : { rows: [], shared: [] };
+    : { rows: [], shared: [], coverage: [] };
 
   const kept = picked.rows;
 
@@ -335,6 +335,17 @@ function lookupProduct(rawName) {
       },
     };
   } else {
+    // Запись, которая решает судьбу продукта при любом пороге: ему достаточно
+    // ОДНОЙ прошедшей записи, значит смотреть надо на самую убедительную —
+    // ту, где совпадение началось раньше всего, а при равенстве покрыло
+    // больше. Именно её и надо сравнивать с будущим порогом.
+    const shares = picked.coverage ?? [];
+    const leader = shares.length
+      ? shares.reduce((a, b) =>
+          b.at < a.at || (b.at === a.at && b.share > a.share) ? b : a,
+        )
+      : null;
+
     result = {
       ...summarize(kept),
       found: true,
@@ -344,6 +355,17 @@ function lookupProduct(rawName) {
       // непонятно, почему на «ПЭНД» приехали записи про полиэтилен.
       matchedAs: normalizeName(matchedAs) === normalized ? null : matchedAs,
       canon: known?.canon ?? null,
+      // Диагностика, на отбор пока не влияет — см. keepBestOverlap.
+      coverage: leader
+        ? {
+            share: leader.share,
+            at: leader.at,
+            name: leader.name,
+            rowWords: leader.rowWords,
+            matchedWords: picked.shared.length,
+            records: shares.length,
+          }
+        : null,
     };
   }
 
@@ -414,29 +436,65 @@ function docFreq(conn, stem) {
  *
  * Возвращает вместе с записями слова, по которым они совпали: на мягких
  * ступенях по ним решается, значит ли совпадение хоть что-нибудь.
+ *
+ * Считает заодно два признака — ПОКА ТОЛЬКО СЧИТАЕТ, на отбор они не влияют.
+ * Нужны, чтобы померить на живом реестре дыру с однословными названиями: для
+ * запроса из одного слова «совпали все слова» вырождается в «это слово где-то
+ * в записи есть», и «Ноутбук» подтверждался записью про влажные салфетки,
+ * годные в том числе для ноутбуков.
+ *
+ * 1. Доля — какую часть слов САМОЙ ЗАПИСИ объяснило совпадение. У салфеток
+ *    это 5%. Но одной доли мало: «Полиэтилен» против «Полиэтилен высокого
+ *    давления 15803-020» — тоже всего 20%, а совпадение верное. Марки, сорта
+ *    и артикулы раздувают знаменатель у совершенно правильных записей.
+ * 2. Место — на каком по счёту слове записи совпадение началось. Здесь
+ *    разница видна резко: у полиэтилена это слово ПЕРВОЕ, а у салфеток
+ *    «ноутбук» стоит в конце, в перечислении, для чего они годятся. Записи
+ *    реестра устроены как «продукт, потом уточнения», и это, похоже, и есть
+ *    настоящий признак.
+ *
+ * Порог подбирается замером, а не на глаз: прошлая попытка отсеять мусор
+ * угаданным числом провалилась (см. выше про редкость слова).
  */
 function keepBestOverlap(rows, rawName) {
   const queryStems = new Set(words(stemName(rawName)));
-  if (!queryStems.size) return { rows, shared: [] };
+  if (!queryStems.size) return { rows, shared: [], coverage: [] };
 
   let best = 0;
   const scored = rows.map((row) => {
     // Усечённые слова считаем из названия на месте: колонки name_stem в базе
     // нет — она нужна была только полнотекстовому индексу и место занимала
     // впустую. Строк тут не больше двух сотен, и ответ кладётся в кэш.
-    const rowStems = new Set(words(stemName(dropCompoundModifiers(row.name || ""))));
+    // Список, а не множество: по нему видно не только ЧТО совпало, но и ГДЕ.
+    const rowList = words(stemName(dropCompoundModifiers(row.name || "")));
+    const rowStems = new Set(rowList);
     const shared = [];
     for (const s of queryStems) if (rowStems.has(s)) shared.push(s);
     if (shared.length > best) best = shared.length;
-    return { row, shared };
+
+    // Номер первого совпавшего слова в названии записи.
+    let at = -1;
+    for (let i = 0; i < rowList.length; i++) {
+      if (queryStems.has(rowList[i])) {
+        at = i;
+        break;
+      }
+    }
+    return { row, shared, rowWords: rowStems.size, at };
   });
 
-  if (!best) return { rows: [], shared: [] };
+  if (!best) return { rows: [], shared: [], coverage: [] };
   const kept = scored.filter((s) => s.shared.length === best);
   return {
     rows: kept.map((s) => s.row),
     // Слова, по которым совпало: объединение по оставшимся записям.
     shared: [...new Set(kept.flatMap((s) => s.shared))],
+    coverage: kept.map((s) => ({
+      name: s.row.name ?? null,
+      rowWords: s.rowWords,
+      share: s.rowWords ? s.shared.length / s.rowWords : 0,
+      at: s.at,
+    })),
   };
 }
 

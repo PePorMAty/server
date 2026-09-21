@@ -8,6 +8,7 @@
 //   node scripts/audit-products.js --weak       — совпадения, которым верить рано
 //   node scripts/audit-products.js --twins      — подписи-близнецы (буквы-двойники)
 //   node scripts/audit-products.js --merged     — какие строки справочника слились
+//   node scripts/audit-products.js --coverage   — замер под порог по доле слов записи
 //   node scripts/audit-products.js --graph <id> — только по одному графу
 //
 // Зачем. Справочник синонимов я наполнял по ходовым названиям — то есть
@@ -96,6 +97,7 @@ function main() {
   const wantWeak = args.includes("--weak");
   const wantTwins = args.includes("--twins");
   const wantMerged = args.includes("--merged");
+  const wantCoverage = args.includes("--coverage");
   const graphArg = args.indexOf("--graph");
   const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
 
@@ -177,6 +179,8 @@ function main() {
       // Разбор мягкого совпадения: подтверждением оно не считается, но
       // посмотреть, за что зацепилось, полезно.
       weak: hit?.weak ?? null,
+      // Какую долю слов записи покрыло совпадение — для выбора порога.
+      coverage: hit?.coverage ?? null,
     });
   }
   rows.sort((a, b) => b.freq - a.freq || a.label.localeCompare(b.label, "ru"));
@@ -300,11 +304,89 @@ function main() {
     }
   }
 
-  if (!wantMissing && !wantAbsent && !wantWeak && !wantTwins && !wantMerged) {
+  // Замер под будущий порог: какую долю слов записи покрыло совпадение.
+  //
+  // Печатаем по возрастанию доли — именно снизу и надо смотреть, где мусор
+  // сменяется настоящими совпадениями. Число порога подбираем по этому списку
+  // и никак иначе: прошлый раз отсев по редкости слова провалился ровно
+  // потому, что границу угадали, а верные и ложные совпадения по ней
+  // перекрывались.
+  if (wantCoverage) {
+    // Сортируем по МЕСТУ совпадения: это и есть проверяемая догадка. Доля
+    // рядом — видно, различают ли они одно и то же.
+    const scored = rows
+      .filter((r) => r.found && r.coverage)
+      .sort(
+        (a, b) => b.coverage.at - a.coverage.at || a.coverage.share - b.coverage.share,
+      );
+
+    console.log("\n── ПОКРЫТИЕ: чем именно подтвердилось совпадение ──");
+    if (!scored.length) console.log("  нечего мерить");
+
+    const atBands = [1, 2, 3, 5, 9, 1e9];
+    const atCounts = new Map(atBands.map((b) => [b, 0]));
+    for (const r of scored) {
+      const band = atBands.find((b) => r.coverage.at < b);
+      atCounts.set(band, atCounts.get(band) + 1);
+    }
+    // Полоса b накрывает at из [prev, b-1], то есть слова с prev+1 по b.
+    console.log("\n  На каком слове записи совпадение началось:");
+    let prev = 0;
+    for (const b of atBands) {
+      const from = prev + 1;
+      const label =
+        b > 1e8
+          ? `слова ${from} и дальше`
+          : from === b
+            ? `слово ${from}`
+            : `слова ${from}–${b}`;
+      console.log(`    ${label.padEnd(20)} ${String(atCounts.get(b)).padStart(4)}`);
+      prev = b;
+    }
+
+    const shareBands = [0.1, 0.2, 0.3, 0.5, 0.75, 1.01];
+    const shareCounts = new Map(shareBands.map((b) => [b, 0]));
+    for (const r of scored) {
+      const band = shareBands.find((b) => r.coverage.share < b) ?? 1.01;
+      shareCounts.set(band, shareCounts.get(band) + 1);
+    }
+    console.log("\n  Какую долю слов записи объяснило:");
+    prev = 0;
+    for (const b of shareBands) {
+      const to = b > 1 ? "100%" : `${Math.round(b * 100)}%`;
+      console.log(
+        `    ${String(Math.round(prev * 100)).padStart(3)}–${to.padStart(4)}` +
+          `          ${String(shareCounts.get(b)).padStart(4)}`,
+      );
+      prev = b;
+    }
+
+    console.log("\n  Поимённо, начиная с самых подозрительных:");
+    for (const r of scored) {
+      const pct = `${Math.round(r.coverage.share * 100)}%`;
+      console.log(
+        `    слово ${String(r.coverage.at + 1).padStart(2)}, ${pct.padStart(4)}` +
+          `  «${r.label}»  →  «${(r.coverage.name ?? "").slice(0, 80)}»` +
+          `  (${r.coverage.matchedWords} из ${r.coverage.rowWords}` +
+          `, записей ${r.coverage.records})`,
+      );
+    }
+    console.log("");
+  }
+
+  if (
+    !wantMissing &&
+    !wantAbsent &&
+    !wantWeak &&
+    !wantTwins &&
+    !wantMerged &&
+    !wantCoverage
+  ) {
     console.log(
       "\nСписки: --missing (дописать в справочник), --absent (нет в реестре)," +
         " --weak (сомнительные совпадения), --twins (подписи-близнецы)," +
-        " --merged (слитые строки справочника)",
+        " --merged (слитые строки справочника)," +
+        " --coverage (замер под порог по доле слов записи)",
     );
   }
 }
