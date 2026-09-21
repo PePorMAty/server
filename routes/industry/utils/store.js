@@ -44,14 +44,11 @@ const STRICT_LEVELS = new Set(["all-words", "core-words"]);
 const LOOSE_LEVELS = new Set(["partial", "prefix"]);
 
 /**
- * Насколько редким должно быть слово, чтобы совпадение по нему что-то значило.
- *
- * Доля от всего реестра. Слово, встречающееся в каждой сотой записи, — это
- * «газ», «кислота», «масло», «мастер»: совпадение по такому не говорит ни о
- * чём. На маленькой базе доля вырождается, поэтому снизу стоит абсолютный пол.
+ * Частота слова в реестре нужна теперь только для объяснения, а не для
+ * решения: по ней видно, за что зацепилось мягкое совпадение. Порогом она
+ * была недолго и работы не сделала — верные и ложные совпадения по редкости
+ * перекрываются (см. комментарий в lookupProduct).
  */
-const RARE_SHARE = 0.01;
-const RARE_MIN = 50;
 
 let db = null;
 let openedPath = null;
@@ -83,7 +80,6 @@ function getDb() {
     cache.clear();
     // Частоты слов считаны по старой базе — к новой они отношения не имеют.
     dfCache.clear();
-    rareLimitCache = null;
   }
 
   openError = null;
@@ -151,11 +147,6 @@ function status() {
       actualAt: meta.actual_at || null,
       importedAt: meta.imported_at || null,
       source: meta.source || null,
-      /**
-       * Порог редкости слова для мягких ступеней поиска. Совпадение по слову,
-       * встречающемуся чаще, ни о чём не говорит и не засчитывается.
-       */
-      rareWordLimit: rareLimit(conn),
     };
   } catch (e) {
     return { ready: false, path: dbPath(), reason: e.message };
@@ -297,37 +288,64 @@ function lookupProduct(rawName) {
     ? keepBestOverlap(rows, matchedAs)
     : { rows: [], shared: [] };
 
-  // Мягкая ступень могла зацепиться за одно-единственное общее слово:
-  // «Синтез-газ» приводил к «Заглушке ПЭ 100 — ГАЗ», «Элементарная сера» —
-  // к «Краске художественной серой». Отличить попадание от случайности можно
-  // по редкости слова: «хладон» встречается в реестре десятки раз и потому
-  // что-то значит, «газ» — тысячи раз и не значит ничего. Требуем, чтобы
-  // среди совпавших слов было хотя бы одно редкое.
-  let kept = picked.rows;
-  let rarest = null;
-  if (kept.length && LOOSE_LEVELS.has(match)) {
-    const limit = rareLimit(conn);
-    const freqs = picked.shared.map((s) => ({ stem: s, df: docFreq(conn, s) }));
-    freqs.sort((a, b) => a.df - b.df);
-    rarest = freqs[0] ?? null;
-    if (!rarest || rarest.df > limit) kept = [];
-  }
+  const kept = picked.rows;
 
-  const result = kept.length
-    ? {
-        ...summarize(kept),
-        found: true,
+  // Совпадение по части слов подтверждением не считается.
+  //
+  // Мягкая ступень ищет по ЛЮБОМУ из слов запроса, и на живом реестре это
+  // почти всегда мусор: «Синтез-газ» приводил к «Заглушке ПЭ 100 — ГАЗ»,
+  // «Элементарная сера» — к «Краске художественной серой», «Адипиновая
+  // кислота» — к «Молочной кислоте» и ещё двум сотням записей. На 662
+  // продуктах живых графов так «находилось» 327 из 455.
+  //
+  // Отсеять это порогом редкости слова не вышло, и дело не в подборе числа:
+  // верные и ложные совпадения по редкости ПЕРЕКРЫВАЮТСЯ. «хладон» — 72
+  // записи и попадание верное, «легк» — 61 и мусор, «кумол» — 2 и верное,
+  // «остаток» — 1 и мусор. Одной границы между ними не существует.
+  //
+  // Поэтому мягкие ступени больше не дают «найдено». Записи не выбрасываем —
+  // возвращаем отдельным полем weak, чтобы разбор был виден и в аудите, и
+  // потом в карточке отдельной строкой «возможно». Но число подтверждённых по
+  // реестру должно означать «совпали все значимые слова», иначе узлу графа
+  // приписываются чужие производители, чужой ОКПД2 и чужой регион.
+  const loose = LOOSE_LEVELS.has(match);
+
+  let result;
+  if (!kept.length) {
+    result = { ...empty, canon: known?.canon ?? null };
+  } else if (loose) {
+    // Самое редкое из совпавших слов оставляем в разборе: по нему сразу
+    // видно, за что зацепились — за название вещества или за «кислоту».
+    const freqs = picked.shared
+      .map((s) => ({ stem: s, df: docFreq(conn, s) }))
+      .sort((a, b) => a.df - b.df);
+    result = {
+      ...empty,
+      canon: known?.canon ?? null,
+      weak: {
         match,
-        // По каким словам совпало и насколько они редки — видно, чему верить.
+        entryCount: kept.length,
         sharedWords: picked.shared,
-        rarestWord: rarest?.stem ?? null,
-        rarestFreq: rarest?.df ?? null,
-        // Нашли под другим названием — скажем, под каким: иначе в карточке
-        // непонятно, почему на «ПЭНД» приехали записи про полиэтилен.
+        rarestWord: freqs[0]?.stem ?? null,
+        rarestFreq: freqs[0]?.df ?? null,
         matchedAs: normalizeName(matchedAs) === normalized ? null : matchedAs,
-        canon: known?.canon ?? null,
-      }
-    : { ...empty, canon: known?.canon ?? null };
+        // Запись в порядке выдачи индекса, а не по алфавиту: показывать надо
+        // ту, за которую зацепились.
+        sample: kept[0]?.name ?? null,
+      },
+    };
+  } else {
+    result = {
+      ...summarize(kept),
+      found: true,
+      match,
+      sharedWords: picked.shared,
+      // Нашли под другим названием — скажем, под каким: иначе в карточке
+      // непонятно, почему на «ПЭНД» приехали записи про полиэтилен.
+      matchedAs: normalizeName(matchedAs) === normalized ? null : matchedAs,
+      canon: known?.canon ?? null,
+    };
+  }
 
   // Кэш растёт только на новых названиях; когда упрётся в предел — начинаем
   // заново, вытеснять по одному тут нечего оптимизировать.
@@ -383,15 +401,6 @@ function docFreq(conn, stem) {
   }
   dfCache.set(stem, n);
   return n;
-}
-
-/** Порог редкости для текущей базы. Считается один раз: база не меняется. */
-let rareLimitCache = null;
-function rareLimit(conn) {
-  if (rareLimitCache !== null) return rareLimitCache;
-  const total = conn.prepare("SELECT COUNT(*) AS n FROM products").get().n;
-  rareLimitCache = Math.max(RARE_MIN, Math.round(total * RARE_SHARE));
-  return rareLimitCache;
 }
 
 /**

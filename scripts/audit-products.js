@@ -108,8 +108,7 @@ function main() {
   );
   console.log(
     reg.ready
-      ? `Реестр: ${reg.entries} записей${reg.actualAt ? `, актуально на ${reg.actualAt}` : ""}` +
-          `; слово считается общим от ${reg.rareWordLimit} записей`
+      ? `Реестр: ${reg.entries} записей${reg.actualAt ? `, актуально на ${reg.actualAt}` : ""}`
       : `Реестр не подключён: ${reg.reason}`,
   );
 
@@ -134,15 +133,9 @@ function main() {
       found: hit ? hit.found : null,
       match: hit?.match ?? null,
       matchedAs: hit?.matchedAs ?? null,
-      // Слова, по которым совпало, и самое редкое из них. Название записи
-      // показывать бессмысленно: производители отсортированы по алфавиту, и
-      // первый из них может быть вовсе не тем, за кого зацепились. А слова —
-      // ровно то, на чём поиск и держится.
-      shared: hit?.sharedWords ?? [],
-      rarestWord: hit?.rarestWord ?? null,
-      rarestFreq: hit?.rarestFreq ?? null,
-      sample: hit?.producers?.[0]?.product ?? null,
-      entryCount: hit?.entryCount ?? 0,
+      // Разбор мягкого совпадения: подтверждением оно не считается, но
+      // посмотреть, за что зацепилось, полезно.
+      weak: hit?.weak ?? null,
     });
   }
   rows.sort((a, b) => b.freq - a.freq || a.label.localeCompare(b.label, "ru"));
@@ -152,11 +145,9 @@ function main() {
   const neither = rows.filter((r) => !r.canon && !r.found);
   const absent = rows.filter((r) => r.canon && r.found === false);
 
-  // Совпадения по самым мягким ступеням лестницы — «нашлось по одному из
-  // слов» и «по началу слова». Они и ошибаются чаще всего: на общем слове
-  // вроде «жидкость» цепляется чужая запись. Их надо смотреть глазами.
-  const WEAK = new Set(["partial", "prefix"]);
-  const weak = rows.filter((r) => r.found && WEAK.has(r.match));
+  // Мягкие совпадения подтверждением больше не считаются, но остаются
+  // видимыми: иногда среди них попадается верное.
+  const weak = rows.filter((r) => r.weak);
 
   console.log(`Справочник знает:  ${knownCount} из ${rows.length}`);
   if (reg.ready) {
@@ -172,16 +163,16 @@ function main() {
       if (!r.found) continue;
       byLevel.set(r.match, (byLevel.get(r.match) ?? 0) + 1);
     }
-    const order = ["exact", "all-words", "core-words", "partial", "prefix"];
+    const order = ["exact", "all-words", "core-words"];
     const levels = order
       .filter((l) => byLevel.has(l))
       .map((l) => `${MATCH_LABELS[l] ?? l}: ${byLevel.get(l)}`)
       .join(", ");
-    if (levels) console.log(`Как нашлось:       ${levels}`);
+    if (levels) console.log(`Как подтвердилось: ${levels}`);
     if (weak.length) {
       console.log(
-        `Верить рано:       ${weak.length}` +
-          " — нашлось по части слов, смотрите --weak",
+        `Похоже, но не в счёт: ${weak.length}` +
+          " — совпала часть слов, подтверждением не считается, смотрите --weak",
       );
     }
   }
@@ -204,17 +195,18 @@ function main() {
   }
 
   if (wantWeak) {
-    console.log("\n── Нашлось по части слов: проверьте, то ли это вещество ──");
+    console.log("\n── Совпала часть слов: в подтверждённые не идёт ──");
     if (!weak.length) console.log("  пусто");
     for (const r of weak) {
-      const via = r.matchedAs ? ` через «${r.matchedAs}»` : "";
+      const w = r.weak;
+      const via = w.matchedAs ? ` через «${w.matchedAs}»` : "";
       const rare =
-        r.rarestWord != null
-          ? `совпало по «${r.rarestWord}» (в ${r.rarestFreq} запис.)`
-          : `совпало по: ${r.shared.join(", ")}`;
+        w.rarestWord != null
+          ? `зацепилось за «${w.rarestWord}» (в ${w.rarestFreq} запис.)`
+          : `зацепилось за: ${w.sharedWords.join(", ")}`;
       console.log(`  ${r.label}${via}`);
-      console.log(`      ${rare}; записей: ${r.entryCount}`);
-      if (r.sample) console.log(`      напр. «${String(r.sample).slice(0, 90)}»`);
+      console.log(`      ${rare}; записей: ${w.entryCount}`);
+      if (w.sample) console.log(`      напр. «${String(w.sample).slice(0, 90)}»`);
     }
   }
 
