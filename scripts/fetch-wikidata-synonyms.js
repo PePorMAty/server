@@ -73,6 +73,57 @@ const TITLE_BATCH = 50;
 /** Ключ сравнения — тот же, что у справочника. */
 const key = (s) => foldLookalikes(normalizeName(s));
 
+const STOP_FILE = path.resolve(__dirname, "../reference/synonyms-stop.txt");
+
+/**
+ * Слова, которые нельзя брать ключом равенства.
+ *
+ * Wikidata держит в синонимах и классы, к которым вещество относится: у
+ * этанола — «спирт» и «алкоголь», у метана — «природный газ». Как справка это
+ * верно, а как ключ равенства сливает разные продукты в один узел. Список
+ * лежит отдельным файлом, видимым и правимым: см. reference/synonyms-stop.txt.
+ */
+function loadStopList() {
+  const stop = new Set();
+  let text;
+  try {
+    text = fs.readFileSync(STOP_FILE, "utf8").replace(/^\uFEFF/, "");
+  } catch {
+    return stop; // нет файла — отсеиваем только правилами ниже
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const term = line.trim();
+    if (!term || term.startsWith("#")) continue;
+    const k = key(term);
+    if (k) stop.add(k);
+  }
+  return stop;
+}
+
+const STOP = loadStopList();
+
+/** Коды пищевых добавок: «Е240», «E 355» — не названия вещества. */
+const FOOD_CODE = /^[ЕE]\s?\d{2,4}$/i;
+
+/**
+ * Годится ли написание ключом равенства.
+ *
+ * Возвращает причину отказа — её показываем, чтобы отсев был виден, а не
+ * происходил молча.
+ */
+function rejectReason(name) {
+  if (!name || name.length < 3) return "слишком короткое";
+  if (!/[а-яё]/i.test(name)) return "не по-русски";
+  if (/^\d+$/.test(name)) return "одни цифры";
+  // По длине короткое НЕ отсеиваем. Соблазн был: «фен» у бензола — это и
+  // причёска, и вещество. Но той же меркой улетели бы ТДИ, МДИ, МДА, ПВХ —
+  // ровно те сокращения, ради которых справочник и заводился. Отдельные
+  // опасные короткие слова идут поимённо в synonyms-stop.txt.
+  if (FOOD_CODE.test(name)) return "код пищевой добавки";
+  if (STOP.has(key(name))) return "класс веществ, не вещество";
+  return null;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Сколько запросов подряд прошло без замечаний — по ним отпускаем тормоз. */
@@ -231,11 +282,12 @@ async function entities(ids) {
 }
 
 /** Годится ли название в справочник. */
-function usableName(name) {
-  if (!name || name.length < 3) return false;
-  if (!/[а-яё]/i.test(name)) return false; // русское название, латинские не наш случай
-  if (/^\d+$/.test(name)) return false;
-  return true;
+const usableName = (name) => rejectReason(name) === null;
+
+/** Первая буква заглавной: идентификатор видит человек в карточке узла. */
+function asCanon(name) {
+  const s = String(name ?? "").trim();
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
 async function main() {
@@ -370,6 +422,8 @@ async function main() {
   const entries = new Map(); // Q-id → запись
   const ambiguous = [];
   const unresolved = [];
+  // Что выброшено отсевом — показываем, чтобы он не работал молча.
+  const dropped = [];
 
   for (const [name, candidateIds] of candidatesByName) {
     const wanted = key(name);
@@ -394,14 +448,29 @@ async function main() {
     }
 
     const item = hits[0];
+
+    // Канон-категория испортил бы всё, что к нему привяжется: «спирт» стянул
+    // бы к себе и метанол, и этанол. Такую запись берём не с другим каноном,
+    // а не берём вовсе — выбрать за Wikidata, какое из имён главное, мы не
+    // можем.
+    const canonBad = rejectReason(item.label);
+    if (canonBad) {
+      dropped.push({ name: item.label, why: `${canonBad} (канон ${item.id})` });
+      continue;
+    }
+
     const spellings = [];
     const seen = new Set();
     for (const s of [item.label, ...item.aliases]) {
-      if (!usableName(s)) continue;
+      const why = rejectReason(s);
+      if (why) {
+        dropped.push({ name: s, why, of: item.label });
+        continue;
+      }
       const k = key(s);
       if (!k || seen.has(k)) continue;
       seen.add(k);
-      spellings.push(s);
+      spellings.push(asCanon(s));
     }
     if (spellings.length) {
       entries.set(item.id, { ...item, spellings });
@@ -416,7 +485,25 @@ async function main() {
   console.log(`Из них с разнописанием:  ${useful.length}  ← только они идут в файл`);
   console.log(`Названий без совпадения: ${unresolved.length}`);
   console.log(`Неоднозначных:           ${ambiguous.length}`);
+  console.log(`Синонимов отсеяно:       ${dropped.length}`);
   if (failed) console.log(`Запросов не прошло:      ${failed}`);
+
+  if (dropped.length) {
+    // Показываем всё: отсев решает, что попадёт в ключ равенства, и работать
+    // молча ему нельзя. Увидели лишнее — reference/synonyms-stop.txt правится
+    // руками, и пересбор это учтёт.
+    const byReason = new Map();
+    for (const d of dropped) {
+      if (!byReason.has(d.why)) byReason.set(d.why, []);
+      byReason.get(d.why).push(d.of ? `${d.name} (у «${d.of}»)` : d.name);
+    }
+    console.log("\nОтсеяно из синонимов:");
+    for (const [why, list] of byReason) {
+      console.log(`  ${why}: ${list.length}`);
+      for (const n of list.slice(0, 12)) console.log(`      ${n}`);
+      if (list.length > 12) console.log(`      … и ещё ${list.length - 12}`);
+    }
+  }
 
   if (ambiguous.length) {
     console.log("\nНеоднозначные (под одним названием разные вещества, пропущены):");
