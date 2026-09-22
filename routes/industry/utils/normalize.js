@@ -46,6 +46,15 @@ const GENERIC_WORDS = new Set([
   "продукция",
   "смесь",
   "прочий",
+  // «Изопрен (мономер)» — это изопрен. Слово говорит, в какой форме вещество,
+  // но самого вещества не меняет.
+  //
+  // ОСТОРОЖНО при пополнении списка. Слово отсюда считается НЕ НЕСУЩИМ
+  // различия: «Пропан технический» сведётся к пропану. Если сюда попадёт
+  // «вторичный», то «Полиэтилен (вторичный)» сольётся с первичным сырьём —
+  // а это разные продукты. Годятся только слова про исполнение и качество,
+  // но не про происхождение и состав.
+  "мономер",
 ]);
 
 /**
@@ -234,6 +243,36 @@ function buildQueryLadder(rawName) {
   return ladder;
 }
 
+/** Символ элемента: заглавная, иногда строчная следом, иногда индекс. */
+const ATOM = "[A-Z][a-z]?\\d*";
+const ELEMENT_FORMULA = new RegExp(`^(?:${ATOM}|\\((?:${ATOM})+\\)\\d*)+$`);
+
+/**
+ * Настоящая химическая формула: «Cl2», «Hg», «NaCl», «H2S2O7», «Ca(OH)2».
+ *
+ * Строгая нарочно. Формула — это ПЕРЕСКАЗ названия, а не другое вещество, и
+ * на этом основано послабление в опознании: «Хлор (Cl2)» — тот же хлор.
+ * Сокращения сюда пускать нельзя: «Каучук (SBR)» — это конкретный каучук, а
+ * не каучук вообще, и такое послабление слило бы разные продукты.
+ */
+function isElementFormula(name) {
+  const bare = String(name ?? "").replace(/\s+/g, "");
+  return bare ? ELEMENT_FORMULA.test(bare) : false;
+}
+
+/**
+ * Формула или обозначение латиницей: сверх формул ещё «PET», «2,4-D», «L-SBR».
+ *
+ * Мягче, чем isElementFormula, и годится только там, где надо отличить
+ * «написано не по-русски, но осмысленно» от английского слова.
+ */
+function looksLikeFormula(name) {
+  const bare = String(name ?? "").replace(/\s+/g, "");
+  if (!bare) return false;
+  if (ELEMENT_FORMULA.test(bare)) return true;
+  return /^[A-Z0-9,.()\-]+$/.test(bare);
+}
+
 module.exports = {
   foldLookalikes,
   normalizeName,
@@ -242,6 +281,8 @@ module.exports = {
   words,
   coreWords,
   buildQueryLadder,
+  isElementFormula,
+  looksLikeFormula,
   STOP_WORDS,
   GENERIC_WORDS,
 };

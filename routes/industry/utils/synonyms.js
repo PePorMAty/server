@@ -16,7 +16,13 @@
 const fs = require("fs");
 const path = require("path");
 
-const { foldLookalikes, normalizeName, GENERIC_WORDS } = require("./normalize");
+const {
+  foldLookalikes,
+  normalizeName,
+  isElementFormula,
+  words,
+  GENERIC_WORDS,
+} = require("./normalize");
 
 /**
  * Ключ справочника.
@@ -239,7 +245,10 @@ function identify(rawName) {
   const key = dictKey(rawName);
   if (!key) return null;
 
-  const hit = map.get(key) ?? identifyParenthesized(map, rawName);
+  const hit =
+    map.get(key) ??
+    identifyParenthesized(map, rawName) ??
+    identifyWithoutGeneric(map, key);
   if (!hit) return null;
 
   return {
@@ -249,6 +258,46 @@ function identify(rawName) {
     exact: dictKey(hit.canon) === key,
     spellings: hit.spellings,
   };
+}
+
+/**
+ * То же название без слов, ничего не говорящих о веществе.
+ *
+ * «Пропан технический» — это пропан, «Бутан марки А» — бутан. Такие довески
+ * стоят в подписях узлов сплошь и рядом, а опознание до сих пор было
+ * буквальным: одна точная выборка по всей строке, и любое уточнение сбивало
+ * его начисто.
+ *
+ * Список этих слов (GENERIC_WORDS) намеренно короткий и разборчивый: туда
+ * попадает только то, что говорит об исполнении, но не о происхождении.
+ * «Вторичный» там не лежит и лежать не должен — вторичный полиэтилен это
+ * другой продукт.
+ */
+function identifyWithoutGeneric(map, key) {
+  const all = words(key);
+  const rest = stripGeneric(all);
+  if (!rest.length || rest.length === all.length) return null;
+  return map.get(rest.join(" ")) ?? null;
+}
+
+/**
+ * Убрать слова, ничего не говорящие о веществе.
+ *
+ * Обозначение сорта сразу за таким словом уходит вместе с ним: «марки А»,
+ * «сорт Б» — это одно целое. А вот одинокую букву саму по себе трогать
+ * нельзя ни в коем случае: «Бисфенол А» и «Бисфенол» — РАЗНЫЕ вещества, и
+ * сведя их, мы слили бы два узла зря.
+ */
+function stripGeneric(list) {
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    if (GENERIC_WORDS.has(list[i])) {
+      if (list[i + 1]?.length === 1) i += 1;
+      continue;
+    }
+    out.push(list[i]);
+  }
+  return out;
 }
 
 /**
@@ -270,10 +319,29 @@ function identifyParenthesized(map, rawName) {
   const close = text.indexOf(")", open + 1);
   if (close < 0) return null;
 
+  const innerText = text.slice(open + 1, close);
   const head = lookupHalf(map, text.slice(0, open));
-  const inner = lookupHalf(map, text.slice(open + 1, close));
+
+  // Скобка, которая ничего не решает, — не повод отказывать.
+  //
+  // «Хлор (Cl2)» и «Жидкая ртуть (Hg)»: формула это ПЕРЕСКАЗ названия, другим
+  // веществом она быть не может. «Изопрен (мономер)»: слово говорит о форме, а
+  // не о веществе. В обоих случаях скобка не добавляет и не отменяет ничего,
+  // и судить надо по головной половине.
+  //
+  // Строго про формулы: сокращения сюда НЕ попадают. «Каучук (SBR)» — это
+  // конкретный каучук, а не каучук вообще, и такая поблажка слила бы разное.
+  if (head && (isElementFormula(innerText) || allGeneric(innerText))) return head;
+
+  const inner = lookupHalf(map, innerText);
   if (!head || !inner) return null;
   return head.canon === inner.canon ? head : null;
+}
+
+/** Скобка целиком из слов, ничего не говорящих о веществе. */
+function allGeneric(text) {
+  const parts = words(dictKey(text));
+  return parts.length > 0 && parts.every((w) => GENERIC_WORDS.has(w));
 }
 
 /**
