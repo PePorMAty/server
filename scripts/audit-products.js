@@ -35,9 +35,11 @@ const {
   identify,
   synonymsStatus,
   allEntries,
+  spellingsOf,
 } = require("../routes/industry/utils/synonyms");
-const { lookupProduct, status } = require("../routes/industry/utils/store");
+const { lookupProduct, getDb, status } = require("../routes/industry/utils/store");
 const {
+  buildQueryLadder,
   foldLookalikes,
   normalizeName,
   stemName,
@@ -426,10 +428,20 @@ function main() {
   if (wantAbbr) {
     const LIMIT = 4;
     console.log(
-      `\n── Что приносят сокращения короче ${LIMIT + 1} знаков ──\n` +
-        "  Подтверждённые записи должны быть про само вещество. Если это\n" +
-        "  посторонний товар — сокращение надо убрать из справочника.\n",
+      `\n── Что приносит САМО сокращение короче ${LIMIT + 1} знаков ──\n` +
+        "  Спрашиваем индекс одним лишь сокращением, без остальных написаний:\n" +
+        "  только так видно, что оно добавляет от себя. Через lookupProduct не\n" +
+        "  увидеть — там ищется сразу по всем написаниям записи, и сокращение\n" +
+        "  неотличимо от полного названия.\n\n" +
+        "  Читать названия: запись не про это вещество — сокращение убрать.\n",
     );
+
+    const conn = reg.ready ? getDb() : null;
+    const stmt = conn?.prepare(
+      `SELECT p.name FROM products_fts f JOIN products p ON p.id = f.rowid
+       WHERE products_fts MATCH ? LIMIT 4`,
+    );
+
     const seen = new Set();
     const short = [];
     for (const e of allEntries()) {
@@ -442,25 +454,31 @@ function main() {
     }
     short.sort((a, b) => a[0].localeCompare(b[0], "ru"));
 
-    let noisy = 0;
+    let withHits = 0;
     for (const [spelling, canon] of short) {
-      const r = lookupProduct(spelling);
-      if (!r?.found) continue;
-      const names = [...new Set((r.producers ?? []).map((p) => p.product))];
-      // Тревога, когда ни в одном подтверждённом названии нет самого
-      // канонического слова: значит, сокращение привело куда-то не туда.
-      const stem = stemName(canon).split(" ")[0];
-      const onTarget = names.some((n) => stemName(n).includes(stem));
-      if (!onTarget) noisy += 1;
-      console.log(
-        `  ${onTarget ? "   " : "!!!"} «${spelling}» → ${canon}` +
-          `   ${r.entryCount} записей, ${r.producerCount} производителей`,
-      );
-      for (const n of names.slice(0, 3)) console.log(`         ${n.slice(0, 80)}`);
+      if (!stmt) break;
+      // Только строгие ступени: мягкие ищут по любому слову и к сокращению
+      // отношения не имеют.
+      let rows = [];
+      for (const step of buildQueryLadder(spelling)) {
+        if (!["all-words", "core-words"].includes(step.level)) continue;
+        try {
+          rows = stmt.all(step.query);
+        } catch {
+          rows = [];
+        }
+        if (rows.length) break;
+      }
+      if (!rows.length) continue;
+      withHits += 1;
+      console.log(`  «${spelling}» → ${canon}`);
+      for (const r of rows) console.log(`         ${r.name.slice(0, 82)}`);
     }
+
     console.log(
-      `\n  Сокращений проверено: ${short.length}, нашли записи и увели не туда: ${noisy}` +
-        (noisy ? "   (помечены !!!)" : ""),
+      `\n  Сокращений проверено: ${short.length};` +
+        ` сами по себе что-то находят: ${withHits}.` +
+        `\n  Остальные ${short.length - withHits} безвредны — реестр их не знает.`,
     );
   }
 
