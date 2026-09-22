@@ -45,6 +45,20 @@ const STRICT_LEVELS = new Set(["all-words", "core-words"]);
 const LOOSE_LEVELS = new Set(["partial", "prefix"]);
 
 /**
+ * Порядок ступеней — от самой надёжной к самой нечёткой.
+ *
+ * Перечислен здесь, а не выводится из лестницы: лестница для КАЖДОГО написания
+ * своя и не всякая несёт все ступени, а обход идёт по ступеням сразу для всех
+ * написаний. Порядок должен быть один и тот же, чем бы ни оказалось первое
+ * написание.
+ *
+ * Ступень, которой здесь нет, не пропадает: она добавляется в конец обхода на
+ * месте. Так список остаётся подсказкой о порядке, а не единственным местом,
+ * которое надо не забыть поправить.
+ */
+const LADDER_ORDER = ["all-words", "core-words", "partial", "prefix"];
+
+/**
  * Частота слова в реестре нужна теперь только для объяснения, а не для
  * решения: по ней видно, за что зацепилось мягкое совпадение. Порогом она
  * была недолго и работы не сделала — верные и ложные совпадения по редкости
@@ -263,20 +277,43 @@ function lookupProduct(rawName, opts) {
   // все мягкие. Иначе «похоже» по первому написанию побеждало бы «точно» по
   // второму.
   if (!rows.length) {
-    outer: for (const spelling of spellings) {
-      const own = normalizeName(spelling) === normalized;
-      for (const step of buildQueryLadder(spelling)) {
+    const ladders = spellings.map((spelling) => ({
+      spelling,
+      own: normalizeName(spelling) === normalized,
+      steps: buildQueryLadder(spelling),
+    }));
+
+    // Обход идёт ПО СТУПЕНЯМ, а написания перебираются внутри. Наоборот было
+    // нельзя, и это ровно та ошибка, от которой оговорка выше уберегает точное
+    // совпадение, а лестницу не уберегала: первое написание успевало спуститься
+    // до мягкой ступени раньше, чем второе пробовало строгую.
+    //
+    // Поймано на «Пищевой соде». Её собственное написание цеплялось мягкой
+    // ступенью за три записи со словом «пищевой», цикл на этом обрывался — и
+    // «Гидрокарбонат натрия», который нашёл бы все семь записей строгой
+    // ступенью, не пробовался вовсе. Мягкие три потом отбрасывал отбор, и
+    // вещество выходило ненайденным, хотя в реестре оно есть.
+    // Ступень, не перечисленная в LADDER_ORDER, идёт в конец, а не мимо.
+    const levels = [...LADDER_ORDER];
+    for (const l of ladders) {
+      for (const s of l.steps) if (!levels.includes(s.level)) levels.push(s.level);
+    }
+
+    outer: for (const level of levels) {
+      for (const { spelling, own, steps } of ladders) {
         // Мягкие ступени ищут по любому из слов, и на синонимах это даёт
         // ложные попадания: «Незамерзайка» через «стеклоомывающую жидкость»
         // цеплялась за «Жидкость тормозная» по общему слову. Нечёткость
         // допустима один раз, а не дважды подряд — по чужим написаниям идём
         // только строгими ступенями.
-        if (!own && !STRICT_LEVELS.has(step.level)) continue;
+        if (!own && !STRICT_LEVELS.has(level)) continue;
+        const step = steps.find((s) => s.level === level);
+        if (!step) continue;
         try {
           const found = ftsStmt.all(step.query);
           if (found.length) {
             rows = found;
-            match = step.level;
+            match = level;
             matchedAs = spelling;
             break outer;
           }
@@ -406,7 +443,7 @@ function lookupProduct(rawName, opts) {
     result = {
       // Сводку считаем по ПРОШЕДШИМ отбор записям, а не по всему найденному:
       // иначе производители, регионы и ОКПД2 приехали бы из отброшенных.
-      ...summarize(confirmed),
+      ...summarize(confirmed, spellings),
       found: true,
       match,
       sharedWords: picked.shared,
@@ -931,8 +968,41 @@ function keepBestOverlap(rows, rawName) {
   };
 }
 
-/** Свернуть строки реестра в сводку по продукту. */
-function summarize(rows) {
+/**
+ * Называет ли сам классификатор наше вещество под этим кодом.
+ *
+ * Сравниваем название позиции ОКПД2 с известными написаниями продукта:
+ * покрыто целиком хотя бы одно — значит, классификатор говорит ровно про то,
+ * что мы спросили. «Гидрокарбонат натрия» известен и как «бикарбонат натрия»,
+ * а позиция 20.13.43.191 называется «Водородкарбонат натрия (бикарбонат
+ * натрия)» — совпало, и код про наше вещество.
+ *
+ * Берём ТОЛЬКО точное название позиции. Название ГРУППЫ над кодом слишком
+ * широко: «Спирты одноатомные насыщенные» подошло бы дюжине разных веществ, и
+ * повышать по нему код значило бы верить общему больше, чем частному.
+ *
+ * Слова короче трёх букв отбрасываем: по ним совпадает что угодно.
+ */
+function codeNamesSubstance(code, spellings) {
+  if (!okpd2NameExact(code)) return false;
+  const codeStems = new Set(words(stemName(okpd2Name(code) ?? "")));
+  if (!codeStems.size) return false;
+
+  for (const spelling of spellings) {
+    const stems = words(stemName(spelling)).filter((w) => w.length > 2);
+    if (!stems.length) continue;
+    if (stems.every((w) => codeStems.has(w))) return true;
+  }
+  return false;
+}
+
+/**
+ * Свернуть строки реестра в сводку по продукту.
+ *
+ * spellings — известные написания продукта; по ним решается, какой из кодов
+ * ОКПД2 говорит про него, а какой про что-то своё.
+ */
+function summarize(rows, spellings = []) {
   const byProducer = new Map();
   const regions = new Set();
   let anyActive = false;
@@ -971,7 +1041,19 @@ function summarize(rows) {
   // При равенстве берём меньший код: лишь бы ответ не плавал от порядка строк.
   const byCount = (m) =>
     [...m].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
-  const ranked = byCount(okpd2Counts);
+
+  // ОКПД2 выбираем не одним большинством. «Гидрокарбонат натрия» у семи
+  // записей стоял под двумя кодами: 20.13.43.191 «Водородкарбонат натрия
+  // (бикарбонат натрия)» у трёх и 10.89.19.150 «Добавки пищевые комплексные»
+  // у четырёх. Большинство давало «пищевую добавку» — формально правду, а по
+  // сути потерю: первый код называет само вещество, второй — назначение
+  // товара. Поэтому сперва смотрим, какие коды классификатор связывает с этим
+  // веществом, и большинство считаем уже среди них.
+  const ranked = byCount(okpd2Counts).sort((a, b) => {
+    const an = codeNamesSubstance(a[0], spellings);
+    const bn = codeNamesSubstance(b[0], spellings);
+    return an === bn ? 0 : an ? -1 : 1;
+  });
   const okpd2 = ranked[0]?.[0] ?? null;
   const rankedTnved = byCount(tnvedCounts);
   const tnved = rankedTnved[0]?.[0] ?? null;
