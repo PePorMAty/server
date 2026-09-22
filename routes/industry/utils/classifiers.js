@@ -20,6 +20,8 @@ const DIR = path.resolve(__dirname, "../../../reference");
 /** Код → название. null, пока не читали; Map — после. */
 let okpd2 = null;
 let tnved = null;
+/** Коды ОКПД2, снятые с классификатора. null, пока не читали. */
+let retired = null;
 
 /** Прочитать файл справочника. Нет файла — это не ошибка. */
 function readFile(name) {
@@ -46,6 +48,38 @@ function loadOkpd2() {
     if (code && name) map.set(code, name);
   }
   return map;
+}
+
+/**
+ * Коды, исключённые из классификатора.
+ *
+ * Собираются скриптом okpd2-retired.js разностью нашего файла и свежей
+ * выгрузки классификатора. Файла может не быть — тогда просто не помечаем:
+ * это уточнение, а не условие работы.
+ */
+function loadRetired() {
+  const set = new Set();
+  const text = readFile("okpd2-retired.txt");
+  if (!text) return set;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("#")) continue;
+    const code = line.split("\t")[0].trim();
+    if (code) set.add(code);
+  }
+  return set;
+}
+
+/**
+ * Снят ли код с классификатора.
+ *
+ * Проверяем код ЦЕЛИКОМ, без отсечения хвоста, — в отличие от поиска
+ * названия. Родительская группа может быть жива, когда исключена только
+ * детализация: 20.14.61.000 снят, а 20.14.61 остался.
+ */
+function okpd2Retired(code) {
+  if (retired === null) retired = loadRetired();
+  const clean = String(code ?? "").trim();
+  return clean ? retired.has(clean) : false;
 }
 
 /**
@@ -148,4 +182,4 @@ function classifiersStatus() {
   return { okpd2: okpd2.size, tnved: tnved.size, dir: DIR };
 }
 
-module.exports = { okpd2Name, tnvedName, classifiersStatus };
+module.exports = { okpd2Name, okpd2Retired, tnvedName, classifiersStatus };

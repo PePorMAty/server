@@ -19,7 +19,7 @@ const {
 } = require("./normalize");
 const { regionByInn } = require("./regions");
 const { shortenCompany } = require("./company");
-const { okpd2Name, tnvedName } = require("./classifiers");
+const { okpd2Name, okpd2Retired, tnvedName } = require("./classifiers");
 const { identify, spellingsOf } = require("./synonyms");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
@@ -174,6 +174,8 @@ function toEntry(row) {
     // говорит, а название классификатора объясняет, к чему запись отнесена.
     okpd2: row.okpd2 || null,
     okpd2Name: okpd2Name(row.okpd2),
+    // Код мог быть снят с классификатора уже после регистрации записи.
+    okpd2Retired: okpd2Retired(row.okpd2),
     tnved: row.tnved || null,
     tnvedName: tnvedName(row.tnved)?.name ?? null,
     status: row.status,
@@ -856,6 +858,7 @@ function summarize(rows) {
     status: anyActive ? "active" : "archived",
     okpd2,
     okpd2Name: okpd2Name(okpd2),
+    okpd2Retired: okpd2Retired(okpd2),
     /** У скольких записей из найденных именно этот код. */
     okpd2Share: ranked[0]?.[1] ?? 0,
     /** Сколько ещё разных кодов у остальных записей. */

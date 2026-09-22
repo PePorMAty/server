@@ -75,10 +75,16 @@ function buildStepSchema() {
       transformation: {
         type: "object",
         additionalProperties: false,
-        required: ["name", "description"],
+        // Отрасль и назначение обязательны в схеме: необязательное поле модель
+        // пропускает через раз, и в карточке выходил бы пробел через строку.
+        required: ["name", "description", "industry", "mainPurpose"],
         properties: {
           name: { type: "string" },
           description: { type: "string" },
+          /** Отрасль, к которой относится процесс: «Нефтепереработка (НПЗ)». */
+          industry: { type: "string" },
+          /** Главная производственная функция процесса, одним предложением. */
+          mainPurpose: { type: "string" },
         },
       },
       inputProducts: {
@@ -114,7 +120,7 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 
 Твоя задача — вернуть СТРОГО JSON по прикреплённому json_schema, который описывает один шаг цепочки в формате:
 {
-  transformation: { name, description },
+  transformation: { name, description, industry, mainPurpose },
   inputProducts: [{ name, description }, ...],
   outputProducts: [{ name, description }, ...],
 }
@@ -127,6 +133,8 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 Остальные правила:
 - transformation.name — короткое название технологического перехода (например: «Синтез аммиака», «Паровая конверсия метана», «Крекинг»). Бери его из Markdown: из «Краткой формулы шага» или «Описания», нормализуй до короткого имени.
 - transformation.description — 1–3 предложения о процессе; можно взять сжатое «Описание».
+- transformation.industry — производственная отрасль, к которой относится технологический процесс. Укажи кратко, в 1–3 словах.
+- transformation.mainPurpose — основное назначение технологического процесса. Одним кратким предложением опиши его главную производственную функцию и основной результат, без перечисления стадий, оборудования и деталей технологии.
 - Имена продуктов — короткие, рыночно-понятные, на русском (латиница только для химических формул).
 - description каждого продукта — 1 короткое предложение (если в Markdown нет прямого описания, напиши максимально общее нейтральное).
 - Не добавляй полей, которых нет в схеме.
@@ -379,6 +387,8 @@ router.post("/gpt/step/build", async (req, res) => {
 
     const trName = String(parsed.transformation.name || "").trim();
     const trDesc = String(parsed.transformation.description || "").trim();
+    const trIndustry = String(parsed.transformation.industry || "").trim();
+    const trPurpose = String(parsed.transformation.mainPurpose || "").trim();
 
     const normalize = (s) =>
       String(s || "")
@@ -421,6 +431,10 @@ router.post("/gpt/step/build", async (req, res) => {
         id: `tr-${slug(trName, "step")}-${now}`,
         name: trName,
         description: trDesc || undefined,
+        // Пустую строку не отдаём: интерфейсу проще отличить «поля нет» от
+        // «поле есть и пустое», чем рисовать подпись без значения.
+        industry: trIndustry || undefined,
+        mainPurpose: trPurpose || undefined,
       },
       inputProducts: parsed.inputProducts
         .map(markProduct)
