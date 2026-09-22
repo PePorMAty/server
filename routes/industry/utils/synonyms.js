@@ -246,6 +246,29 @@ function load() {
         .filter(Boolean);
       if (!parts.length) continue;
 
+      /**
+       * Написания с пометкой «*» — ТОЛЬКО ДЛЯ ОПОЗНАНИЯ, не для поиска.
+       *
+       * Справочник служит двум целям сразу, и одно написание бывает хорошо
+       * для одной и вредно для другой. «ДЭГ» нужен, чтобы узел «ДЭГ» и узел
+       * «Диэтиленгликоль» стали одним; но по реестру он приносит только
+       * «Эпоксидную смолу марки ДЭГ-1», потому что там ДЭГ — обозначение
+       * марки. Убрать его целиком значило бы потерять слияние ради поиска.
+       *
+       * Помеченное написание попадает в указатель (узел с таким именем
+       * опознаётся) и в список написаний, но из поиска по реестру
+       * исключается — см. spellingsOf.
+       *
+       * Канон пометить нельзя: он и есть идентификатор вещества.
+       */
+      const noSearch = new Set();
+      parts = parts.map((part, i) => {
+        if (i === 0 || !part.startsWith("*")) return part;
+        const bare = part.slice(1).trim();
+        if (bare) noSearch.add(dictKey(bare));
+        return bare;
+      }).filter(Boolean);
+
       // Стоп-лист — только к собранному машиной. Правило то же, что у
       // сборщика: канон из списка убивает всю строку (канон-категория испортил
       // бы всё, что к нему привяжется), прочие написания выбрасываются по
@@ -276,7 +299,7 @@ function load() {
         badCas.push({ canon, cas, from: fileName });
         cas = null;
       }
-      const entry = { canon, spellings: parts, cas, source: fileName };
+      const entry = { canon, spellings: parts, cas, source: fileName, noSearch };
 
       // Куда в итоге лягут написания этой строки. Обычно — в её собственную
       // запись; но если строка описывает вещество, уже известное под другим
@@ -353,6 +376,9 @@ function mergeInto(map, target, entry, keys, casConflicts) {
     if (!key || known.has(key)) continue;
     known.add(key);
     target.spellings.push(spelling);
+    // Пометка «только для опознания» переезжает вместе с написанием: иначе
+    // слитая строка вернула бы в поиск то, что из него убрали.
+    if (entry.noSearch?.has(key)) target.noSearch?.add(key);
   }
 
   // Номер CAS переносим на запись, которая остаётся. Без этого он пропадал
@@ -458,6 +484,11 @@ function identify(rawName) {
      * тогда как ОКПД2 и ТН ВЭД — коды товарных КАТЕГОРИЙ, а не веществ.
      */
     cas: hit.cas ?? null,
+    /**
+     * Написания, годные опознавать узел, но не искать по реестру.
+     * Помечены «*» в файле — см. разбор строки в load().
+     */
+    noSearch: hit.noSearch ?? new Set(),
   };
 }
 
@@ -624,6 +655,10 @@ function spellingsOf(rawName) {
     const key = dictKey(spelling);
     if (!key || seen.has(key)) continue;
     seen.add(key);
+    // Помеченные «*» из поиска по реестру исключены: они годны опознавать
+    // узел, но приносят чужой товар. Спрошенное НАПРЯМУЮ имя оставляем
+    // всегда — человек спросил именно его, и молчать в ответ нельзя.
+    if (spelling !== name && hit.noSearch?.has(key)) continue;
     out.push(spelling);
   }
   return out;
