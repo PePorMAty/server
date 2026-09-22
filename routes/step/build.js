@@ -60,10 +60,17 @@ function buildStepSchema() {
   const productSchema = {
     type: "object",
     additionalProperties: false,
-    required: ["name", "description"],
+    // Отрасль и назначение обязательны по той же причине, что и у
+    // преобразования: необязательное поле модель пропускает через раз, и в
+    // карточке выходил бы пробел через строку.
+    required: ["name", "description", "industry", "mainPurpose"],
     properties: {
       name: { type: "string" },
       description: { type: "string" },
+      /** Отрасль, к которой относится продукт: «Нефтехимия». */
+      industry: { type: "string" },
+      /** Для чего продукт нужен — одним предложением. */
+      mainPurpose: { type: "string" },
     },
   };
 
@@ -131,8 +138,8 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 Твоя задача — вернуть СТРОГО JSON по прикреплённому json_schema, который описывает один шаг цепочки в формате:
 {
   transformation: { name, description, industry, mainPurpose, notes },
-  inputProducts: [{ name, description }, ...],
-  outputProducts: [{ name, description }, ...],
+  inputProducts: [{ name, description, industry, mainPurpose }, ...],
+  outputProducts: [{ name, description, industry, mainPurpose }, ...],
 }
 
 Правила размещения input/output (безусловные):
@@ -148,6 +155,8 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 - transformation.notes — оговорки к шагу: чем набор входов или выходов может отличаться на практике, что бывает необязательным, какие стадии могут добавляться. Короткими пунктами, 0–4 штуки, каждый — одно предложение. Пиши только то, что следует из Markdown; НЕ ПРИДУМЫВАЙ оговорок ради заполнения поля. Сказать нечего — верни пустой массив, это правильный ответ. Не дублируй здесь description и mainPurpose.
 - Имена продуктов — короткие, рыночно-понятные, на русском (латиница только для химических формул).
 - description каждого продукта — 1 короткое предложение (если в Markdown нет прямого описания, напиши максимально общее нейтральное).
+- industry каждого продукта — отрасль, к которой продукт относится, в 1–3 словах. Это отрасль САМОГО ПРОДУКТА, а не того шага, где он встретился: пропан остаётся продуктом газопереработки и тогда, когда шаг относится к нефтехимии.
+- mainPurpose каждого продукта — для чего продукт нужен, одним кратким предложением: основное применение или роль в производстве. Не пересказывай тут description.
 - Не добавляй полей, которых нет в схеме.
 - Не используй внешние знания — только данные из Markdown и списка existingProducts.
 - Если в Markdown вместо шага написано только "needs-sources" — всё равно верни ОСМЫСЛЕННЫЙ JSON по схеме, используя только целевой продукт (в этом случае другое поле оставь максимально бедным, но непустым).
@@ -439,6 +448,10 @@ router.post("/gpt/step/build", async (req, res) => {
       return {
         name,
         description: String(p?.description || "").trim() || undefined,
+        // Пустую строку не отдаём: интерфейсу проще отличить «поля нет» от
+        // «поле есть и пустое», чем рисовать подпись без значения.
+        industry: String(p?.industry || "").trim() || undefined,
+        mainPurpose: String(p?.mainPurpose || "").trim() || undefined,
         isExisting: !!match,
         existingNodeLabel: match || undefined,
       };
