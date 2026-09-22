@@ -54,6 +54,13 @@ router.get("/industry/status", (req, res) => {
         // именами, наоборот, слиты — их считаем отдельно.
         conflicts: synonyms.conflicts,
         merged: synonyms.merged,
+        // Написания, отменённые стоп-листом в собранном машиной файле: Wikidata
+        // держит в синонимах и классы веществ, и соседние вещества.
+        dropped: synonyms.dropped,
+        // Номер CAS не сошёлся с собственной контрольной цифрой — опечатка.
+        badCas: synonyms.badCas,
+        // Одному веществу проставлены два разных номера — ошибка в данных.
+        casConflicts: synonyms.casConflicts,
       },
     });
   } catch (e) {

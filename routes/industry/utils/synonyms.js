@@ -73,6 +73,65 @@ const FILES = [
   path.resolve(__dirname, "../../../reference/synonyms-wikidata.txt"),
 ];
 
+/** Файл, за каждую строку которого отвечает человек. Стоп-лист его не трогает. */
+const HAND_WRITTEN = path.basename(FILES[0]);
+
+/**
+ * Цел ли номер CAS.
+ *
+ * У номера есть встроенная контрольная цифра: последняя равна сумме остальных,
+ * взятых справа налево с весами 1, 2, 3, … , по модулю десяти. Перепутанная
+ * или пропущенная цифра ломает её в девяти случаях из десяти — то есть почти
+ * всякая опечатка видна, не выходя из дому.
+ *
+ * Чего проверка НЕ делает: она говорит, что номер цел, а не что он относится
+ * к этому веществу. Приписать бензолу целый номер толуола она не помешает —
+ * это проверяется только по внешнему источнику, глазами.
+ */
+function casChecksumOk(cas) {
+  const m = /^([0-9]{2,7})-([0-9]{2})-([0-9])$/.exec(cas);
+  if (!m) return false;
+  const digits = (m[1] + m[2]).split("").reverse();
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) sum += Number(digits[i]) * (i + 1);
+  return sum % 10 === Number(m[3]);
+}
+
+const STOP_FILE = path.resolve(__dirname, "../../../reference/synonyms-stop.txt");
+
+/**
+ * Написания, которые нельзя брать ключом равенства продуктов.
+ *
+ * Список тот же, что у сборщика синонимов из Wikidata, и читается тем же
+ * ключом. Но применяется ВТОРОЙ раз — здесь, при чтении справочника.
+ *
+ * Почему не хватает одного раза у сборщика. Сборщик переписывает файл целиком
+ * и только когда его запустят: до следующего сбора ошибочное написание живёт в
+ * справочнике, даже если его уже вписали в стоп-лист. А сбор требует доступа к
+ * Wikidata, которого на машине может не быть вовсе. Получалось, что защита
+ * действует не с того мига, как ошибку заметили, а с того, как выпал случай
+ * сходить в сеть. Теперь довольно правки стоп-листа.
+ *
+ * Правленный человеком synonyms.txt список НЕ трогает — там за каждую строку
+ * кто-то отвечает, и отменять её списком было бы подменой решения.
+ */
+function loadStopList() {
+  const stop = new Set();
+  let text;
+  try {
+    text = fs.readFileSync(STOP_FILE, "utf8").replace(/^﻿/, "");
+  } catch {
+    return stop; // Нет файла — читаем справочник как есть.
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const term = line.trim();
+    if (!term || term.startsWith("#")) continue;
+    const k = dictKey(term);
+    if (k) stop.add(k);
+  }
+  return stop;
+}
+
 /** Нормализованное написание → запись. null, пока не читали. */
 let index = null;
 /** Усечённое написание → запись. null у значения — столкновение, судить нечем. */
@@ -110,6 +169,15 @@ function load() {
    * поимённо — иначе ошибка в правиле родства никак себя не проявит.
    */
   const merged = [];
+
+  /** Один и тот же продукт с двумя разными номерами CAS — ошибка в данных. */
+  const casConflicts = [];
+
+  const stop = loadStopList();
+  /** Написания, выброшенные стоп-листом, — чтобы список не работал вслепую. */
+  const dropped = [];
+  /** Номера CAS, не прошедшие проверку контрольной цифрой. */
+  const badCas = [];
 
   /**
    * Одно ли это вещество.
@@ -172,17 +240,43 @@ function load() {
       const note = hash >= 0 ? rawLine.slice(hash + 1).trim() : "";
       if (!body) continue;
 
-      const parts = body
+      let parts = body
         .split("|")
         .map((p) => p.trim())
         .filter(Boolean);
       if (!parts.length) continue;
 
+      // Стоп-лист — только к собранному машиной. Правило то же, что у
+      // сборщика: канон из списка убивает всю строку (канон-категория испортил
+      // бы всё, что к нему привяжется), прочие написания выбрасываются по
+      // одному, а остаток строки живёт дальше.
+      const fileName = path.basename(file);
+      if (fileName !== HAND_WRITTEN && stop.size) {
+        if (stop.has(dictKey(parts[0]))) {
+          dropped.push({ spelling: parts[0], canon: parts[0], whole: true, from: fileName });
+          continue;
+        }
+        const kept = [];
+        for (const p of parts) {
+          if (stop.has(dictKey(p))) {
+            dropped.push({ spelling: p, canon: parts[0], whole: false, from: fileName });
+          } else kept.push(p);
+        }
+        parts = kept;
+        if (!parts.length) continue;
+      }
+
       const canon = parts[0];
       lines += 1;
       fileLines += 1;
-      const cas = /CAS\s+([0-9]{2,7}-[0-9]{2}-[0-9])/i.exec(note)?.[1] ?? null;
-      const entry = { canon, spellings: parts, cas, source: path.basename(file) };
+      let cas = /CAS\s+([0-9]{2,7}-[0-9]{2}-[0-9])/i.exec(note)?.[1] ?? null;
+      // Номер с несошедшейся контрольной цифрой — опечатка. Берём его не молча:
+      // показать неверный международный номер хуже, чем не показать никакого.
+      if (cas && !casChecksumOk(cas)) {
+        badCas.push({ canon, cas, from: fileName });
+        cas = null;
+      }
+      const entry = { canon, spellings: parts, cas, source: fileName };
 
       // Куда в итоге лягут написания этой строки. Обычно — в её собственную
       // запись; но если строка описывает вещество, уже известное под другим
@@ -198,11 +292,15 @@ function load() {
           // То же вещество, записанное дважды, — не конфликт, а повтор.
           // Первое найденное родство и решает: строка, сошедшаяся сразу с
           // двумя записями, вливается в ту, что встретилась раньше.
-          if (
-            prev.canon !== canon &&
-            sameSubstance(prev, entry, spelling) &&
-            target === entry
-          ) {
+          if (target === entry && prev.canon !== canon) {
+            if (sameSubstance(prev, entry, spelling)) target = prev;
+          } else if (target === entry) {
+            // Канон тот же — это заведомо та же запись, и спрашивать о родстве
+            // не о чем. Раньше такая строка не вливалась НИКУДА: её новые
+            // написания заводили ВТОРУЮ запись с тем же каноном, и вещество
+            // расходилось надвое. Видно было по номеру CAS — «Эпихлоргидрин»
+            // отдавал карточке пустое поле, а «ЭПХГ», написанный на той же
+            // строке, отдавал номер.
             target = prev;
           }
           continue;
@@ -211,7 +309,7 @@ function load() {
         written.push(key);
       }
 
-      if (target !== entry) mergeInto(map, target, entry, written);
+      if (target !== entry) mergeInto(map, target, entry, written, casConflicts);
     }
     sources.push({ file: path.basename(file), entries: fileLines });
   }
@@ -222,6 +320,12 @@ function load() {
     conflicts,
     /** Строки, слитые с записью того же вещества из другого файла. */
     merged,
+    /** Одному веществу проставлены два разных номера CAS. */
+    casConflicts,
+    /** Написания, выброшенные стоп-листом при чтении собранного файла. */
+    dropped,
+    /** Номера CAS, отброшенные проверкой контрольной цифрой. */
+    badCas,
     sources,
     file: FILES[0],
     loaded: sources.length > 0,
@@ -240,7 +344,7 @@ function load() {
  * известное написание — лишний шанс найти запись, стоящую там под другим
  * именем.
  */
-function mergeInto(map, target, entry, keys) {
+function mergeInto(map, target, entry, keys, casConflicts) {
   for (const key of keys) map.set(key, target);
 
   const known = new Set(target.spellings.map(dictKey));
@@ -249,6 +353,24 @@ function mergeInto(map, target, entry, keys) {
     if (!key || known.has(key)) continue;
     known.add(key);
     target.spellings.push(spelling);
+  }
+
+  // Номер CAS переносим на запись, которая остаётся. Без этого он пропадал
+  // вместе со слитой строкой: из 114 номеров, проставленных в файлах, до
+  // карточки доходило 38.
+  if (entry.cas) {
+    if (!target.cas) target.cas = entry.cas;
+    else if (target.cas !== entry.cas) {
+      // Два РАЗНЫХ номера у одного вещества — ошибка в данных, и молчать о ней
+      // нельзя: номер CAS единственный международный идентификатор, какой у
+      // нас есть, и неверный хуже отсутствующего.
+      casConflicts.push({
+        canon: target.canon,
+        kept: target.cas,
+        ignored: entry.cas,
+        ignoredFrom: entry.source,
+      });
+    }
   }
 }
 
@@ -526,7 +648,14 @@ function allEntries() {
   for (const entry of map.values()) {
     if (seen.has(entry.canon)) continue;
     seen.add(entry.canon);
-    out.push({ canon: entry.canon, spellings: [...entry.spellings] });
+    // Номер CAS отдаём вместе с написаниями: по нему и считают, чего в
+    // справочнике не хватает. Без него отчёт показывал бы ноль номеров при
+    // полусотне проставленных в файле.
+    out.push({
+      canon: entry.canon,
+      spellings: [...entry.spellings],
+      cas: entry.cas ?? null,
+    });
   }
   return out;
 }
