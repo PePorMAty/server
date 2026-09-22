@@ -19,7 +19,7 @@ const {
 } = require("./normalize");
 const { regionByInn } = require("./regions");
 const { shortenCompany } = require("./company");
-const { okpd2Name, okpd2Retired, tnvedName } = require("./classifiers");
+const { okpd2Name, okpd2NameExact, okpd2Retired, tnvedName } = require("./classifiers");
 const { identify, spellingsOf } = require("./synonyms");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
@@ -858,6 +858,8 @@ function summarize(rows) {
     status: anyActive ? "active" : "archived",
     okpd2,
     okpd2Name: okpd2Name(okpd2),
+    /** Название самой позиции, а не группы над ней. */
+    okpd2NameExact: okpd2NameExact(okpd2),
     okpd2Retired: okpd2Retired(okpd2),
     /** У скольких записей из найденных именно этот код. */
     okpd2Share: ranked[0]?.[1] ?? 0,

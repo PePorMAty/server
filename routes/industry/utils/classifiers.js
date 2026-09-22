@@ -53,9 +53,11 @@ function loadOkpd2() {
 /**
  * Коды, исключённые из классификатора.
  *
- * Собираются скриптом okpd2-retired.js разностью нашего файла и свежей
- * выгрузки классификатора. Файла может не быть — тогда просто не помечаем:
- * это уточнение, а не условие работы.
+ * Собираются скриптом okpd2-refresh.js: код стоит в записях реестра, а в
+ * свежей выгрузке классификатора его нет. Именно так, а не разностью двух
+ * файлов справочника, — снятого кода у нас отродясь не было, вычитать нечего.
+ * Файла может не быть — тогда просто не помечаем: это уточнение, а не условие
+ * работы.
  */
 function loadRetired() {
   const set = new Set();
@@ -127,12 +129,15 @@ function loadTnved() {
 }
 
 /**
- * Название по коду ОКПД2.
+ * Название по коду ОКПД2 вместе с тем, чьё оно.
  *
- * В реестре коды длиннее, чем в справочнике: «20.16.10.110» против
- * «20.16.10». Отсекаем хвост по группам цифр, пока не найдём.
+ * Отсекаем хвост по группам цифр, пока не найдём. Нашли по целому коду — это
+ * название самой позиции; нашли по укороченному — название ГРУППЫ, в которую
+ * код попал, и выдавать его за точное нельзя. Раньше файл справочника был
+ * шестизначным, и группой оказывалось почти всё; со свежей выгрузкой точных
+ * названий становится большинство — потому и потребовалось различать.
  */
-function okpd2Name(code) {
+function lookupOkpd2(code) {
   if (okpd2 === null) okpd2 = loadOkpd2();
   const clean = String(code ?? "").trim();
   if (!clean) return null;
@@ -140,12 +145,22 @@ function okpd2Name(code) {
   let key = clean;
   while (key) {
     const hit = okpd2.get(key);
-    if (hit) return hit;
+    if (hit) return { name: hit, exact: key === clean, at: key };
     const dot = key.lastIndexOf(".");
     if (dot < 0) break;
     key = key.slice(0, dot);
   }
   return null;
+}
+
+/** Только название — тем, кому подробности не нужны. */
+function okpd2Name(code) {
+  return lookupOkpd2(code)?.name ?? null;
+}
+
+/** Названо ли кодом целиком, а не группой над ним. */
+function okpd2NameExact(code) {
+  return lookupOkpd2(code)?.exact ?? false;
 }
 
 /**
@@ -182,4 +197,10 @@ function classifiersStatus() {
   return { okpd2: okpd2.size, tnved: tnved.size, dir: DIR };
 }
 
-module.exports = { okpd2Name, okpd2Retired, tnvedName, classifiersStatus };
+module.exports = {
+  okpd2Name,
+  okpd2NameExact,
+  okpd2Retired,
+  tnvedName,
+  classifiersStatus,
+};
