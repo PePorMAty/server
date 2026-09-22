@@ -2,9 +2,16 @@
 //
 // Свежий классификатор ОКПД2: обновить названия и найти снятые коды.
 //
-//   node scripts/okpd2-refresh.js <okpd.xlsx>                        — что даст
-//   node scripts/okpd2-refresh.js <файл> --names reference/okpd2.txt — переписать
-//   node scripts/okpd2-refresh.js <файл> --retired reference/okpd2-retired.txt
+//   node scripts/okpd2-refresh.js ОКПД.xlsx             — только показать, что даст
+//   node scripts/okpd2-refresh.js ОКПД.xlsx --names     — переписать названия кодов
+//   node scripts/okpd2-refresh.js ОКПД.xlsx --retired   — переписать список снятых
+//   node scripts/okpd2-refresh.js ОКПД.xlsx --names --retired   — и то и другое
+//
+// Пишутся всегда свои файлы: reference/okpd2.txt и reference/okpd2-retired.txt.
+// Раньше путь задавался вслед за ключом — и «--names --retired» кончалось тем,
+// что первый ключ проглатывал второй как своё значение: классификатор уезжал в
+// файл с именем «--retired», а список снятых не писался вовсе. Ключи без
+// значения такой ошибки не допускают.
 //
 // Зачем. Наш reference/okpd2.txt содержит только ШЕСТИЗНАЧНЫЕ коды — 1736
 // строк вида «20.15.31⇥Мочевина (карбамид)». А в реестре коды полные:
@@ -31,6 +38,11 @@ const path = require("path");
 const { forEachXlsxRow } = require("./lib/xlsx-stream");
 
 const DEFAULT_DB = path.resolve(__dirname, "../data/gisp.sqlite");
+const NAMES_FILE = path.resolve(__dirname, "../reference/okpd2.txt");
+const RETIRED_FILE = path.resolve(__dirname, "../reference/okpd2-retired.txt");
+
+/** Путь от корня проекта: в сообщении он короче и узнаваемее полного. */
+const rel = (p) => path.relative(path.resolve(__dirname, ".."), p) || p;
 
 /** Код ОКПД2: от двух до шести групп цифр через точку. */
 const CODE_RE = /^\d{2}(?:\.\d+){0,5}$/;
@@ -184,22 +196,29 @@ async function main() {
   // выгрузке. Через indexOf делать нельзя — он находит ПЕРВОЕ вхождение, и два
   // одинаковых пути в строке запуска ломали бы разбор.
   const args = process.argv.slice(2);
-  const WITH_VALUE = new Set(["--names", "--retired", "--db"]);
+  // Значение берёт только --db: остальные ключи — переключатели, и писать им
+  // некуда, кроме своих файлов в reference/.
+  const WITH_VALUE = new Set(["--db"]);
   const flags = {};
   let file = null;
   for (let i = 0; i < args.length; i++) {
     if (!args[i].startsWith("--")) {
       if (file === null) file = args[i];
     } else if (WITH_VALUE.has(args[i])) {
-      flags[args[i]] = args[i + 1] ?? "";
+      const next = args[i + 1];
+      // Слово, начинающееся с «--», — следующий ключ, а не путь.
+      if (next === undefined || next.startsWith("--")) {
+        console.error(`Ключу ${args[i]} нужен путь к файлу.`);
+        process.exit(1);
+      }
+      flags[args[i]] = next;
       i += 1;
     } else {
-      // Флаг без значения: следующее слово — не его, а, скорее всего, путь.
       flags[args[i]] = true;
     }
   }
-  const namesOut = flags["--names"] || null;
-  const retiredOut = flags["--retired"] || null;
+  const namesOut = "--names" in flags ? NAMES_FILE : null;
+  const retiredOut = "--retired" in flags ? RETIRED_FILE : null;
   const dbFile = flags["--db"] || DEFAULT_DB;
   const force = "--force" in flags;
 
@@ -311,7 +330,7 @@ async function main() {
         ),
       ];
       fs.writeFileSync(retiredOut, lines.join("\n") + "\n", "utf8");
-      console.log(`\nЗаписано в ${retiredOut}: ${missing.length} кодов.`);
+      console.log(`\nЗаписано в ${rel(retiredOut)}: ${missing.length} кодов.`);
     }
   }
 
@@ -331,12 +350,12 @@ async function main() {
       sorted.map(([code, name]) => `${code}\t${name}`).join("\n") + "\n",
       "utf8",
     );
-    console.log(`\nЗаписано в ${namesOut}: ${sorted.length} кодов.`);
+    console.log(`\nЗаписано в ${rel(namesOut)}: ${sorted.length} кодов.`);
     console.log("Это ЗАМЕНА reference/okpd2.txt — посмотрите git diff, прежде чем коммитить.");
   }
 
   if (!namesOut && !retiredOut) {
-    console.log("\nЗаписать: --names reference/okpd2.txt и/или --retired reference/okpd2-retired.txt");
+    console.log("\nНичего не записано. Чтобы записать: --names и/или --retired");
   }
 }
 
