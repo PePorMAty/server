@@ -494,9 +494,9 @@ async function main() {
         "58": "издательство", "62": "программы",
       };
 
-      const top = [...tally.byClass.entries()]
-        .sort((a, b) => b[1].rows - a[1].rows)
-        .slice(0, 12);
+      const all = [...tally.byClass.entries()].sort((a, b) => b[1].rows - a[1].rows);
+      const SHOWN = 12;
+      const top = all.slice(0, SHOWN);
 
       console.log("\nКрупнейшие классы ОКПД2:");
       for (const [cls, acc] of top) {
@@ -506,7 +506,23 @@ async function main() {
             `  ~${(acc.bytes * 1.41 / 1048576).toFixed(0).padStart(4)} МБ`,
         );
       }
-      console.log("  (отобрать нужные: --okpd2 19,20,21,22)");
+      // Нужный класс может оказаться за чертой — и тогда по этой таблице
+      // размер выборки не прикинуть вовсе. Говорим, сколько классов не видно
+      // и как посмотреть ровно свой отбор.
+      const rest = all.slice(SHOWN);
+      if (rest.length) {
+        const restRows = rest.reduce((n, [, a]) => n + a.rows, 0);
+        const restMb = rest.reduce((n, [, a]) => n + a.bytes, 0) * 1.41 / 1048576;
+        console.log(
+          `  и ещё ${rest.length} классов помельче:` +
+            ` ${restRows} строк, ~${restMb.toFixed(0)} МБ суммарно` +
+            `\n  (${rest.map(([c]) => c).join(", ")})`,
+        );
+      }
+      console.log(
+        "\n  Размер СВОЕЙ выборки видно так — отбор работает и со --stats:\n" +
+          "    --stats --okpd2 19,20,21,22",
+      );
 
       console.log("\nСколько займёт база:");
       console.log(`  со всеми записями:    ~${mb(tally.bytes * 1.41)} МБ`);
@@ -661,10 +677,25 @@ async function main() {
 
     const missing = REQUIRED.filter((f) => !mapping[f]);
     if (missing.length) {
+      // Файл классификатора и файл реестра лежат в одной папке и оба xlsx —
+      // подать не тот проще простого. Узнаём его по колонкам «Код» и
+      // «Название» при полном отсутствии производителя и отправляем куда надо,
+      // вместо совета городить --map, который тут ничему не поможет.
+      const norm = header.map((h) => normalizeName(h));
+      const looksLikeClassifier =
+        !mapping.producer &&
+        norm.some((h) => h === "код") &&
+        norm.some((h) => h === "название" || h === "наименование");
+
       console.error(
-        `\nНе найдены обязательные поля: ${missing.join(", ")}.\n` +
-          `Задайте их вручную по списку колонок выше, например:\n` +
-          `  --map "name=Наименование продукции,producer=Предприятие"`,
+        looksLikeClassifier
+          ? `\nПохоже, это КЛАССИФИКАТОР ОКПД2, а не выгрузка реестра: колонки\n` +
+              `«Код» и «Название», производителя нет вовсе. Этот файл читает\n` +
+              `другой скрипт:\n` +
+              `  node scripts/okpd2-refresh.js ${args.file} --names --retired`
+          : `\nНе найдены обязательные поля: ${missing.join(", ")}.\n` +
+              `Задайте их вручную по списку колонок выше, например:\n` +
+              `  --map "name=Наименование продукции,producer=Предприятие"`,
       );
       process.exit(1);
     }
