@@ -9,6 +9,7 @@
 //   node scripts/audit-products.js --twins      — подписи-близнецы (буквы-двойники)
 //   node scripts/audit-products.js --merged     — какие строки справочника слились
 //   node scripts/audit-products.js --coverage   — замер под порог по доле слов записи
+//   node scripts/audit-products.js --near       — где справочник окупится
 //   node scripts/audit-products.js --graph <id> — только по одному графу
 //
 // Зачем. Справочник синонимов я наполнял по ходовым названиям — то есть
@@ -29,9 +30,18 @@
 const fs = require("fs");
 const path = require("path");
 
-const { identify, synonymsStatus } = require("../routes/industry/utils/synonyms");
+const {
+  identify,
+  synonymsStatus,
+  allEntries,
+} = require("../routes/industry/utils/synonyms");
 const { lookupProduct, status } = require("../routes/industry/utils/store");
-const { foldLookalikes, normalizeName } = require("../routes/industry/utils/normalize");
+const {
+  foldLookalikes,
+  normalizeName,
+  stemName,
+  words,
+} = require("../routes/industry/utils/normalize");
 
 const GRAPHS_DIR = path.resolve(__dirname, "../data/saved-graphs");
 
@@ -90,6 +100,80 @@ function collect(onlyGraph) {
   return { graphs, counts };
 }
 
+/**
+ * Значимые основы названия: коротышки и цифры в сравнении только мешают.
+ *
+ * «1,3-Диизопропилбензол» и «1,4-Диизопропилбензол» — РАЗНЫЕ изомеры, и
+ * различает их как раз отброшенная цифра. Поэтому отчёт и остаётся отчётом:
+ * он показывает, куда посмотреть, а решает человек.
+ */
+function meaningfulStems(name) {
+  return new Set(words(stemName(name)).filter((w) => w.length > 3));
+}
+
+/**
+ * Метки, которыми различаются члены одного семейства: «1,3-» и «1,4-», «F» и
+ * «S», «22» и «134».
+ *
+ * Именно их сравнение основ и отбрасывает — и без этой проверки отчёт ставил
+ * бы 100% изомерам «1,3-Диизопропилбензол» и «1,4-Диизопропилбензол», то есть
+ * подсказывал бы слить два РАЗНЫХ вещества. Метки разошлись — значит, это
+ * семейство, а не разные имена одного.
+ */
+function marksOf(name) {
+  // Берём слова БЕЗ отсева стоп-слов, в отличие от основ. Русские «а», «с»,
+  // «о» — предлоги и союзы, и words() их выбрасывает. А в «БФ-А» и «БФ-С»
+  // именно эта буква и есть всё различие: с отсевом они выглядели одинаково,
+  // и отчёт предлагал слить два разных эпоксидных олигомера.
+  return new Set(
+    normalizeName(name)
+      .split(" ")
+      .filter((w) => w && w.length <= 3),
+  );
+}
+
+/** Совпадают ли метки двух названий. */
+function sameMarks(a, b) {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+/**
+ * Одна основа внутри другой — «оксистеаринов» в «гидроксистеаринов».
+ *
+ * ЧЕГО ЭТА МЕРА НЕ ВИДИТ: переставленных частей внутри одного слова.
+ * «Хлордифторметан» и «Дифторхлорметан» — одно вещество, но ни одно не
+ * содержится в другом, и отчёт их не сведёт. Такие пары ловятся только
+ * глазами или из чужого источника (эту, например, нашла добыча из реестра).
+ */
+function stemAlike(a, b) {
+  if (a === b) return true;
+  if (a.length < 5 || b.length < 5) return false;
+  return a.includes(b) || b.includes(a);
+}
+
+/**
+ * Насколько два названия похожи: доля общих основ от длинного из них.
+ *
+ * Делим на большее, а не на объединение: иначе «Смазки для шарниров» и
+ * «Смазки для прокатного цеха» считались бы похожими по одному слову
+ * «смазка», а это разные продукты.
+ */
+function closeness(a, b) {
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const x of a) {
+    for (const y of b) {
+      if (stemAlike(x, y)) {
+        shared += 1;
+        break;
+      }
+    }
+  }
+  return shared / Math.max(a.size, b.size);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const wantMissing = args.includes("--missing");
@@ -98,6 +182,7 @@ function main() {
   const wantTwins = args.includes("--twins");
   const wantMerged = args.includes("--merged");
   const wantCoverage = args.includes("--coverage");
+  const wantNear = args.includes("--near");
   const graphArg = args.indexOf("--graph");
   const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
 
@@ -432,19 +517,100 @@ function main() {
     console.log("");
   }
 
+  // Где справочник окупится.
+  //
+  // Список «не знает никто» отвечает на вопрос «чего нет», а это не тот
+  // вопрос. Голая запись без синонимов поднимает счётчик и не даёт НИЧЕГО:
+  // два узла с одинаковой подписью сходятся и без справочника, а поиск по
+  // реестру по единственному написанию идёт и так. Польза ровно там, где одно
+  // вещество названо ПО-РАЗНОМУ, — вот это здесь и ищется.
+  if (wantNear) {
+    const unknown = rows.filter((r) => !r.canon);
+
+    console.log("\n── ПОХОЖИЕ ДРУГ НА ДРУГА среди неопознанных ──");
+    console.log("   (одна запись в справочнике свела бы их в один узел)\n");
+
+    const stemmed = unknown.map((r) => ({
+      row: r,
+      stems: meaningfulStems(r.label),
+      marks: marksOf(r.label),
+    }));
+    const pairs = [];
+    let families = 0;
+    for (let i = 0; i < stemmed.length; i++) {
+      for (let j = i + 1; j < stemmed.length; j++) {
+        const score = closeness(stemmed[i].stems, stemmed[j].stems);
+        if (score < 0.6) continue;
+        if (!sameMarks(stemmed[i].marks, stemmed[j].marks)) {
+          families += 1;
+          continue;
+        }
+        pairs.push({ a: stemmed[i].row, b: stemmed[j].row, score });
+      }
+    }
+    pairs.sort((x, y) => y.score - x.score || y.a.freq - x.a.freq);
+    if (!pairs.length) console.log("   пусто");
+    for (const p of pairs.slice(0, 60)) {
+      console.log(
+        `   ${Math.round(p.score * 100)}%  «${p.a.label}»  ≈  «${p.b.label}»` +
+          `   (графов: ${p.a.freq} и ${p.b.freq})`,
+      );
+    }
+    if (pairs.length > 60) console.log(`   … и ещё ${pairs.length - 60}`);
+    if (families) {
+      console.log(
+        `\n   Отброшено как семейства, а не синонимы: ${families}` +
+          " — названия похожи, но различаются меткой" +
+          "\n   («1,3-» против «1,4-», «F» против «S»), то есть это РАЗНЫЕ вещества.",
+      );
+    }
+
+    // Второй случай: название почти совпадает с тем, что в справочнике уже
+    // есть. Ключ справочника точный, без усечения окончаний, поэтому
+    // «Базовые масла» мимо «Базового масла» проходит молча.
+    const dict = allEntries().flatMap((e) =>
+      e.spellings.map((s) => ({ canon: e.canon, spelling: s, stems: meaningfulStems(s) })),
+    );
+    const nearDict = [];
+    for (const u of stemmed) {
+      let best = null;
+      for (const d of dict) {
+        const score = closeness(u.stems, d.stems);
+        if (score >= 0.8 && (!best || score > best.score)) best = { ...d, score };
+      }
+      if (best) nearDict.push({ row: u.row, ...best });
+    }
+    nearDict.sort((x, y) => y.row.freq - x.row.freq || y.score - x.score);
+
+    console.log("\n── ПОЧТИ СОВПАДАЮТ С ТЕМ, ЧТО В СПРАВОЧНИКЕ УЖЕ ЕСТЬ ──");
+    console.log("   (хватит дописать написание в существующую строку)\n");
+    if (!nearDict.length) console.log("   пусто");
+    for (const n of nearDict.slice(0, 60)) {
+      console.log(
+        `   ${Math.round(n.score * 100)}%  «${n.row.label}»  →  «${n.spelling}»` +
+          (n.spelling === n.canon ? "" : ` (запись «${n.canon}»)`) +
+          `   графов: ${n.row.freq}`,
+      );
+    }
+    if (nearDict.length > 60) console.log(`   … и ещё ${nearDict.length - 60}`);
+    console.log("");
+  }
+
   if (
     !wantMissing &&
     !wantAbsent &&
     !wantWeak &&
     !wantTwins &&
     !wantMerged &&
-    !wantCoverage
+    !wantCoverage &&
+    !wantNear
   ) {
     console.log(
       "\nСписки: --missing (дописать в справочник), --absent (нет в реестре)," +
         " --weak (сомнительные совпадения), --twins (подписи-близнецы)," +
         " --merged (слитые строки справочника)," +
-        " --coverage (замер под порог по доле слов записи)",
+        " --coverage (замер под порог по доле слов записи)," +
+        " --near (где справочник окупится)",
     );
   }
 }

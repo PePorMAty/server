@@ -407,4 +407,22 @@ function synonymsStatus() {
   return { ...stats };
 }
 
-module.exports = { identify, spellingsOf, synonymsStatus };
+/**
+ * Все записи справочника — для отчётов и разбора.
+ *
+ * Опознанию не нужна: там выборка по ключу. Нужна тем, кто ищет, чего в
+ * справочнике НЕ хватает, и сравнивает с ним названия целыми списками.
+ */
+function allEntries() {
+  const map = ensure();
+  const seen = new Set();
+  const out = [];
+  for (const entry of map.values()) {
+    if (seen.has(entry.canon)) continue;
+    seen.add(entry.canon);
+    out.push({ canon: entry.canon, spellings: [...entry.spellings] });
+  }
+  return out;
+}
+
+module.exports = { identify, spellingsOf, synonymsStatus, allEntries };
