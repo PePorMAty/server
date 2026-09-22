@@ -540,13 +540,23 @@ function main() {
 
     const stemmed = unknown.map((r) => ({
       row: r,
+      key: foldLookalikes(normalizeName(r.label)),
       stems: meaningfulStems(r.label),
       marks: marksOf(r.label),
     }));
     const pairs = [];
     let families = 0;
+    let cosmetic = 0;
     for (let i = 0; i < stemmed.length; i++) {
       for (let j = i + 1; j < stemmed.length; j++) {
+        // Подписи, совпадающие после приведения, сходятся на полотне и без
+        // справочника: «1,3-Диизопропилбензол» и «1,3- Диизопропилбензол»
+        // различает лишний пробел. Аудит считает по сырым подписям, поэтому
+        // видит их порознь, — но работы тут нет, и в отчёте им не место.
+        if (stemmed[i].key === stemmed[j].key) {
+          cosmetic += 1;
+          continue;
+        }
         const score = closeness(stemmed[i].stems, stemmed[j].stems);
         if (score < 0.6) continue;
         if (!sameMarks(stemmed[i].marks, stemmed[j].marks)) {
@@ -565,6 +575,12 @@ function main() {
       );
     }
     if (pairs.length > 60) console.log(`   … и ещё ${pairs.length - 60}`);
+    if (cosmetic) {
+      console.log(
+        `\n   Пропущено как разнобой в подписи: ${cosmetic}` +
+          " — различаются пробелом или регистром,\n   на полотне сходятся и так.",
+      );
+    }
     if (families) {
       console.log(
         `\n   Отброшено как семейства, а не синонимы: ${families}` +
