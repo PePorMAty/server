@@ -204,7 +204,7 @@ function toEntry(row) {
  * у заявителя. По «ПЭНД» не находится ничего, по «полиэтилену низкого давления»
  * — находится, а вещество одно.
  */
-function lookupProduct(rawName) {
+function lookupProduct(rawName, opts) {
   const conn = getDb();
   const empty = {
     found: false,
@@ -222,7 +222,9 @@ function lookupProduct(rawName) {
   const normalized = normalizeName(rawName);
   if (!normalized) return empty;
 
-  const cached = cache.get(normalized);
+  // Разбор мимо кэша: кэш хранит обычный ответ, и вернуть его вместо разбора
+  // значило бы промолчать там, где как раз и спросили «почему».
+  const cached = opts?.explain ? null : cache.get(normalized);
   if (cached) return cached;
 
   const spellings = spellingsOf(rawName);
@@ -322,6 +324,19 @@ function lookupProduct(rawName) {
   // из 21 отсеянного ни одно не оказалось нужным.
   const confirmed = kept.filter((row, i) => confirms(picked.coverage?.[i]));
   const rejected = kept.length - confirmed.length;
+
+  // Разбор каждой записи — по запросу. Нужен, чтобы спорное подтверждение
+  // разбирать не на глаз: видно, какая именно ветка confirms() его пропустила.
+  // В обычном ответе этого нет: поле тяжёлое и интерфейсу не нужно.
+  const explain = opts?.explain
+    ? kept.map((row, i) => ({
+        name: row.name,
+        producer: row.producer,
+        okpd2: row.okpd2,
+        confirmed: confirms(picked.coverage?.[i]),
+        ...picked.coverage?.[i],
+      }))
+    : undefined;
   // Помечаем отдельно, когда вещество нашлось ТОЛЬКО в составе препарата:
   // ОКПД2 у такой записи пестицидный, а не глифосатный, и в карточке это
   // должно быть видно.
@@ -431,13 +446,16 @@ function lookupProduct(rawName) {
             formulation: shares.find((s) => s.parens === "formulation")?.name ?? null,
           }
         : null,
+      ...(explain ? { explain } : {}),
     };
   }
 
   // Кэш растёт только на новых названиях; когда упрётся в предел — начинаем
   // заново, вытеснять по одному тут нечего оптимизировать.
-  if (cache.size >= CACHE_LIMIT) cache.clear();
-  cache.set(normalized, result);
+  if (!opts?.explain) {
+    if (cache.size >= CACHE_LIMIT) cache.clear();
+    cache.set(normalized, result);
+  }
 
   return result;
 }

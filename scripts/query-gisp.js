@@ -4,6 +4,7 @@
 //
 //   node scripts/query-gisp.js "Бутан технический" "изобутилен"
 //   node scripts/query-gisp.js --json "Метанол"
+//   node scripts/query-gisp.js --why "Янтарная кислота"   — разбор по записям
 //
 // Реестр очень дробный: «Электрокорунд белый 25А фракция 0-0,020 мм» и
 // «…фракция 0-0,1 мм» — разные записи. Поэтому точное совпадение с названием
@@ -74,6 +75,7 @@ function report(query) {
 }
 
 const args = process.argv.slice(2);
+const why = args.includes("--why");
 const asJson = args.includes("--json");
 const queries = args.filter((a) => !a.startsWith("--"));
 
@@ -85,7 +87,33 @@ if (!queries.length) {
   process.exit(0);
 }
 
-if (asJson) {
+if (why) {
+  // Разбор по каждой найденной записи: видно, какая ветка правила её
+  // пропустила, а какая отбросила. Нужен, когда спорное подтверждение надо
+  // чинить точно, а не на глаз.
+  for (const q of queries) {
+    const r = lookupProduct(q, { explain: true });
+    console.log(`\n══ «${q}» ══`);
+    if (!r.explain?.length) {
+      console.log("  записей не найдено — разбирать нечего");
+      continue;
+    }
+    for (const e of r.explain) {
+      const marks = [
+        `место ${e.at}`,
+        `значимых ${e.strong}`,
+        `покрытие ${(e.share ?? 0).toFixed(2)}`,
+        e.parens ? `скобка: ${e.parens}` : null,
+        e.foreignClass ? `чужой класс: ${e.foreignClass}` : null,
+        e.onlyClass ? "совпал только класс" : null,
+      ].filter(Boolean);
+      console.log(
+        `  ${e.confirmed ? "ПОДТВЕРДИЛ" : "отбросил  "}  ${String(e.name).slice(0, 62)}`,
+      );
+      console.log(`               ${marks.join(", ")}`);
+    }
+  }
+} else if (asJson) {
   const out = {};
   for (const q of queries) out[q] = lookupProduct(q);
   console.log(JSON.stringify(out, null, 2));
