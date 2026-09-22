@@ -580,11 +580,20 @@ function main() {
       e.spellings.map((s) => ({ canon: e.canon, spelling: s, stems: meaningfulStems(s) })),
     );
     const nearDict = [];
+    let dictFamilies = 0;
     for (const u of stemmed) {
       let best = null;
       for (const d of dict) {
         const score = closeness(u.stems, d.stems);
-        if (score >= 0.8 && (!best || score > best.score)) best = { ...d, score };
+        if (score < 0.8) continue;
+        // Отсев семейств нужен и здесь, не только в списке пар. Без него
+        // «Фракция С5» подсказывала дописать себя в «Фракцию C4», а все шесть
+        // бисфенолов — в «Бисфенол А»: основы у них те же, а метка разная.
+        if (!sameMarks(u.marks, marksOf(d.spelling))) {
+          dictFamilies += 1;
+          continue;
+        }
+        if (!best || score > best.score) best = { ...d, score };
       }
       if (best) nearDict.push({ row: u.row, ...best });
     }
@@ -601,6 +610,12 @@ function main() {
       );
     }
     if (nearDict.length > 60) console.log(`   … и ещё ${nearDict.length - 60}`);
+    if (dictFamilies) {
+      console.log(
+        `\n   Отброшено как семейства: ${dictFamilies} — например «Фракция С5»` +
+          " при «Фракции C4»,\n   «Бисфенол F» при «Бисфеноле А»: основы те же, метка разная.",
+      );
+    }
     console.log("");
   }
 
