@@ -15,6 +15,8 @@
 const fs = require("fs");
 const path = require("path");
 
+const { words, stemName } = require("./normalize");
+
 const DIR = path.resolve(__dirname, "../../../reference");
 
 /** Код → название. null, пока не читали; Map — после. */
@@ -166,6 +168,67 @@ function lookupOkpd2(code) {
   return null;
 }
 
+/**
+ * Позиции классификатора, разобранные по словам названия, — для поиска
+ * КОДА ПО НАЗВАНИЮ вещества. Строится лениво, при первом обращении.
+ */
+let okpd2ByWords = null;
+
+function buildOkpd2ByWords() {
+  if (okpd2 === null) okpd2 = loadOkpd2();
+  const out = [];
+  for (const [code, name] of okpd2) {
+    const stems = new Set(words(stemName(name)).filter((w) => w.length > 2));
+    if (stems.size) out.push({ code, name, stems });
+  }
+  return out;
+}
+
+/**
+ * Категория ОКПД2 по НАЗВАНИЮ вещества — без всякого реестра.
+ *
+ * Зачем. Классификатор и реестр — разные вещи, а в карточке это сливалось в
+ * одно «записи нет». Бензол в классификаторе есть (20.14.12.130 «Бензолы»), а
+ * в реестре ПП №719 его нет: код категории существует всегда, а запись
+ * появляется, только когда завод заявил продукцию на подтверждение
+ * происхождения. Заказчик на этом и споткнулся, увидев бензол на сайте
+ * классификатора.
+ *
+ * Правило: все значимые слова написания входят в название позиции. Порядок
+ * слов не важен — «Терефталевая кислота» находит «Кислота терефталевая».
+ * Ранжируем по числу ЛИШНИХ слов позиции: точное совпадение набора лучше, чем
+ * название с довеском.
+ *
+ * Написание, потерявшее при отборе короткие слова, пропускаем целиком: оно
+ * перестаёт различать. «Пропанол-2» сводится к «пропану» и приводит к
+ * сжиженному пропану — то же, из-за чего «П-Ксилол» находил орто-изомер.
+ *
+ * @param {string[]} spellings известные написания вещества
+ * @param {number} maxExtra сколько лишних слов у позиции ещё допустимо
+ */
+function okpd2ByName(spellings, maxExtra = 1) {
+  if (okpd2ByWords === null) okpd2ByWords = buildOkpd2ByWords();
+  const out = [];
+  const seen = new Set();
+
+  for (const spelling of spellings ?? []) {
+    const all = words(stemName(spelling));
+    const need = all.filter((w) => w.length > 2);
+    if (!need.length || need.length !== all.length) continue;
+
+    for (const e of okpd2ByWords) {
+      const extra = e.stems.size - need.length;
+      if (extra < 0 || extra > maxExtra || seen.has(e.code)) continue;
+      if (!need.every((w) => e.stems.has(w))) continue;
+      seen.add(e.code);
+      out.push({ code: e.code, name: e.name, extra, matchedAs: spelling });
+    }
+  }
+
+  out.sort((a, b) => a.extra - b.extra || a.code.localeCompare(b.code));
+  return out;
+}
+
 /** Только название — тем, кому подробности не нужны. */
 function okpd2Name(code) {
   return lookupOkpd2(code)?.name ?? null;
@@ -211,6 +274,7 @@ function classifiersStatus() {
 }
 
 module.exports = {
+  okpd2ByName,
   okpd2Name,
   okpd2NameExact,
   okpd2Retired,

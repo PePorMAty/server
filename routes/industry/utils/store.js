@@ -19,7 +19,13 @@ const {
 } = require("./normalize");
 const { regionByInn } = require("./regions");
 const { shortenCompany } = require("./company");
-const { okpd2Name, okpd2NameExact, okpd2Retired, tnvedName } = require("./classifiers");
+const {
+  okpd2ByName,
+  okpd2Name,
+  okpd2NameExact,
+  okpd2Retired,
+  tnvedName,
+} = require("./classifiers");
 const { identify, spellingsOf } = require("./synonyms");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
@@ -244,6 +250,17 @@ function lookupProduct(rawName, opts) {
   const spellings = spellingsOf(rawName);
   const known = identify(rawName);
 
+  /**
+   * Категория классификатора по названию — на случай, когда реестр промолчит.
+   *
+   * Классификатор и реестр — разные вещи, а в карточке это сливалось в одно
+   * «записи нет». Бензол в ОКПД2 есть (20.14.12.130 «Бензолы»), а в реестре
+   * ПП №719 его нет: код категории существует всегда, запись появляется лишь
+   * когда завод заявил продукцию. Без этой строки карточка выглядела так,
+   * будто мы просто не нашли — и ей переставали верить.
+   */
+  const category = okpd2ByName(spellings)[0] ?? null;
+
   const exactStmt = conn.prepare(
     `SELECT * FROM products WHERE name_norm = ? LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
   );
@@ -395,7 +412,12 @@ function lookupProduct(rawName, opts) {
   if (!kept.length) {
     // Номер CAS — факт справочника, а не реестра: он есть и у вещества,
     // которого в ГИСП нет вовсе, и в карточке показывать его всё равно стоит.
-    result = { ...empty, canon: known?.canon ?? null, cas: known?.cas ?? null };
+    result = {
+      ...empty,
+      canon: known?.canon ?? null,
+      cas: known?.cas ?? null,
+      category,
+    };
   } else if (!loose && !confirmed.length) {
     // Записи нашлись, но ни одна не про этот продукт. Разбор сохраняем: без
     // него в карточке было бы просто «нет в реестре», и понять, что именно
@@ -404,6 +426,7 @@ function lookupProduct(rawName, opts) {
       ...empty,
       canon: known?.canon ?? null,
       cas: known?.cas ?? null,
+      category,
       weak: {
         match,
         entryCount: kept.length,
@@ -426,6 +449,7 @@ function lookupProduct(rawName, opts) {
       ...empty,
       canon: known?.canon ?? null,
       cas: known?.cas ?? null,
+      category,
       weak: {
         match,
         entryCount: kept.length,
