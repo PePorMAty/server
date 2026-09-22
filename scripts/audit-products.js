@@ -8,6 +8,7 @@
 //   node scripts/audit-products.js --weak       — совпадения, которым верить рано
 //   node scripts/audit-products.js --twins      — подписи-близнецы (буквы-двойники)
 //   node scripts/audit-products.js --merged     — какие строки справочника слились
+//   node scripts/audit-products.js --abbr       — что приносят короткие сокращения
 //   node scripts/audit-products.js --coverage   — замер под порог по доле слов записи
 //   node scripts/audit-products.js --near       — где справочник окупится
 //   node scripts/audit-products.js --graph <id> — только по одному графу
@@ -189,6 +190,7 @@ function main() {
   const wantWeak = args.includes("--weak");
   const wantTwins = args.includes("--twins");
   const wantMerged = args.includes("--merged");
+  const wantAbbr = args.includes("--abbr");
   const wantCoverage = args.includes("--coverage");
   const wantNear = args.includes("--near");
   const graphArg = args.indexOf("--graph");
@@ -407,6 +409,58 @@ function main() {
     console.log(
       `Разнобой в подписи: ${plainGroups}` +
         " — регистр и знаки; сходятся и так, чинить нечего",
+    );
+  }
+
+  // Короткие сокращения справочника: что они приносят из реестра.
+  //
+  // «МЭК» — метилэтилкетон, но ещё и Международная электротехническая
+  // комиссия, и по нему находились трубы «ГОСТ МЭК». «ПЭС» — полиэфирсульфон,
+  // но ещё и полиэтилсилоксан, то есть ДРУГОЕ вещество. «D4» — циклосилоксан,
+  // но ещё и шины Nokian WR D4.
+  //
+  // Шапка справочника запрещает класть такие сокращения, но запрет держится на
+  // внимательности: глазами «ПЭС» от «ПВХ» не отличить, разница только в том,
+  // что лежит в реестре. Поэтому судим по данным — что каждое сокращение
+  // приносит НА САМОМ ДЕЛЕ, если узел графа назвать ровно так.
+  if (wantAbbr) {
+    const LIMIT = 4;
+    console.log(
+      `\n── Что приносят сокращения короче ${LIMIT + 1} знаков ──\n` +
+        "  Подтверждённые записи должны быть про само вещество. Если это\n" +
+        "  посторонний товар — сокращение надо убрать из справочника.\n",
+    );
+    const seen = new Set();
+    const short = [];
+    for (const e of allEntries()) {
+      for (const spelling of e.spellings) {
+        const bare = spelling.replace(/[^0-9a-zа-яё]/gi, "");
+        if (bare.length > LIMIT || seen.has(spelling)) continue;
+        seen.add(spelling);
+        short.push([spelling, e.canon]);
+      }
+    }
+    short.sort((a, b) => a[0].localeCompare(b[0], "ru"));
+
+    let noisy = 0;
+    for (const [spelling, canon] of short) {
+      const r = lookupProduct(spelling);
+      if (!r?.found) continue;
+      const names = [...new Set((r.producers ?? []).map((p) => p.product))];
+      // Тревога, когда ни в одном подтверждённом названии нет самого
+      // канонического слова: значит, сокращение привело куда-то не туда.
+      const stem = stemName(canon).split(" ")[0];
+      const onTarget = names.some((n) => stemName(n).includes(stem));
+      if (!onTarget) noisy += 1;
+      console.log(
+        `  ${onTarget ? "   " : "!!!"} «${spelling}» → ${canon}` +
+          `   ${r.entryCount} записей, ${r.producerCount} производителей`,
+      );
+      for (const n of names.slice(0, 3)) console.log(`         ${n.slice(0, 80)}`);
+    }
+    console.log(
+      `\n  Сокращений проверено: ${short.length}, нашли записи и увели не туда: ${noisy}` +
+        (noisy ? "   (помечены !!!)" : ""),
     );
   }
 
