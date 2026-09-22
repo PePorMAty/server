@@ -37,7 +37,12 @@ const {
   allEntries,
   spellingsOf,
 } = require("../routes/industry/utils/synonyms");
-const { lookupProduct, getDb, status } = require("../routes/industry/utils/store");
+const {
+  lookupProduct,
+  getDb,
+  status,
+  passesVeto,
+} = require("../routes/industry/utils/store");
 const {
   buildQueryLadder,
   foldLookalikes,
@@ -433,7 +438,10 @@ function main() {
         "  только так видно, что оно добавляет от себя. Через lookupProduct не\n" +
         "  увидеть — там ищется сразу по всем написаниям записи, и сокращение\n" +
         "  неотличимо от полного названия.\n\n" +
-        "  Читать названия. Запись не про это вещество — два выхода:\n" +
+        "  Знак «!» слева — запись проходит вето и дошла бы до заказчика.\n" +
+        "  Остальные индекс достаёт, но правила подтверждения их режут: шум,\n" +
+        "  а не протечка. Смотреть в первую очередь помеченные «!».\n\n" +
+        "  Запись не про это вещество — два выхода:\n" +
         "    • пометить написание «*» в справочнике — узел оно опознавать\n" +
         "      продолжит, а по реестру искаться перестанет;\n" +
         "    • убрать совсем — если сокращение и опознанию не нужно.\n" +
@@ -478,27 +486,41 @@ function main() {
         if (rows.length) break;
       }
       if (!rows.length) continue;
-      (item.marked ? handled : open).push({ ...item, rows });
+      // Шум от протечки отделяем не на глаз: спрашиваем те же правила, что
+      // решают судьбу записи в настоящем поиске.
+      const marks = rows.map((r) => passesVeto(r.name, item.spelling));
+      (item.marked ? handled : open).push({
+        ...item,
+        rows,
+        marks,
+        leaks: marks.filter(Boolean).length,
+      });
     }
 
     const print = (list, prefix = "") => {
-      for (const { spelling, canon, rows } of list) {
+      for (const { spelling, canon, rows, marks } of list) {
         console.log(`  ${prefix}«${spelling}» → ${canon}`);
-        for (const r of rows) console.log(`         ${r.name.slice(0, 82)}`);
+        rows.forEach((r, i) => {
+          console.log(`      ${marks[i] ? "!" : " "}  ${r.name.slice(0, 82)}`);
+        });
       }
     };
-    print(open);
+    // Сначала те, где вето не держит: с них и начинать читать.
+    const byLeaks = (a, b) => b.leaks - a.leaks;
+    print([...open].sort(byLeaks));
     if (handled.length) {
       console.log("\n  Помечены «*» — по реестру не ищутся:\n");
-      print(handled, "*");
+      print([...handled].sort(byLeaks), "*");
     }
 
     const withHits = open.length + handled.length;
+    const leaking = open.filter((i) => i.leaks).length;
     console.log(
       `\n  Сокращений проверено: ${short.length};` +
         ` сами по себе что-то находят: ${withHits}` +
         (handled.length ? ` — из них ${handled.length} уже помечено «*»` : "") +
-        `.\n  Остальные ${short.length - withHits} безвредны — реестр их не знает.`,
+        `.\n  Остальные ${short.length - withHits} безвредны — реестр их не знает.` +
+        `\n  Вето не держит у ${leaking} непомеченных — вот их и разбирать.`,
     );
   }
 
