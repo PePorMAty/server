@@ -77,7 +77,7 @@ function buildStepSchema() {
         additionalProperties: false,
         // Отрасль и назначение обязательны в схеме: необязательное поле модель
         // пропускает через раз, и в карточке выходил бы пробел через строку.
-        required: ["name", "description", "industry", "mainPurpose"],
+        required: ["name", "description", "industry", "mainPurpose", "notes"],
         properties: {
           name: { type: "string" },
           description: { type: "string" },
@@ -85,6 +85,16 @@ function buildStepSchema() {
           industry: { type: "string" },
           /** Главная производственная функция процесса, одним предложением. */
           mainPurpose: { type: "string" },
+          /**
+           * Оговорки к шагу: чем набор может отличаться, что бывает
+           * необязательным. Список, а не абзац: в превью это пункты, и
+           * разбивать сплошной текст на них пришлось бы угадыванием.
+           * Сказать нечего — пустой массив, это законный ответ.
+           */
+          notes: {
+            type: "array",
+            items: { type: "string" },
+          },
         },
       },
       inputProducts: {
@@ -120,7 +130,7 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 
 Твоя задача — вернуть СТРОГО JSON по прикреплённому json_schema, который описывает один шаг цепочки в формате:
 {
-  transformation: { name, description, industry, mainPurpose },
+  transformation: { name, description, industry, mainPurpose, notes },
   inputProducts: [{ name, description }, ...],
   outputProducts: [{ name, description }, ...],
 }
@@ -135,6 +145,7 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 - transformation.description — 1–3 предложения о процессе; можно взять сжатое «Описание».
 - transformation.industry — производственная отрасль, к которой относится технологический процесс. Укажи кратко, в 1–3 словах.
 - transformation.mainPurpose — основное назначение технологического процесса. Одним кратким предложением опиши его главную производственную функцию и основной результат, без перечисления стадий, оборудования и деталей технологии.
+- transformation.notes — оговорки к шагу: чем набор входов или выходов может отличаться на практике, что бывает необязательным, какие стадии могут добавляться. Короткими пунктами, 0–4 штуки, каждый — одно предложение. Пиши только то, что следует из Markdown; НЕ ПРИДУМЫВАЙ оговорок ради заполнения поля. Сказать нечего — верни пустой массив, это правильный ответ. Не дублируй здесь description и mainPurpose.
 - Имена продуктов — короткие, рыночно-понятные, на русском (латиница только для химических формул).
 - description каждого продукта — 1 короткое предложение (если в Markdown нет прямого описания, напиши максимально общее нейтральное).
 - Не добавляй полей, которых нет в схеме.
@@ -389,6 +400,13 @@ router.post("/gpt/step/build", async (req, res) => {
     const trDesc = String(parsed.transformation.description || "").trim();
     const trIndustry = String(parsed.transformation.industry || "").trim();
     const trPurpose = String(parsed.transformation.mainPurpose || "").trim();
+    // Пустые пункты отбрасываем: модель иногда добавляет их «для числа», а
+    // пустая строка в списке превью выглядит пропавшим текстом.
+    const trNotes = (
+      Array.isArray(parsed.transformation.notes) ? parsed.transformation.notes : []
+    )
+      .map((n) => String(n || "").trim())
+      .filter(Boolean);
 
     const normalize = (s) =>
       String(s || "")
@@ -435,6 +453,7 @@ router.post("/gpt/step/build", async (req, res) => {
         // «поле есть и пустое», чем рисовать подпись без значения.
         industry: trIndustry || undefined,
         mainPurpose: trPurpose || undefined,
+        notes: trNotes.length ? trNotes : undefined,
       },
       inputProducts: parsed.inputProducts
         .map(markProduct)
