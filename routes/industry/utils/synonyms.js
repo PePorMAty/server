@@ -690,6 +690,12 @@ function allEntries() {
       canon: entry.canon,
       spellings: [...entry.spellings],
       cas: entry.cas ?? null,
+      // Помеченные «*» — теми же словами, что в spellings, а не ключами:
+      // отчётам надо сказать про конкретное написание «по нему решение
+      // принято», и сверять они будут именно написание.
+      noSearch: new Set(
+        entry.spellings.filter((s) => entry.noSearch?.has(dictKey(s))),
+      ),
     });
   }
   return out;

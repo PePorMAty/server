@@ -433,7 +433,12 @@ function main() {
         "  только так видно, что оно добавляет от себя. Через lookupProduct не\n" +
         "  увидеть — там ищется сразу по всем написаниям записи, и сокращение\n" +
         "  неотличимо от полного названия.\n\n" +
-        "  Читать названия: запись не про это вещество — сокращение убрать.\n",
+        "  Читать названия. Запись не про это вещество — два выхода:\n" +
+        "    • пометить написание «*» в справочнике — узел оно опознавать\n" +
+        "      продолжит, а по реестру искаться перестанет;\n" +
+        "    • убрать совсем — если сокращение и опознанию не нужно.\n" +
+        "  Уже помеченные вынесены вниз: чужие записи по ним видны по-прежнему\n" +
+        "  (спрашиваем-то индекс), но в поиск они не идут и решения не ждут.\n",
     );
 
     const conn = reg.ready ? getDb() : null;
@@ -449,18 +454,21 @@ function main() {
         const bare = spelling.replace(/[^0-9a-zа-яё]/gi, "");
         if (bare.length > LIMIT || seen.has(spelling)) continue;
         seen.add(spelling);
-        short.push([spelling, e.canon]);
+        short.push({ spelling, canon: e.canon, marked: e.noSearch.has(spelling) });
       }
     }
-    short.sort((a, b) => a[0].localeCompare(b[0], "ru"));
+    short.sort((a, b) => a.spelling.localeCompare(b.spelling, "ru"));
 
-    let withHits = 0;
-    for (const [spelling, canon] of short) {
+    // Две кучки: по чему решать и что уже решено. Пока они были вперемешку,
+    // отчёт заново поднимал разобранное — и пометка ничего в нём не меняла.
+    const open = [];
+    const handled = [];
+    for (const item of short) {
       if (!stmt) break;
       // Только строгие ступени: мягкие ищут по любому слову и к сокращению
       // отношения не имеют.
       let rows = [];
-      for (const step of buildQueryLadder(spelling)) {
+      for (const step of buildQueryLadder(item.spelling)) {
         if (!["all-words", "core-words"].includes(step.level)) continue;
         try {
           rows = stmt.all(step.query);
@@ -470,15 +478,27 @@ function main() {
         if (rows.length) break;
       }
       if (!rows.length) continue;
-      withHits += 1;
-      console.log(`  «${spelling}» → ${canon}`);
-      for (const r of rows) console.log(`         ${r.name.slice(0, 82)}`);
+      (item.marked ? handled : open).push({ ...item, rows });
     }
 
+    const print = (list, prefix = "") => {
+      for (const { spelling, canon, rows } of list) {
+        console.log(`  ${prefix}«${spelling}» → ${canon}`);
+        for (const r of rows) console.log(`         ${r.name.slice(0, 82)}`);
+      }
+    };
+    print(open);
+    if (handled.length) {
+      console.log("\n  Помечены «*» — по реестру не ищутся:\n");
+      print(handled, "*");
+    }
+
+    const withHits = open.length + handled.length;
     console.log(
       `\n  Сокращений проверено: ${short.length};` +
-        ` сами по себе что-то находят: ${withHits}.` +
-        `\n  Остальные ${short.length - withHits} безвредны — реестр их не знает.`,
+        ` сами по себе что-то находят: ${withHits}` +
+        (handled.length ? ` — из них ${handled.length} уже помечено «*»` : "") +
+        `.\n  Остальные ${short.length - withHits} безвредны — реестр их не знает.`,
     );
   }
 
