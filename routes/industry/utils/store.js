@@ -522,6 +522,12 @@ function confirms(c) {
   // всех оснований ниже: «Закись азота» начинается со второго слова и
   // покрывает половину названия, то есть проходила бы как «второе слово».
   if (c.foreignClass) return false;
+  // Совпало одно лишь название класса. «Эфиры ЖК»: сокращение «ЖК» короче
+  // трёх букв, ступень «значимые слова» его отбрасывает, и от запроса остаётся
+  // «эфиры» — то есть КЛАСС соединений. После этого любой сложный эфир
+  // реестра подтверждался первым же словом: заказчику доставались метил-трет-
+  // бутиловый эфир и метилакрилат под видом эфиров жирных кислот.
+  if (c.onlyClass) return false;
   if (c.at === 0) return true;
   if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return true;
   if (c.parens === "synonym") return true;
@@ -773,6 +779,9 @@ function keepBestOverlap(rows, rawName) {
       parens: matchedInParens(row.name || "", queryStems),
       // Слово-класс впритык к совпавшему: запись про соединение, не про него.
       foreignClass: foreignCompound(rowList, queryStems),
+      // Совпали ОДНИ названия классов — значит, спросили про класс, а не про
+      // вещество, и подтверждать таким совпадением нечего.
+      onlyClass: shared.length > 0 && shared.every((w) => COMPOUND_CLASS.has(w)),
     };
   });
 
@@ -790,6 +799,7 @@ function keepBestOverlap(rows, rawName) {
       strong: s.strong,
       parens: s.parens,
       foreignClass: s.foreignClass,
+      onlyClass: s.onlyClass,
     })),
   };
 }
