@@ -114,7 +114,14 @@ async function readFresh(file) {
   return { codes, rows: rowsRaw.length, codeCol, nameCol, nameRivals };
 }
 
-/** Какие коды и как часто стоят в записях реестра. */
+/**
+ * Какие коды и как часто стоят в записях реестра.
+ *
+ * В одном поле реестра бывает НЕСКОЛЬКО кодов: «20.13.25.114, 20.13.25.119»,
+ * «20.16.30; 20.13.25». Первый прогон объявил такие строки отсутствующими в
+ * классификаторе — и был неправ: коды там как раз хорошие, просто записаны
+ * через запятую. Разделяем и считаем каждый сам по себе.
+ */
 function readRegistryCodes(dbFile) {
   if (!fs.existsSync(dbFile)) return null;
   const Database = require("better-sqlite3");
@@ -122,11 +129,54 @@ function readRegistryCodes(dbFile) {
   const rows = db
     .prepare(
       `SELECT okpd2 AS code, COUNT(*) AS n FROM products
-       WHERE okpd2 IS NOT NULL AND okpd2 <> '' GROUP BY okpd2 ORDER BY n DESC`,
+       WHERE okpd2 IS NOT NULL AND okpd2 <> '' GROUP BY okpd2`,
     )
     .all();
   db.close();
-  return rows;
+
+  const counts = new Map();
+  const junk = new Map();
+  for (const row of rows) {
+    for (const piece of splitCodes(row.code)) {
+      const target = CODE_RE.test(piece) ? counts : junk;
+      target.set(piece, (target.get(piece) ?? 0) + row.n);
+    }
+  }
+  const toList = (m) =>
+    [...m]
+      .map(([code, n]) => ({ code, n }))
+      .sort((a, b) => b.n - a.n || a.code.localeCompare(b.code));
+  return { codes: toList(counts), junk: toList(junk) };
+}
+
+/** Поле реестра → отдельные коды. */
+function splitCodes(raw) {
+  return String(raw ?? "")
+    .split(/[;,]/)
+    .map((s) => clean(s))
+    .filter(Boolean);
+}
+
+/**
+ * Почему кода нет: группу расписали детальнее или убрали целиком.
+ *
+ * Самый частый случай — «20.15.31.000 Мочевина» превратилась в «20.15.31.110
+ * Карбамид марки А» и «…120 марки Б»: группа жива, а обобщённого кода под ней
+ * больше нет. Это видно только рядом с соседями, поэтому их и показываем: без
+ * них «снят» звучит тревожнее, чем есть на самом деле.
+ */
+function explain(code, fresh) {
+  const dot = code.lastIndexOf(".");
+  if (dot < 0) return "";
+  const parent = code.slice(0, dot);
+  if (!fresh.has(parent)) return `  (и группы ${parent} нет)`;
+
+  const kids = [...fresh.keys()].filter(
+    (c) => c.startsWith(parent + ".") && c !== code,
+  );
+  return kids.length
+    ? `  (группа ${parent} жива, под ней ${kids.length}: ${kids.slice(0, 2).join(", ")}${kids.length > 2 ? ", …" : ""})`
+    : `  (группа ${parent} жива, но без детализации)`;
 }
 
 async function main() {
@@ -187,9 +237,9 @@ async function main() {
   if (!registry) {
     console.log(`\nБазы ГИСП нет (${dbFile}) — про снятые коды сказать нечего.`);
   } else {
-    const used = registry.length;
-    const exact = registry.filter((r) => fresh.codes.has(clean(r.code))).length;
-    const missing = registry.filter((r) => !fresh.codes.has(clean(r.code)));
+    const used = registry.codes.length;
+    const exact = registry.codes.filter((r) => fresh.codes.has(r.code)).length;
+    const missing = registry.codes.filter((r) => !fresh.codes.has(r.code));
     const missingRecords = missing.reduce((s, r) => s + r.n, 0);
 
     console.log(`\nВ реестре разных кодов: ${used}`);
@@ -198,16 +248,23 @@ async function main() {
       `  отсутствуют: ${missing.length}` +
         ` (записей с такими кодами: ${missingRecords})`,
     );
+    if (registry.junk.length) {
+      console.log(
+        `  на код не похожи: ${registry.junk.length}` +
+          ` (${registry.junk.slice(0, 3).map((r) => `«${r.code}»`).join(", ")}` +
+          `${registry.junk.length > 3 ? ", …" : ""}) — в список снятых не идут`,
+      );
+    }
 
     console.log("\n── отсутствуют в действующем классификаторе, по частоте ──");
     for (const r of missing.slice(0, 25)) {
-      console.log(`  ${String(r.n).padStart(5)} записей  ${r.code}`);
+      console.log(`  ${String(r.n).padStart(5)} записей  ${r.code}${explain(r.code, fresh.codes)}`);
     }
     if (missing.length > 25) console.log(`  … и ещё ${missing.length - 25}`);
 
     console.log("\n── проверка на известных случаях ──");
     for (const code of ["20.15.31.000", "20.13.63.000", "20.14.61.000"]) {
-      const inReg = registry.find((r) => clean(r.code) === code);
+      const inReg = registry.codes.find((r) => r.code === code);
       const inFresh = fresh.codes.has(code);
       console.log(
         `  ${code}: в реестре ${inReg ? `${inReg.n} записей` : "нет"},` +
@@ -244,9 +301,14 @@ async function main() {
         "# «исключён»: код мог и не существовать вовсе, если заявитель ошибся.",
         "# Для карточки разницы нет: доверять такому коду нельзя в обоих случаях.",
         "#",
+        "# Чаще всего это обобщённый код вида «…000», под которым группу потом",
+        "# расписали подробнее. В скобках — что стало с его группой.",
+        "#",
         `# Собрано: ${new Date().toISOString().slice(0, 10)}, кодов: ${missing.length}`,
         "",
-        ...missing.map((r) => `${clean(r.code)}\t${r.n}`),
+        ...missing.map(
+          (r) => `${r.code}\t${r.n}\t#${explain(r.code, fresh.codes).trim()}`,
+        ),
       ];
       fs.writeFileSync(retiredOut, lines.join("\n") + "\n", "utf8");
       console.log(`\nЗаписано в ${retiredOut}: ${missing.length} кодов.`);

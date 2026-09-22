@@ -72,6 +72,19 @@ function loadRetired() {
 }
 
 /**
+ * Первый код из поля реестра.
+ *
+ * В одной записи ГИСП бывает несколько кодов: «20.13.25.114, 20.13.25.119»,
+ * «20.16.30; 20.13.25». Целиком такая строка не совпадёт ни с одной записью
+ * классификатора, и карточка оставалась без названия вовсе. Берём первый —
+ * он же и главный: заявитель ставит его первым.
+ */
+function firstCode(raw) {
+  const head = String(raw ?? "").split(/[;,]/)[0] ?? "";
+  return head.trim();
+}
+
+/**
  * Снят ли код с классификатора.
  *
  * Проверяем код ЦЕЛИКОМ, без отсечения хвоста, — в отличие от поиска
@@ -80,7 +93,7 @@ function loadRetired() {
  */
 function okpd2Retired(code) {
   if (retired === null) retired = loadRetired();
-  const clean = String(code ?? "").trim();
+  const clean = firstCode(code);
   return clean ? retired.has(clean) : false;
 }
 
@@ -139,7 +152,7 @@ function loadTnved() {
  */
 function lookupOkpd2(code) {
   if (okpd2 === null) okpd2 = loadOkpd2();
-  const clean = String(code ?? "").trim();
+  const clean = firstCode(code);
   if (!clean) return null;
 
   let key = clean;
