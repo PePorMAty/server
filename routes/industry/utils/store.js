@@ -14,6 +14,7 @@ const {
   buildQueryLadder,
   normalizeName,
   stemName,
+  stemWord,
   words,
 } = require("./normalize");
 const { regionByInn } = require("./regions");
@@ -328,7 +329,9 @@ function lookupProduct(rawName) {
 
   let result;
   if (!kept.length) {
-    result = { ...empty, canon: known?.canon ?? null };
+    // Номер CAS — факт справочника, а не реестра: он есть и у вещества,
+    // которого в ГИСП нет вовсе, и в карточке показывать его всё равно стоит.
+    result = { ...empty, canon: known?.canon ?? null, cas: known?.cas ?? null };
   } else if (!loose && !confirmed.length) {
     // Записи нашлись, но ни одна не про этот продукт. Разбор сохраняем: без
     // него в карточке было бы просто «нет в реестре», и понять, что именно
@@ -336,6 +339,7 @@ function lookupProduct(rawName) {
     result = {
       ...empty,
       canon: known?.canon ?? null,
+      cas: known?.cas ?? null,
       weak: {
         match,
         entryCount: kept.length,
@@ -357,6 +361,7 @@ function lookupProduct(rawName) {
     result = {
       ...empty,
       canon: known?.canon ?? null,
+      cas: known?.cas ?? null,
       weak: {
         match,
         entryCount: kept.length,
@@ -392,6 +397,7 @@ function lookupProduct(rawName) {
       // непонятно, почему на «ПЭНД» приехали записи про полиэтилен.
       matchedAs: normalizeName(matchedAs) === normalized ? null : matchedAs,
       canon: known?.canon ?? null,
+      cas: known?.cas ?? null,
       /** Сколько записей отбор отбросил как «слово попало в чужое название». */
       rejected,
       /** Вещество нашлось только в составе препарата — ОКПД2 у записи чужой. */
@@ -512,11 +518,67 @@ function docFreq(conn, stem) {
  */
 function confirms(c) {
   if (!c) return false;
+  // Запись про СОЕДИНЕНИЕ этого вещества, а не про него само. Запрет сильнее
+  // всех оснований ниже: «Закись азота» начинается со второго слова и
+  // покрывает половину названия, то есть проходила бы как «второе слово».
+  if (c.foreignClass) return false;
   if (c.at === 0) return true;
   if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return true;
   if (c.parens === "synonym") return true;
   if (c.strong >= 2 && c.at >= 0 && c.at <= 2) return true;
   return c.parens === "formulation";
+}
+
+/**
+ * Названия классов соединений: рядом с ними вещество стоит в родительном
+ * падеже и называет СОСТАВНУЮ ЧАСТЬ, а не продукт.
+ *
+ * «Закись азота», «Пероксид водорода», «Оксидов азота», «Водород фтористый» —
+ * во всех четырёх продукт другой, а совпало зависимое слово. Усечение
+ * окончаний сводит «азота» к «азоту», и запись про закись выглядит записью
+ * про азот. Заказчик прислал ровно этот случай: продукту «Азот» доставался
+ * код 21.20.10.239 «Препараты для лечения заболеваний нервной системы», то
+ * есть классификация закиси азота как наркозного средства.
+ *
+ * Список ведётся руками и заведомо неполон. Пополнять его безопасно: слово
+ * отсюда запрещает совпадение только тогда, когда стоит ВПРИТЫК к совпавшему
+ * и когда самого этого слова в запросе НЕТ. «Карбонат кальция» по запросу
+ * «карбонат кальция» проходит, по запросу «кальций» — нет.
+ *
+ * Хранятся усечённые формы: сравнение идёт по ним же.
+ */
+const COMPOUND_CLASS = new Set(
+  [
+    // Классы соединений.
+    "закись", "окись", "оксид", "диоксид", "триоксид", "пероксид", "перекись",
+    "гидроксид", "гидрид", "хлорид", "фторид", "бромид", "иодид", "йодид",
+    "сульфид", "сульфат", "сульфит", "нитрат", "нитрит", "карбонат",
+    "гидрокарбонат", "фосфат", "фосфид", "силикат", "ацетат", "цианид",
+    "карбид", "нитрид", "амид", "ангидрид", "хлорат", "перхлорат", "хромат",
+    "перманганат", "молибдат", "соль", "кислота", "эфир",
+    // Прилагательные того же смысла: «водород фтористый», «газ сернистый».
+    "фтористый", "хлористый", "бромистый", "йодистый", "сернистый",
+    "азотистый", "углекислый", "фосфористый", "кремнистый",
+  ].map(stemWord),
+);
+
+/**
+ * Не про соединение ли эта запись.
+ *
+ * Возвращает слово-класс, если оно стоит ВПРИТЫК к совпавшему и в запросе его
+ * нет. Соседство важно: в длинном названии слово вроде «сульфат» может
+ * оказаться посторонним уточнением, и запрещать по нему всю запись было бы
+ * слишком грубо.
+ */
+function foreignCompound(rowList, queryStems) {
+  for (let i = 0; i < rowList.length; i++) {
+    if (!queryStems.has(rowList[i])) continue;
+    for (const j of [i - 1, i + 1]) {
+      const near = rowList[j];
+      if (near && COMPOUND_CLASS.has(near) && !queryStems.has(near)) return near;
+    }
+  }
+  return null;
 }
 
 /** Сколько слов в скобке ещё считается синонимом, а не составом. */
@@ -709,6 +771,8 @@ function keepBestOverlap(rows, rawName) {
       // ПНД» тремя «словами» — «2», «4» и «д». Совпадением это не назовёшь.
       strong: shared.filter((s) => s.length > 2).length,
       parens: matchedInParens(row.name || "", queryStems),
+      // Слово-класс впритык к совпавшему: запись про соединение, не про него.
+      foreignClass: foreignCompound(rowList, queryStems),
     };
   });
 
@@ -725,6 +789,7 @@ function keepBestOverlap(rows, rawName) {
       at: s.at,
       strong: s.strong,
       parens: s.parens,
+      foreignClass: s.foreignClass,
     })),
   };
 }
@@ -740,10 +805,13 @@ function summarize(rows) {
   // записей встречается чаще, и говорим, сколько их всего: если кодов много,
   // это само по себе признак, что записи собрались разные.
   const okpd2Counts = new Map();
+  // ТН ВЭД считаем так же: он тоже свой у каждой записи.
+  const tnvedCounts = new Map();
 
   for (const row of rows) {
     if (row.status === "active") anyActive = true;
     if (row.okpd2) okpd2Counts.set(row.okpd2, (okpd2Counts.get(row.okpd2) ?? 0) + 1);
+    if (row.tnved) tnvedCounts.set(row.tnved, (tnvedCounts.get(row.tnved) ?? 0) + 1);
     // Считаем по тому же региону, что показываем: в выгрузке адреса нет, и
     // регион выводится из ИНН — иначе счётчик регионов всегда был бы нулём.
     const region = row.region || regionByInn(row.inn);
@@ -764,10 +832,12 @@ function summarize(rows) {
   });
 
   // При равенстве берём меньший код: лишь бы ответ не плавал от порядка строк.
-  const ranked = [...okpd2Counts].sort(
-    (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])),
-  );
+  const byCount = (m) =>
+    [...m].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  const ranked = byCount(okpd2Counts);
   const okpd2 = ranked[0]?.[0] ?? null;
+  const rankedTnved = byCount(tnvedCounts);
+  const tnved = rankedTnved[0]?.[0] ?? null;
 
   return {
     entryCount: rows.length,
@@ -780,6 +850,9 @@ function summarize(rows) {
     okpd2Share: ranked[0]?.[1] ?? 0,
     /** Сколько ещё разных кодов у остальных записей. */
     okpd2Others: Math.max(0, ranked.length - 1),
+    tnved,
+    tnvedName: tnvedName(tnved)?.name ?? null,
+    tnvedOthers: Math.max(0, rankedTnved.length - 1),
     producers,
   };
 }

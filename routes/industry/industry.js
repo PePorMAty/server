@@ -83,7 +83,7 @@ router.post("/industry/identify", (req, res) => {
       // Неопознанные не пропускаем молча: клиенту важно отличать «справочник
       // не знает такого» от «не спрашивали».
       results[name] = hit
-        ? { id: hit.id, canon: hit.canon, exact: hit.exact }
+        ? { id: hit.id, canon: hit.canon, exact: hit.exact, cas: hit.cas }
         : null;
     }
 
