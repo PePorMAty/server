@@ -20,6 +20,7 @@ const {
   foldLookalikes,
   normalizeName,
   isElementFormula,
+  stemWord,
   words,
   GENERIC_WORDS,
 } = require("./normalize");
@@ -35,6 +36,22 @@ const {
 const dictKey = (raw) => foldLookalikes(normalizeName(raw));
 
 /**
+ * Ключ с усечёнными окончаниями: «Базовые масла» и «Базовое масло» сходятся.
+ *
+ * Отдельным ключом, а не вместо обычного: усечение — вещь грубая, и решать по
+ * нему можно только тогда, когда точный ключ уже не нашёлся.
+ *
+ * Стоп-слова здесь НЕ отбрасываются, в отличие от words(). Русские «а», «с»,
+ * «о» — предлоги и союзы, и words() их выбрасывает; а в «Бисфенол А» именно
+ * эта буква и есть всё отличие от «Бисфенола». С отсевом ключ у них вышел бы
+ * один, и два разных вещества слились бы.
+ */
+const stemKey = (raw) =>
+  foldLookalikes(
+    normalizeName(raw).split(" ").filter(Boolean).map(stemWord).join(" "),
+  );
+
+/**
  * Файлы справочника, в порядке доверия.
  *
  * Первый — правленный человеком, он и побеждает при расхождениях. Второй
@@ -48,6 +65,8 @@ const FILES = [
 
 /** Нормализованное написание → запись. null, пока не читали. */
 let index = null;
+/** Усечённое написание → запись. null у значения — столкновение, судить нечем. */
+let stemIndex = null;
 /** Что получилось при разборе файла — для страницы состояния и диагностики. */
 let stats = null;
 
@@ -224,8 +243,49 @@ function mergeInto(map, target, entry, keys) {
 }
 
 function ensure() {
-  if (index === null) index = load();
+  if (index === null) {
+    index = load();
+    stemIndex = buildStemIndex(index);
+  }
   return index;
+}
+
+/**
+ * Указатель по усечённым написаниям.
+ *
+ * Строится вторым проходом, по уже готовой карте: к этому моменту строки об
+ * одном веществе слиты, и усечённый ключ ведёт к настоящей записи, а не к
+ * проигравшей.
+ *
+ * Столкновение — не повод угадывать. Два РАЗНЫХ вещества, чьи написания после
+ * усечения совпали, дают в значении null, и опознание по усечению на таком
+ * ключе честно отказывается. Лучше не опознать, чем опознать не то.
+ */
+function buildStemIndex(map) {
+  const out = new Map();
+  for (const [key, entry] of map) {
+    const sk = stemKey(key);
+    if (!sk) continue;
+    const prev = out.get(sk);
+    if (prev === undefined) out.set(sk, entry);
+    else if (prev && prev.canon !== entry.canon) out.set(sk, null);
+  }
+  return out;
+}
+
+/**
+ * Опознать с усечёнными окончаниями — последняя попытка, после всех точных.
+ *
+ * Множественное число и падежи проходили мимо молча: ключ справочника точный,
+ * и «Базовые масла» не находили «Базовое масло». Усечение это закрывает, а
+ * разные вещества не сводит: «Циклогексан» и «Циклогексанол» после усечения
+ * так и остаются разными, потому что отличаются не окончанием.
+ */
+function identifyByStem(rawName) {
+  ensure();
+  const sk = stemKey(rawName);
+  if (!sk) return null;
+  return stemIndex.get(sk) ?? null;
 }
 
 /**
@@ -248,7 +308,8 @@ function identify(rawName) {
   const hit =
     map.get(key) ??
     identifyParenthesized(map, rawName) ??
-    identifyWithoutGeneric(map, key);
+    identifyWithoutGeneric(map, key) ??
+    identifyByStem(rawName);
   if (!hit) return null;
 
   return {
