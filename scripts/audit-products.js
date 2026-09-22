@@ -274,6 +274,12 @@ function main() {
       weak: hit?.weak ?? null,
       // Какую долю слов записи покрыло совпадение — для выбора порога.
       coverage: hit?.coverage ?? null,
+      /** Сколько записей отбор отбросил как «слово попало в чужое название». */
+      rejected: hit?.rejected ?? 0,
+      /** Нашлось только в составе препарата. */
+      viaFormulation: hit?.viaFormulation ?? false,
+      /** Записи нашлись, но ни одна не про этот продукт. */
+      offTarget: hit?.weak?.offTarget ?? false,
     });
   }
   rows.sort((a, b) => b.freq - a.freq || a.label.localeCompare(b.label, "ru"));
@@ -466,15 +472,11 @@ function main() {
     }
     console.log("");
 
-    // Примерка правила. Ничего не меняет — только показывает, что было бы.
+    // Чем подтвердилось — и что отбор отбросил.
     //
-    // Подтверждаем продукт, если нашлась запись, где выполнено хотя бы одно:
-    //   — совпадение с ПЕРВОГО слова названия («Полиэтилен высокого давления»);
-    //   — совпадение внутри короткой скобки, то есть с синонимом продукта
-    //     («Изопропилбензол (кумол)»);
-    //   — совпали два и более значимых слова в начале названия («Фракция
-    //     альфа-олефинов C₈»).
-    // Иначе это слово, случайно оказавшееся в середине чужого названия.
+    // Правило теперь работает в самом отборе (store.js, confirms), так что
+    // это уже не примерка, а отчёт о сделанном: по какому основанию каждый
+    // продукт удержался и сколько чужих записей отброшено.
     const REASONS = [
       ["первое слово", (c) => c.head],
       ["скобка-синоним", (c) => c.parens],
@@ -486,14 +488,10 @@ function main() {
     const evidence = (c) => REASONS.find(([, has]) => has(c))?.[1](c) ?? "";
 
     const confirmed = rows.filter((r) => r.found && r.coverage);
-    const dropped = confirmed.filter((r) => !verdict(r.coverage));
+    const offTarget = rows.filter((r) => r.offTarget);
+    const trimmed = confirmed.filter((r) => r.rejected > 0);
 
-    console.log("── ПРИМЕРКА ПРАВИЛА (ничего не меняет) ──\n");
-    console.log(
-      `  Было подтверждено: ${confirmed.length}` +
-        `   ·   осталось бы: ${confirmed.length - dropped.length}` +
-        `   ·   отсеялось бы: ${dropped.length}`,
-    );
+    console.log("── ЧЕМ ПОДТВЕРДИЛОСЬ И ЧТО ОТБРОШЕНО ──\n");
 
     const byReason = new Map();
     for (const r of confirmed) {
@@ -501,27 +499,37 @@ function main() {
       if (v) byReason.set(v, (byReason.get(v) ?? 0) + 1);
     }
     console.log(
-      `  Чем удержались: ${[...byReason].map(([k, n]) => `${k}: ${n}`).join(", ")}`,
+      `  Подтверждено: ${confirmed.length}` +
+        `  (${[...byReason].map(([k, n]) => `${k}: ${n}`).join(", ")})`,
+    );
+    console.log(
+      `  Отброшено целиком: ${offTarget.length}` +
+        " — записи нашлись, но ни одна не про этот продукт",
+    );
+    console.log(
+      `  Отброшено частично: ${trimmed.length}` +
+        " — часть записей чужая, остальные подтверждают",
     );
 
-    console.log("\n  ОТСЕЯЛОСЬ БЫ — проверьте, нет ли тут нужного:");
-    for (const r of dropped) {
-      console.log(
-        `    слово ${String(r.coverage.at + 1).padStart(2)}  «${r.label}»` +
-          `  →  «${(r.coverage.name ?? "").slice(0, 80)}»`,
-      );
+    console.log("\n  ОТБРОШЕНО ЦЕЛИКОМ — проверьте, нет ли тут нужного:");
+    if (!offTarget.length) console.log("    пусто");
+    for (const r of offTarget) {
+      console.log(`    «${r.label}»  →  «${String(r.weak?.sample ?? "").slice(0, 80)}»`);
     }
 
-    // Удержавшиеся не первым словом — второе место, где правило может ошибаться.
-    console.log("\n  УДЕРЖАЛОСЬ БЫ не первым словом — проверьте, нет ли тут мусора:");
+    // Удержавшиеся не первым словом — место, где правило может ошибаться.
+    console.log("\n  УДЕРЖАЛОСЬ не первым словом — проверьте, нет ли тут мусора:");
+    let shown = 0;
     for (const r of confirmed) {
       const v = verdict(r.coverage);
       if (!v || v === "первое слово") continue;
+      shown += 1;
       console.log(
         `    ${v.padEnd(19)}  «${r.label}»` +
           `  →  «${String(evidence(r.coverage)).slice(0, 80)}»`,
       );
     }
+    if (!shown) console.log("    пусто");
     console.log("");
   }
 
