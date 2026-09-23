@@ -44,6 +44,7 @@ const {
   getDb,
   status,
   passesVeto,
+  isPlaceholderName,
 } = require("../routes/industry/utils/store");
 const {
   buildQueryLadder,
@@ -376,7 +377,10 @@ function main() {
   if (wantMissing) {
     const byKind = new Map();
     for (const r of neither) {
-      const kind = nameKind(r.label);
+      // Подпись-заготовка — не кандидат в справочник, а неназванный узел.
+      // Спрашиваем у того же, кто решает это на сервере: порознь они уже
+      // расходились бы — поиск отказывался отвечать, а отчёт звал дописывать.
+      const kind = isPlaceholderName(r.label) ? "stub" : nameKind(r.label);
       (byKind.get(kind) ?? byKind.set(kind, []).get(kind)).push(r);
     }
     const line = (r) =>
@@ -405,6 +409,7 @@ function main() {
       ["goods", "ИЗДЕЛИЯ И МАТЕРИАЛЫ ПО НАЗНАЧЕНИЮ", "«Смазки для прокатного цеха» — назначение вместо вещества"],
       ["raw", "СЫРЬЁ, РУДЫ, БИОСЫРЬЁ", "вещи настоящие, но реестр ПП №719 и номера CAS про другое"],
       ["bio", "БИОМАТЕРИАЛЫ И ОБРАЗЦЫ", "биотехнологические графы: ни ГИСП, ни CAS про них не знают"],
+      ["stub", "УЗЛЫ БЕЗ НАЗВАНИЯ", "подпись-заготовка: не в справочник дописывать, а узел переименовать"],
     ];
     for (const [kind, title, why] of OTHER) {
       const list = byKind.get(kind) ?? [];
