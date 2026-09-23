@@ -35,69 +35,12 @@ const {
   stemName,
 } = require("../routes/industry/utils/normalize");
 const { identify } = require("../routes/industry/utils/synonyms");
+// Разбор скобки — общий с mine-graph-synonyms.js: правила там куплены
+// ошибками, и во втором экземпляре они бы разъехались.
+const { parenPairs, key } = require("./lib/paren-pairs");
 
 const DB_PATH =
   process.env.GISP_DB_PATH || path.resolve(__dirname, "../data/gisp.sqlite");
-
-const key = (s) => foldLookalikes(normalizeName(s));
-
-/** Число с единицей: «360 г/л», «5%». Значит, в скобке состав, а не имя. */
-const QUANTITY = /\d[\d.,]*\s*(?:%|мг|мкг|кг|мл|г\/л|г|л|моль|ppm|шт|уп)(?![а-яёa-z])/i;
-
-/**
- * Начала, после которых в скобке не имя, а уточнение.
- *
- * «(кроме …)», «(в том числе …)», «(для …)», «(марка А)» — всё это про то же
- * вещество, но синонимом не является: подставив такое в справочник, мы
- * объявили бы «марка А» именем продукта.
- *
- * Конец слова стережём заглядыванием, а не `\b`: в JavaScript граница слова
- * считается по латинице и на кириллице не срабатывает. Без этого «из»
- * съедало «ИЗопропиловый спирт», «при» — «ПРИродный газ», «тип» — «ТИПовой».
- * Проверка это и поймала.
- */
-const NOT_A_NAME = new RegExp(
-  "^(?:" +
-    [
-      "кроме", "включая", "в\\s+том\\s+числе", "для", "из", "с", "со", "без",
-      "не", "по", "при", "согласно", "марка", "марки", "сорт", "тип", "класс",
-      "гост", "ту", "артикул", "далее", "см",
-    ].join("|") +
-    ")(?![а-яёa-z])",
-  "i",
-);
-
-/**
- * Разбить перечисление в скобке, не разрывая числа.
- *
- * Запятая в скобке обычно разделяет имена — «(изопропиловый спирт,
- * изопропанол)». Но в химических названиях она же стоит ВНУТРИ имени:
- * «1,2-диметилбензол», «пропандиол-1,2». Наивное деление давало «2-
- * диметилбензол» — имя несуществующего вещества.
- */
-function splitNames(inner) {
-  const GUARD = "\u0001";
-  return inner
-    .replace(/(\d)\s*,\s*(\d)/g, `$1${GUARD}$2`)
-    .split(/[;,]/)
-    .map((p) => p.split(GUARD).join(","));
-}
-
-/**
- * Одинокое прилагательное: «сжиженный», «вторичный», «технический».
- *
- * Именем вещества оно не бывает — названия в химии существительные. А в
- * скобке такое слово стоит сплошь и рядом: «Газ природный (сжиженный)»,
- * «Полиэтилен (вторичный)». Приняв его за синоним, мы объявили бы сжиженный
- * газ тем же продуктом, что и обычный, и слили бы их в один узел.
- */
-const LONE_ADJECTIVE = /^[а-яё-]+(ый|ий|ой|ая|яя|ое|ее|ые|ие)$/i;
-
-/** Слова, которые сами по себе именем вещества не бывают. */
-const JUNK = new Set([
-  "прочие", "прочая", "прочий", "прочее", "другие", "остальные",
-  "модификация", "исполнение", "вариант", "аналог", "серия", "партия",
-]);
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -110,49 +53,6 @@ function parseArgs(argv) {
     min: Number(at("--min") ?? 1) || 1,
     out: at("--out"),
   };
-}
-
-/**
- * Разобрать название записи на пару «головное имя — синоним».
- *
- * Берём ТОЛЬКО скобку, стоящую сразу за именем, не дальше третьего значимого
- * слова. Дальше по названию скобка означает уже не второе имя, а торговую
- * марку, наполнитель или количество — это выяснилось на замере совпадений:
- * «…концентрации этанола в крови (ЭТАНОЛ-ОЛЬВЕКС)» синонимом этанола не
- * является ни в каком смысле.
- */
-function pairsFrom(rawName) {
-  const text = String(rawName ?? "").trim();
-  const open = text.indexOf("(");
-  if (open < 2) return [];
-  const close = text.indexOf(")", open + 1);
-  if (close < 0) return [];
-
-  const head = text.slice(0, open).trim().replace(/[,;:]+$/, "");
-  const inner = text.slice(open + 1, close).trim();
-  if (head.length < 3 || inner.length < 3) return [];
-
-  const headWords = words(stemName(head));
-  if (!headWords.length || headWords.length > 3) return [];
-  if (QUANTITY.test(inner) || NOT_A_NAME.test(inner)) return [];
-  if (headWords.some((w) => JUNK.has(w))) return [];
-
-  const out = [];
-  // Перечисление внутри скобки — несколько имён сразу: «(изопропиловый спирт,
-  // изопропанол)».
-  for (const part of splitNames(inner)) {
-    const alt = part.trim().replace(/^["'«»]+|["'«»]+$/g, "");
-    if (alt.length < 3) continue;
-    const altWords = words(stemName(alt));
-    if (!altWords.length || altWords.length > 3) continue;
-    if (altWords.some((w) => JUNK.has(w))) continue;
-    if (NOT_A_NAME.test(alt)) continue;
-    if (LONE_ADJECTIVE.test(alt.trim())) continue;
-    // Латиница целиком — это почти всегда торговое имя или артикул.
-    if (!/[а-яё]/i.test(alt)) continue;
-    if (key(alt) && key(head) && key(alt) !== key(head)) out.push([head, alt]);
-  }
-  return out;
 }
 
 function main() {
@@ -176,7 +76,7 @@ function main() {
 
   for (const row of db.prepare("SELECT name FROM products").iterate()) {
     if (String(row.name ?? "").includes("(")) withParens += 1;
-    for (const [head, alt] of pairsFrom(row.name)) {
+    for (const [head, alt] of parenPairs(row.name)) {
       const k = `${key(head)}\u0000${key(alt)}`;
       const prev = found.get(k);
       if (prev) prev.count += 1;
