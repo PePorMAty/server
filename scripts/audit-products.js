@@ -206,12 +206,27 @@ function main() {
   const syn = synonymsStatus();
   const reg = status();
 
+  // Веществ и строк — РАЗНЫЕ числа, и подпись раньше врала: она называла
+  // веществами строки файлов. Строка не равна веществу: Wikidata дописывает
+  // синонимы к тому, что уже есть в synonyms.txt, под тем же главным именем,
+  // и такая строка вливается в известную запись, не заводя нового вещества.
+  // На сегодня из 375 строк веществами становится 291.
+  const substances = syn.loaded ? allEntries().length : 0;
+  const absorbed = syn.loaded ? syn.entries - substances : 0;
   console.log(
     syn.loaded
-      ? `Справочник: ${syn.entries} веществ, ${syn.spellings} написаний` +
+      ? // Число впереди слова склонялось бы («291 вещество», «292 вещества»),
+        // а склонять ради одной строки незачем — ставим слово впереди.
+        `Справочник: веществ ${substances}, написаний ${syn.spellings}` +
+          `\n  строк в файлах: ${syn.entries}` +
           ` (${(syn.sources ?? []).map((s) => `${s.file}: ${s.entries}`).join(", ")})` +
-          (syn.conflicts.length ? `, КОНФЛИКТОВ: ${syn.conflicts.length}` : "") +
-          (syn.merged?.length ? `, слито строк: ${syn.merged.length}` : "")
+          (absorbed
+            ? `; из них влилось в уже известные вещества: ${absorbed}` +
+              (syn.merged?.length
+                ? ` (в том числе ${syn.merged.length} под ДРУГИМ главным именем — см. --merged)`
+                : "")
+            : "") +
+          (syn.conflicts.length ? `\n  КОНФЛИКТОВ: ${syn.conflicts.length}` : "")
       : "Справочник не прочитан — проверьте reference/synonyms.txt",
   );
 
