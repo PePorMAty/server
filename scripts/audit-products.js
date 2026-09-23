@@ -3,7 +3,9 @@
 // Что мы знаем о продуктах на сохранённых графах.
 //
 //   node scripts/audit-products.js              — сводка
-//   node scripts/audit-products.js --missing    — список для справочника
+//   node scripts/audit-products.js --missing    — список для справочника,
+//                                                 размеченный по видам названий
+//   node scripts/audit-products.js --missing --all  — и кучки «не вещества» целиком
 //   node scripts/audit-products.js --absent     — вещества, которых нет в реестре
 //   node scripts/audit-products.js --weak       — совпадения, которым верить рано
 //   node scripts/audit-products.js --twins      — подписи-близнецы (буквы-двойники)
@@ -50,6 +52,8 @@ const {
   stemName,
   words,
 } = require("../routes/industry/utils/normalize");
+
+const { nameKind, parenName } = require("./lib/name-kind");
 
 const GRAPHS_DIR = path.resolve(__dirname, "../data/saved-graphs");
 
@@ -200,6 +204,8 @@ function main() {
   const wantAbbr = args.includes("--abbr");
   const wantCoverage = args.includes("--coverage");
   const wantNear = args.includes("--near");
+  /** Печатать кучки «не вещества» целиком, а не примерами. */
+  const showAll = args.includes("--all");
   const graphArg = args.indexOf("--graph");
   const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
 
@@ -360,11 +366,55 @@ function main() {
     }
   }
 
+  // Список «не знает никто» — не список работы, пока он не размечен.
+  //
+  // На живых графах в нём 365 строк вперемешку: «1,3-Диизопропилбензол»,
+  // который надо дописать в справочник, «Побочные потоки FCC», которых нет
+  // ни в одной базе, и «Ноутбук». Работы там на половину, а выглядит как на
+  // всё, и за этим видом не разглядеть, с чего начинать. Раскладываем по
+  // видам — см. scripts/lib/name-kind.js, там же про грубость разметки.
   if (wantMissing) {
-    console.log("\n── Не знает никто (кандидаты в справочник) ──");
-    if (!neither.length) console.log("  пусто");
+    const byKind = new Map();
     for (const r of neither) {
-      console.log(`  ${String(r.freq).padStart(2)} граф(ов)  ${r.label}`);
+      const kind = nameKind(r.label);
+      (byKind.get(kind) ?? byKind.set(kind, []).get(kind)).push(r);
+    }
+    const line = (r) =>
+      `  ${String(r.freq).padStart(2)} граф(ов) ${parenName(r.label) ? "+" : " "} ${r.label}`;
+
+    const candidates = byKind.get("substance") ?? [];
+    const withParen = candidates.filter((r) => parenName(r.label)).length;
+
+    console.log(`\n── Не знает никто: ${neither.length} ──`);
+    if (!neither.length) console.log("  пусто");
+
+    console.log(
+      `\n  ══ КАНДИДАТЫ В СПРАВОЧНИК: ${candidates.length} ══\n` +
+        `  Это и есть работа. Знак «+» — в скобке лежит готовое второе имя\n` +
+        `  («Соль (NaCl)», «н-бутиральдегид (n-butyraldehyde)»): таких ${withParen},\n` +
+        `  и их можно взять прямо отсюда, не спрашивая внешних баз.\n`,
+    );
+    for (const r of candidates) console.log(line(r));
+
+    // Остальные кучки — не работа, а объяснение, почему их тут быть и не
+    // должно. Печатаем счётчиком и примерами: списком они только вернут ту
+    // свалку, ради ухода от которой всё и затевалось. Целиком — по --all.
+    const OTHER = [
+      ["stream", "ПОТОКИ И ФРАКЦИИ", "названы местом в схеме, а не составом — ни CAS, ни записи в реестре у них нет"],
+      ["klass", "КЛАССЫ ВЕЩЕСТВ", "завод заявляет продукт, а не класс: в реестре их нет и не будет"],
+      ["goods", "ИЗДЕЛИЯ И МАТЕРИАЛЫ ПО НАЗНАЧЕНИЮ", "«Смазки для прокатного цеха» — назначение вместо вещества"],
+      ["raw", "СЫРЬЁ, РУДЫ, БИОСЫРЬЁ", "вещи настоящие, но реестр ПП №719 и номера CAS про другое"],
+      ["bio", "БИОМАТЕРИАЛЫ И ОБРАЗЦЫ", "биотехнологические графы: ни ГИСП, ни CAS про них не знают"],
+    ];
+    for (const [kind, title, why] of OTHER) {
+      const list = byKind.get(kind) ?? [];
+      if (!list.length) continue;
+      console.log(`\n  ══ ${title}: ${list.length} ══\n  ${why}.`);
+      const shown = showAll ? list : list.slice(0, 5);
+      for (const r of shown) console.log(line(r));
+      if (!showAll && list.length > shown.length) {
+        console.log(`     … и ещё ${list.length - shown.length} — целиком по --all`);
+      }
     }
   }
 
