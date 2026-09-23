@@ -171,4 +171,6 @@ function parenPairs(rawName, opts = {}) {
   return out;
 }
 
-module.exports = { parenPairs, splitNames, key, QUANTITY, NOT_A_NAME, LONE_ADJECTIVE, JUNK };
+// Наружу — только то, чем пользуются: разбор и ключ сравнения. Правила
+// отсева внутренние, и выставлять их значило бы звать применять их порознь.
+module.exports = { parenPairs, key };

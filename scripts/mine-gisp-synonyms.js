@@ -28,12 +28,6 @@ const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 
-const {
-  normalizeName,
-  foldLookalikes,
-  words,
-  stemName,
-} = require("../routes/industry/utils/normalize");
 const { identify } = require("../routes/industry/utils/synonyms");
 // Разбор скобки — общий с mine-graph-synonyms.js: правила там куплены
 // ошибками, и во втором экземпляре они бы разъехались.
