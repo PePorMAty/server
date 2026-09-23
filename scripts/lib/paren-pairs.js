@@ -69,6 +69,15 @@ const LONE_ADJECTIVE = /^[а-яё-]+(ый|ий|ой|ая|яя|ое|ее|ые|и�
  */
 const HAS_CONJUNCTION = /(^|[\s,;])(и|или)([\s,;]|$)/i;
 
+/**
+ * Римская цифра в скобке — степень окисления, а не второе имя.
+ *
+ * «Оксид молибдена (VI)», «Хлорид фосфора (III)» — скобка тут часть
+ * номенклатурного имени. Приняв её за синоним, мы завели бы вещество с
+ * именем «VI», а к нему притянулись бы все оксиды всех металлов.
+ */
+const ROMAN = /^[IVXLC]+$/;
+
 /** Слова, которые сами по себе именем вещества не бывают. */
 const JUNK = new Set([
   "прочие", "прочая", "прочий", "прочее", "другие", "остальные",
@@ -146,6 +155,13 @@ function parenPairs(rawName, opts = {}) {
   // двухбуквенная формула «(Hg)» отсеивалась бы ещё до разбора.
   if (head.length < 3 || inner.length < minAlt) return [];
 
+  // Незакрытая кавычка в голове: скобка стоит ВНУТРИ торгового имени, а не
+  // после названия вещества. «Средство дезинфицирующее "ОЗАЛИЗ (пропанол-1,2,
+  // изопропанол)"» давало голову «Средство дезинфицирующее "ОЗАЛИЗ» — обрывок
+  // торговой марки, к которому приписывались настоящие спирты.
+  const quotes = (head.match(/["«»]/g) ?? []).length;
+  if (quotes % 2 !== 0) return [];
+
   const headWords = words(stemName(head));
   if (!headWords.length || headWords.length > 3) return [];
   if (QUANTITY.test(inner) || NOT_A_NAME.test(inner)) return [];
@@ -163,6 +179,7 @@ function parenPairs(rawName, opts = {}) {
     // уточнением: «Кислота (соль (натриевая))». Чистое второе имя скобок
     // не содержит.
     if (/[()]/.test(alt)) continue;
+    if (ROMAN.test(alt)) continue;
     if (HAS_CONJUNCTION.test(alt)) continue;
     if (LONE_ADJECTIVE.test(alt.trim())) continue;
     if (!opts.allowLatin && !/[а-яё]/i.test(alt)) continue;

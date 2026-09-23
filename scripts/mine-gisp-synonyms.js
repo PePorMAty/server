@@ -6,6 +6,7 @@
 //   node scripts/mine-gisp-synonyms.js --all           — весь список
 //   node scripts/mine-gisp-synonyms.js --min 2         — только встреченные N раз
 //   node scripts/mine-gisp-synonyms.js --out файл.txt  — записать кандидатов
+//   node scripts/mine-gisp-synonyms.js --all-kinds     — и пары не про химию
 //
 // Зачем. Справочник синонимов наполнялся по ходовым названиям, то есть наугад
 // относительно того, что реально бывает. А в реестре 84 тысячи названий,
@@ -32,6 +33,7 @@ const { identify } = require("../routes/industry/utils/synonyms");
 // Разбор скобки — общий с mine-graph-synonyms.js: правила там куплены
 // ошибками, и во втором экземпляре они бы разъехались.
 const { parenPairs, key } = require("./lib/paren-pairs");
+const { looksChemical } = require("./lib/name-kind");
 
 const DB_PATH =
   process.env.GISP_DB_PATH || path.resolve(__dirname, "../data/gisp.sqlite");
@@ -46,6 +48,8 @@ function parseArgs(argv) {
     all: args.includes("--all"),
     min: Number(at("--min") ?? 1) || 1,
     out: at("--out"),
+    /** Не отсеивать пары, не похожие на химию (по умолчанию отсеиваем). */
+    allKinds: args.includes("--all-kinds"),
   };
 }
 
@@ -67,14 +71,26 @@ function main() {
   // пара, встреченная у разных производителей, надёжнее одиночной.
   const found = new Map();
   let withParens = 0;
+  /** Пары, где ни одна сторона не похожа на химическое имя. */
+  const notChemical = new Map();
 
   for (const row of db.prepare("SELECT name FROM products").iterate()) {
     if (String(row.name ?? "").includes("(")) withParens += 1;
     for (const [head, alt] of parenPairs(row.name)) {
       const k = `${key(head)}\u0000${key(alt)}`;
-      const prev = found.get(k);
+      // В реестре 162 тысячи записей, и товарных категорий там кратно больше,
+      // чем веществ: «Средство дезинфицирующее (кожный антисептик)»,
+      // «Пакеты (мешки)», «Блокноты на металлическом гребне (спирали)». Пары
+      // верные, но справочник у нас про ВЕЩЕСТВА, и полторы тысячи таких
+      // строк не станет читать никто. Достаточно, чтобы на химию была похожа
+      // ОДНА сторона: «Кислота серная (олеум)» — «олеум» сам по себе не
+      // опознаётся, а «кислота» опознаётся.
+      const chemical =
+        opts.allKinds || looksChemical(head) || looksChemical(alt);
+      const target = chemical ? found : notChemical;
+      const prev = target.get(k);
       if (prev) prev.count += 1;
-      else found.set(k, { head, alt, count: 1 });
+      else target.set(k, { head, alt, count: 1 });
     }
   }
 
@@ -97,6 +113,13 @@ function main() {
   console.log(`Пар «имя — синоним»:      ${found.size}`);
   console.log(`Справочник уже знает:     ${known}`);
   console.log(`Кандидатов:               ${fresh.length}`);
+  if (notChemical.size) {
+    console.log(
+      `\nОтсеяно ${notChemical.size}: ни одна сторона не похожа на химическое имя` +
+        `\n  («Пакеты | мешки», «Детали соединительные | фитинги»). Пары верные,` +
+        `\n  но справочник у нас про вещества. Показать всё — --all-kinds.`,
+    );
+  }
 
   const shown = opts.all ? fresh : fresh.slice(0, 40);
   console.log(
