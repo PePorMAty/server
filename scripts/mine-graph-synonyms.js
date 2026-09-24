@@ -33,6 +33,7 @@ const fs = require("fs");
 const { collectProducts } = require("./lib/graph-products");
 const { parenPairs, key } = require("./lib/paren-pairs");
 const { nameKind } = require("./lib/name-kind");
+const { knownPlusExtra } = require("./lib/known-plus-extra");
 const { identify } = require("../routes/industry/utils/synonyms");
 
 /**
@@ -102,12 +103,18 @@ function main() {
   // Что справочник уже знает как одно вещество — не кандидат.
   const fresh = [];
   let known = 0;
+  /** «Порошок политетрафторэтилена (ПТФЭ)»: известное имя с довеском. */
+  let withExtra = 0;
   for (const p of found.values()) {
     if (p.freq < opts.min) continue;
     const a = identify(p.head);
     const b = identify(p.alt);
     if (a && b && a.id === b.id) {
       known += 1;
+      continue;
+    }
+    if (knownPlusExtra(p.head, p.alt)) {
+      withExtra += 1;
       continue;
     }
     fresh.push({
@@ -124,6 +131,12 @@ function main() {
   console.log(`Названий со скобкой:   ${withParens}`);
   console.log(`Пар «имя — второе»:    ${found.size}`);
   console.log(`Справочник уже знает:  ${known}`);
+  if (withExtra) {
+    console.log(
+      `Известное с довеском:  ${withExtra}   («Порошок политетрафторэтилена | ПТФЭ»:` +
+        ` ПТФЭ знаем, «порошок» — форма, не синоним)`,
+    );
+  }
   console.log(`Кандидатов:            ${fresh.length}`);
   if (notSubstance.size) {
     console.log(

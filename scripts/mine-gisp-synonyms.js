@@ -6,7 +6,8 @@
 //   node scripts/mine-gisp-synonyms.js --all           — весь список
 //   node scripts/mine-gisp-synonyms.js --min 2         — только встреченные N раз
 //   node scripts/mine-gisp-synonyms.js --out файл.txt  — записать кандидатов
-//   node scripts/mine-gisp-synonyms.js --all-kinds     — и пары не про химию
+//   node scripts/mine-gisp-synonyms.js --all-kinds     — и пары не про химию,
+//                                                        и с препаратом в голове
 //
 // Зачем. Справочник синонимов наполнялся по ходовым названиям, то есть наугад
 // относительно того, что реально бывает. А в реестре 84 тысячи названий,
@@ -33,7 +34,8 @@ const { identify } = require("../routes/industry/utils/synonyms");
 // Разбор скобки — общий с mine-graph-synonyms.js: правила там куплены
 // ошибками, и во втором экземпляре они бы разъехались.
 const { parenPairs, key } = require("./lib/paren-pairs");
-const { looksChemical } = require("./lib/name-kind");
+const { looksChemical, nameKind } = require("./lib/name-kind");
+const { knownPlusExtra } = require("./lib/known-plus-extra");
 
 const DB_PATH =
   process.env.GISP_DB_PATH || path.resolve(__dirname, "../data/gisp.sqlite");
@@ -48,7 +50,7 @@ function parseArgs(argv) {
     all: args.includes("--all"),
     min: Number(at("--min") ?? 1) || 1,
     out: at("--out"),
-    /** Не отсеивать пары, не похожие на химию (по умолчанию отсеиваем). */
+    /** Не отсеивать пары не про химию и с препаратом в голове. */
     allKinds: args.includes("--all-kinds"),
   };
 }
@@ -73,6 +75,8 @@ function main() {
   let withParens = 0;
   /** Пары, где ни одна сторона не похожа на химическое имя. */
   const notChemical = new Map();
+  /** Пары, где голова — готовый препарат или изделие. */
+  const goodsHead = new Map();
 
   for (const row of db.prepare("SELECT name FROM products").iterate()) {
     if (String(row.name ?? "").includes("(")) withParens += 1;
@@ -87,7 +91,16 @@ function main() {
       // опознаётся, а «кислота» опознаётся.
       const chemical =
         opts.allKinds || looksChemical(head) || looksChemical(alt);
-      const target = chemical ? found : notChemical;
+      // Голова — препарат или изделие: «Средство дезинфицирующее ОЗАЛИЗ
+      // (изопропанол)», «Клей силикатный (Офис Маг)». Химия в скобке тут
+      // настоящая, но это СОСТАВ или продавец, а не второе имя.
+      //
+      // Спрашиваем ту же разметку, что у графов, но только про изделия. Потоки,
+      // сырьё и классы, которые графовый добытчик тоже отсеивает, здесь
+      // оставлены: на 322 живых кандидатах они дали четыре строки, и одна из
+      // них верная — «Концентрат карбамидоформальдегидный (КФК-85)».
+      const goods = !opts.allKinds && nameKind(head) === "goods";
+      const target = !chemical ? notChemical : goods ? goodsHead : found;
       const prev = target.get(k);
       if (prev) prev.count += 1;
       else target.set(k, { head, alt, count: 1 });
@@ -97,12 +110,18 @@ function main() {
   // Что справочник уже знает — не кандидат.
   const fresh = [];
   let known = 0;
+  /** Одна сторона — известное имя, другая — оно же с довеском. */
+  let withExtra = 0;
   for (const p of found.values()) {
     if (p.count < opts.min) continue;
     const a = identify(p.head);
     const b = identify(p.alt);
     if (a && b && a.id === b.id) {
       known += 1;
+      continue;
+    }
+    if (knownPlusExtra(p.head, p.alt)) {
+      withExtra += 1;
       continue;
     }
     fresh.push({ ...p, knownAs: a?.id ?? b?.id ?? null });
@@ -112,12 +131,27 @@ function main() {
   console.log(`Названий со скобкой:      ${withParens}`);
   console.log(`Пар «имя — синоним»:      ${found.size}`);
   console.log(`Справочник уже знает:     ${known}`);
+  console.log(`Известное имя с довеском: ${withExtra}`);
   console.log(`Кандидатов:               ${fresh.length}`);
+  if (withExtra) {
+    console.log(
+      `\nИзвестное имя с довеском — пары вроде «Пакет ПНД | полиэтилен низкого` +
+        `\n  давления»: обе половины про одну запись справочника, нового только` +
+        `\n  слово «пакет», а оно изделие, не синоним.`,
+    );
+  }
   if (notChemical.size) {
     console.log(
       `\nОтсеяно ${notChemical.size}: ни одна сторона не похожа на химическое имя` +
         `\n  («Пакеты | мешки», «Детали соединительные | фитинги»). Пары верные,` +
         `\n  но справочник у нас про вещества. Показать всё — --all-kinds.`,
+    );
+  }
+  if (goodsHead.size) {
+    console.log(
+      `\nОтсеяно ${goodsHead.size}: голова — препарат или изделие («Средство` +
+        `\n  дезинфицирующее | изопропанол», «Клей силикатный | Офис Маг»). В скобке` +
+        `\n  состав или продавец, а не второе имя. Показать — --all-kinds.`,
     );
   }
 
