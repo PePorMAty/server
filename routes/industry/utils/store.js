@@ -595,7 +595,7 @@ function lookupProduct(rawName, opts) {
             records: shares.length,
             head: shares.find((s) => s.at === 0)?.name ?? null,
             parens: shares.find((s) => s.parens === "synonym")?.name ?? null,
-            pair: shares.find((s) => s.strong >= 2 && s.at >= 0 && s.at <= 2)?.name ?? null,
+            pair: shares.find((s) => nearPair(s))?.name ?? null,
             // Второе слово названия засчитываем, только если совпадение
             // объяснило заметную часть записи: «Противостаритель 6PPD М» и
             // «Термопластичные полиуретаны "Пикопан"» — это сам продукт с
@@ -688,7 +688,11 @@ function docFreq(conn, stem) {
  *      покрывает вчетверо меньше;
  *   3. короткая скобка сразу за продуктом — в реестре это второе имя:
  *      «Изопропилбензол (кумол)»;
- *   4. два и более значимых слова в начале — «Фракция альфа-олефинов C₈»;
+ *   4. два и более значимых слова в начале, стоящие РЯДОМ, — «Фракция
+ *      альфа-олефинов C₈». Рядом — обязательно: «Порошок молибдена,
+ *      изготовленный методом водородного восстановления триоксида молибдена»
+ *      проходил как триоксид молибдена — «молибдена» стоит вторым, а
+ *      «триоксида» в хвосте, где названо сырьё, а не продукт;
  *   5. состав с дозировкой в первой скобке — «ТОРНАДО, ВР (360 г/л
  *      глифосата к-ты)». По решению заказчика это присутствие вещества в
  *      реестре, но помечается отдельно: ОКПД2 у такой записи пестицидный.
@@ -717,8 +721,20 @@ function confirms(c) {
   if (c.at === 0) return true;
   if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return true;
   if (c.parens === "synonym") return true;
-  if (c.strong >= 2 && c.at >= 0 && c.at <= 2) return true;
+  if (nearPair(c)) return true;
   return c.parens === "formulation";
+}
+
+/**
+ * Основание 4: два значимых слова в начале — и стоят вместе.
+ *
+ * Последнее совпавшее слово не дальше, чем позволяет число совпавших, плюс
+ * одно слово на уточнение между ними. Разбор без места последнего слова
+ * (старый) ведёт себя как раньше.
+ */
+function nearPair(c) {
+  if (!(c.strong >= 2 && c.at >= 0 && c.at <= 2)) return false;
+  return (c.lastAt ?? c.at) <= c.at + c.strong;
 }
 
 /**
@@ -1055,20 +1071,32 @@ function keepBestOverlap(rows, rawName) {
     // Порядковый номер совпавшего слова в самом списке, без пропуска коротких:
     // по нему видно, что стояло в названии ДО вещества.
     let atRaw = -1;
+    // Место каждого совпавшего слова (первое вхождение) — тем же счётом, что
+    // и at. По нему видно, стоят ли совпавшие слова вместе или одно в начале,
+    // а другое в хвосте, где названо уже сырьё или состав.
+    const firstAt = new Map();
     for (let i = 0; i < rowList.length; i++) {
-      if (queryStems.has(rowList[i])) {
-        at = long;
-        atRaw = i;
-        break;
+      const w = rowList[i];
+      if (queryStems.has(w) && !firstAt.has(w)) {
+        firstAt.set(w, long);
+        if (at < 0) {
+          at = long;
+          atRaw = i;
+        }
       }
-      if (rowList[i].length > 1) long += 1;
+      if (w.length > 1) long += 1;
     }
+    const strongShared = shared.filter((s) => s.length > 2);
+    const lastAt = strongShared.length
+      ? Math.max(...strongShared.map((s) => firstAt.get(s) ?? -1))
+      : -1;
 
     return {
       row,
       shared,
       rowWords: rowStems.size,
       at,
+      lastAt,
       // Значимые совпавшие слова: «2,4 Д» цеплялась за «Пакеты д/ЗАМОРОЗКИ
       // ПНД» тремя «словами» — «2», «4» и «д». Совпадением это не назовёшь.
       strong: shared.filter((s) => s.length > 2).length,
@@ -1108,6 +1136,7 @@ function keepBestOverlap(rows, rawName) {
       rowWords: s.rowWords,
       share: s.rowWords ? s.shared.length / s.rowWords : 0,
       at: s.at,
+      lastAt: s.lastAt,
       strong: s.strong,
       parens: s.parens,
       foreignClass: s.foreignClass,
