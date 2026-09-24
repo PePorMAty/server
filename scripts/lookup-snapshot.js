@@ -351,9 +351,43 @@ function compare(fileA, fileB) {
     }
   }
 
+  // Новые названия — пополнение справочника или графов. Сравнивать их не с
+  // чем, но смотреть их надо так же, как «нашлось впервые»: нашлось ли то
+  // вещество. Раньше здесь был голый перечень, и проверить полсотни новых
+  // написаний было нечем — ложное совпадение прошло бы молча.
+  //
+  // Написания одного вещества ищут одно и то же, поэтому идут группой:
+  // вещество — его новые написания — что нашлось.
+  const freshFound = onlyInB.filter((n) => b.results[n]?.found);
+  const freshMissing = onlyInB.filter((n) => !b.results[n]?.found);
   if (onlyInB.length) {
-    head("названия, которых не было в первом снимке", onlyInB.length);
-    console.log(`  ${onlyInB.slice(0, 20).join(", ")}${onlyInB.length > 20 ? " …" : ""}`);
+    head("НОВЫЕ НАЗВАНИЯ — что нашли, смотреть глазами", freshFound.length);
+    const groups = new Map();
+    for (const name of freshFound) {
+      const y = b.results[name];
+      const k = `${y.canon ?? name}\u0000${(y.records ?? []).join("\u0001")}`;
+      if (!groups.has(k)) groups.set(k, { canon: y.canon ?? name, names: [], y });
+      groups.get(k).names.push(name);
+    }
+    for (const { canon, names, y } of groups.values()) {
+      const listed = names.map((n) => `«${n}»`).join(", ");
+      const alone = names.length === 1 && names[0] === canon;
+      console.log(
+        `  ${listed}${alone ? "" : ` — вещество «${canon}»`}` +
+          `\n      → ${y.entries} записей, ${y.producers} производителей,` +
+          ` код ${y.okpd2 ?? "—"} [${MATCH_LABELS[y.match] ?? y.match ?? "—"}]`,
+      );
+      for (const r of (y.records ?? []).slice(0, 3)) console.log(`      ${r.slice(0, 90)}`);
+      if ((y.records ?? []).length > 3) {
+        console.log(`      … и ещё ${y.records.length - 3}`);
+      }
+    }
+    if (freshMissing.length) {
+      console.log(
+        `\n  не нашли ничего (${freshMissing.length}): ` +
+          `${freshMissing.slice(0, 20).join(", ")}${freshMissing.length > 20 ? " …" : ""}`,
+      );
+    }
   }
   if (onlyInA.length) {
     head("названия, пропавшие из набора", onlyInA.length);
@@ -369,7 +403,11 @@ function compare(fileA, fileB) {
         ? `  не спрашивали:      ${refused.length}   (подпись не называет вещество — так и задумано)\n`
         : "") +
       `  новые записи:       ${newRecords.length}${newRecords.length ? "   ← прочитать названия" : ""}\n` +
-      `  сменился код ОКПД2: ${codeChanged.length}`,
+      `  сменился код ОКПД2: ${codeChanged.length}` +
+      (onlyInB.length
+        ? `\n  новые названия:     ${onlyInB.length}, нашли ${freshFound.length}` +
+          (freshFound.length ? "   ← прочитать названия" : "")
+        : ""),
   );
 
   // Ненулевой код — только на пропажах: это единственное, что заведомо плохо.
