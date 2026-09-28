@@ -714,10 +714,29 @@ const COMPOUND_MODIFIER =
 function bindCompounds(name, queryStems) {
   return String(name ?? "").replace(COMPOUND_MODIFIER, (whole, first, second) => {
     const both =
-      queryStems.has(stemWord(normalizeName(first))) &&
-      queryStems.has(stemWord(normalizeName(second)));
+      isNomenclaturePrefix(first) ||
+      (queryStems.has(stemWord(normalizeName(first))) &&
+        queryStems.has(stemWord(normalizeName(second))));
     return both ? ` ${first} ${second} ` : ` ${first}${second} `;
   });
+}
+
+/**
+ * Приставки номенклатуры: «цис-изопреновый», «трет-бутиловый», «изо-».
+ *
+ * Это не половина сочетания, а уточнение строения: «Каучук синтетический
+ * цис-изопреновый СКИ-3» — изопреновый каучук и есть. Правило «целиком или
+ * никак» их склеивало, и снимок показал цену: «Изопреновый каучук» потерял
+ * семь записей СКИ-3 и СКИ-5 из одиннадцати.
+ */
+const NOMENCLATURE_PREFIXES = new Set([
+  "цис", "транс", "трет", "втор", "изо", "нео", "орто", "мета", "пара",
+  "альфа", "бета", "гамма", "дельта", "омега", "эндо", "экзо", "син", "анти",
+  "мезо", "эритро", "трео", "сим", "асим", "рац",
+]);
+
+function isNomenclaturePrefix(part) {
+  return NOMENCLATURE_PREFIXES.has(normalizeName(part));
 }
 
 /**
@@ -727,6 +746,7 @@ function bindCompounds(name, queryStems) {
  */
 function halfCompound(name, queryStems) {
   for (const m of String(name ?? "").matchAll(COMPOUND_MODIFIER)) {
+    if (isNomenclaturePrefix(m[1])) continue;
     const first = queryStems.has(stemWord(normalizeName(m[1])));
     const second = queryStems.has(stemWord(normalizeName(m[2])));
     if (first !== second) return m[0];
@@ -837,6 +857,8 @@ function verdict(c) {
   // Спросили «Натрий», а запись — «Натрия гипохлорит марки А» или «Кали едкое»:
   // элемент там назван только в косвенном падеже, то есть в имени соединения.
   if (c.elementCompound) return { ok: false, why: "соединение элемента, а не он сам" };
+  // «Аммоний кальций нитрат» при запросе «Нитрат аммония»: двойная соль.
+  if (c.otherElement) return { ok: false, why: `другое соединение: рядом «${c.otherElement}»` };
   // Совпало одно лишь название класса. «Эфиры ЖК»: сокращение «ЖК» короче
   // трёх букв, ступень «значимые слова» его отбрасывает, и от запроса остаётся
   // «эфиры» — то есть КЛАСС соединений. После этого любой сложный эфир
@@ -1338,7 +1360,7 @@ function keepBestOverlap(rows, rawName, required = null) {
 
   // Числа-обозначения запроса («Фторопласт-40») и спрошенный элемент
   // («Натрий») — считаются раз на запрос, сверяются с каждой записью.
-  const numbers = designationNumbers(queryPairs);
+  const numbers = designationNumbers(rawName);
   const element = askedElement(queryPairs);
 
   let best = 0;
@@ -1417,6 +1439,8 @@ function keepBestOverlap(rows, rawName, required = null) {
       foreignClass: foreignCompound(rowList, queryStems),
       // Спросили сам элемент, а в записи он только в косвенном падеже.
       elementCompound: element ? elementInCompound(rowPairs, element) : false,
+      // Рядом с совпавшим — другой элемент: двойная соль или смесь.
+      otherElement: otherElement(rowPairs, matches),
       // Совпали ОДНИ слова, не называющие вещество, — названия классов
       // соединений или формы поставки. Значит, спросили про класс, а не про
       // вещество, и подтверждать таким совпадением нечего.
@@ -1475,6 +1499,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       parens: s.parens,
       foreignClass: s.foreignClass,
       elementCompound: s.elementCompound,
+      otherElement: s.otherElement,
       onlyClass: s.onlyClass,
       supplyForm: s.supplyForm,
       productBefore: s.productBefore,
@@ -1520,56 +1545,123 @@ function tokensBefore(rawName, queryStems) {
 }
 
 /**
- * Числа, стоящие в запросе сразу за словом: «Фторопласт-40», «Хладон-12».
+ * Числа, приписанные в запросе к слову через дефис: «Фторопласт-40»,
+ * «Пропанол-2», «1,4-Бутандиол».
  *
- * Такое число — не отдельное слово, а часть имени: марка, обозначение. В
- * записи оно совпадает, только если и там стоит при том же слове. Иначе
- * «Фторопласт-40» (сополимер с этиленом) подтверждался записью «фторопласт-ТМ
- * моделей ПН25, ПН 40, Ф-4ТМ» — это политетрафторэтилен, а «40» там номер
- * модели через три слова от «фторопласта».
+ * Такое число — часть имени: марка или место заместителя. В записи оно
+ * совпадает, только если стоит рядом с тем же словом — до него или после,
+ * одно или списком: «Пропанол-2» и «2-Пропанол», «Бутандиол-1,4» и
+ * «1,4-Бутандиол» — одно и то же. Иначе «Фторопласт-40» (сополимер с
+ * этиленом) подтверждался записью «фторопласт-ТМ моделей ПН25, ПН 40,
+ * Ф-4ТМ» — это политетрафторэтилен, а «40» там номер модели через три слова
+ * от «фторопласта».
  *
- * Число ПЕРЕД словом сюда не входит: «1,1,2-трифтортрихлорэтан»,
- * «2,6-ди-трет-бутилфенол» — это места заместителей, и в реестре они
- * расставлены как попало.
+ * Сперва правило признавало число только ПОСЛЕ слова, и снимок это поймал:
+ * «Изопропанол» (он же «Пропанол-2») потерял «2-Пропанол химически чистый».
  *
- * Число → слова, за которыми оно стоит в запросе.
+ * Число через пробел — «Соляная кислота 36%» — не часть имени, а
+ * концентрация, и так не проверяется: в записи оно может стоять где угодно.
+ *
+ * Число → основы слов, к которым оно приписано.
  */
-function designationNumbers(queryPairs) {
+function designationNumbers(rawSpelling) {
+  const text = String(rawSpelling ?? "").toLowerCase().replace(/ё/g, "е");
   const out = new Map();
-  const isNumber = (s) => /^\d+$/.test(s);
-  for (let i = 1; i < queryPairs.length; i++) {
-    const { stem } = queryPairs[i];
-    const before = queryPairs[i - 1].stem;
-    if (!isNumber(stem) || isNumber(before)) continue;
-    if (!out.has(stem)) out.set(stem, new Set());
-    out.get(stem).add(before);
+  const add = (numbers, word) => {
+    const stem = stemWord(normalizeName(word));
+    for (const n of numbers.split(/[.,]\s*/).filter(Boolean)) {
+      if (!out.has(n)) out.set(n, new Set());
+      out.get(n).add(stem);
+    }
+  };
+  // Слово-число: «фторопласт-40», «бутандиол-1,4». Число, за которым сразу
+  // идут буквы («фторопласт-4мб»), — уже другое обозначение, целым словом.
+  for (const m of text.matchAll(/([а-яa-z]{2,})\s*-\s*(\d+(?:[.,]\s*\d+)*)(?![\dа-яa-z])/g)) {
+    add(m[2], m[1]);
+  }
+  // Число-слово: «2-пропанол», «1,4-бутандиол». Число внутри обозначения
+  // («с4-фракция») не в счёт — оно приклеено к букве.
+  for (const m of text.matchAll(/(?<![\d.,а-яa-z])(\d+(?:[.,]\s*\d+)*)\s*-\s*([а-яa-z]{2,})/g)) {
+    add(m[1], m[2]);
   }
   return out;
 }
 
 /**
- * Числа-обозначения запроса, которые в записи стоят не при своём слове.
+ * Числа из designationNumbers, которые в записи стоят не при своём слове.
  *
- * «При своём» — сразу за словом или за его первой буквой: «Фторопласт Ф-40
- * марки П» — то же обозначение, записанное сокращённо.
+ * «При своём» — вплотную до или после слова, одно или в списке чисел, либо
+ * за первой буквой слова: «Фторопласт Ф-40 марки П» — то же обозначение,
+ * записанное сокращённо.
  */
 function detachedNumbers(rowList, numbers) {
   const detached = new Set();
-  for (const [number, wordsBefore] of numbers) {
-    const initials = new Set([...wordsBefore].map((w) => w[0]));
+  const isNumber = (w) => /^\d+$/.test(w);
+  for (const [number, words] of numbers) {
+    const initials = new Set([...words].map((w) => w[0]));
     let seen = false;
     let attached = false;
     for (let j = 0; j < rowList.length; j++) {
       if (rowList[j] !== number) continue;
       seen = true;
-      const prev = rowList[j - 1];
-      if (prev && (wordsBefore.has(prev) || (prev.length === 1 && initials.has(prev)))) {
+      // Весь список чисел, в котором стоит это: «1 4» в «1,4-бутандиол».
+      let from = j;
+      let to = j;
+      while (from > 0 && isNumber(rowList[from - 1])) from -= 1;
+      while (to + 1 < rowList.length && isNumber(rowList[to + 1])) to += 1;
+      const before = rowList[from - 1];
+      const after = rowList[to + 1];
+      if (
+        (before && (words.has(before) || (before.length === 1 && initials.has(before)))) ||
+        (after && words.has(after))
+      ) {
         attached = true;
       }
     }
     if (seen && !attached) detached.add(number);
   }
   return detached;
+}
+
+/**
+ * Основы названий элементов — для правила «рядом другой элемент».
+ *
+ * Элементы на «-ий» и ходовые металлы, во всех падежах сразу: основа у них
+ * общая (см. ELEMENT_NOUNS в normalize.js).
+ */
+const ELEMENT_STEMS = new Set(
+  [
+    ...ELEMENT_NOUNS,
+    "медь", "меди", "цинк", "железо", "железа", "никель", "кобальт", "хром",
+    "марганец", "свинец", "олово",
+  ].map(stemWord),
+);
+
+/**
+ * Рядом с совпавшим словом — другой элемент, которого в запросе нет:
+ * «Аммоний кальций нитрат» при запросе «Нитрат аммония», «Калий кальций
+ * нитрат» при запросе «Нитрат кальция», «Доломит (карбонат кальция и
+ * магния)» при запросе «Карбонат кальция». Это двойная соль или смесь, то
+ * есть другое вещество.
+ *
+ * Поймано снимком сразу после того, как «аммоний» и «аммония» получили общую
+ * основу: до того «Аммоний кальций нитрат» не совпадал с «Нитратом аммония»
+ * по случайности — падежи расходились. Возвращает само слово, для отказа.
+ */
+function otherElement(rowPairs, matches) {
+  for (let i = 0; i < rowPairs.length; i++) {
+    const { stem } = rowPairs[i];
+    if (!matches(stem)) continue;
+    // Соседство частей ХИМИЧЕСКОГО названия — элемента или класса («нитрат»,
+    // «карбонат»). Не любого слова: в «Полевой шпат (калий натрий
+    // алюмосиликат)» калий описывает состав шпата, а не другое вещество.
+    if (!ELEMENT_STEMS.has(stem) && !COMPOUND_CLASS.has(stem)) continue;
+    for (const j of [i - 1, i + 1]) {
+      const near = rowPairs[j];
+      if (near && ELEMENT_STEMS.has(near.stem) && !matches(near.stem)) return near.word;
+    }
+  }
+  return null;
 }
 
 /**
