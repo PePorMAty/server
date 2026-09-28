@@ -130,20 +130,30 @@ function collectNames(fromFile) {
 let perProducer = false;
 
 /**
- * Основание решения отбора по каждому названию записи.
+ * Основания отбора по названиям записей: why — чем подтверждены, whyNot —
+ * почему отброшены.
  *
- * Подтверждённые идут первыми: одно и то же название могло найтись двумя
- * написаниями и одним подтвердиться, другим нет, — в ответе оно подтверждено.
+ * Порознь, потому что у одного названия бывают обе судьбы сразу: из двух
+ * записей «Кислород газообразный медицинский» одна стоит под кодом лекарства,
+ * другая нет. Когда основание было одно на название, отчёт видел только
+ * подтверждённую и писал про ушедшую «одинаковых записей стало меньше» —
+ * без причины, которую как раз и надо было проверить.
+ *
  * Map, а не объект: названия записей — чужие строки, и «constructor» среди
  * них не должен ничего сломать.
  */
 function reasonsOf(explained) {
-  const out = new Map();
-  const ordered = [...explained].sort((p, q) => Number(q.confirmed) - Number(p.confirmed));
-  for (const e of ordered) {
-    if (e?.why && !out.has(e.name)) out.set(e.name, e.why);
+  const kept = new Map();
+  const dropped = new Map();
+  for (const e of explained) {
+    if (!e?.why) continue;
+    const m = e.confirmed ? kept : dropped;
+    if (!m.has(e.name)) m.set(e.name, e.why);
   }
-  return out.size ? Object.fromEntries(out) : null;
+  return {
+    why: kept.size ? Object.fromEntries(kept) : null,
+    whyNot: dropped.size ? Object.fromEntries(dropped) : null,
+  };
 }
 
 /**
@@ -153,14 +163,15 @@ function reasonsOf(explained) {
  * видно, что совпадений стало больше, и только по именам — стали они верными
  * или ложными. Сортируем, чтобы сравнение не спотыкалось о порядок строк.
  *
- * why — основание по каждой записи: чем подтвердилась («первое слово») или
- * каким запретом отброшена («изделие «из» вещества»). По нему сравнение
- * говорит, почему запись пришла или ушла.
+ * why и whyNot — основания по названиям записей: чем подтверждена («первое
+ * слово») и каким запретом отброшена («изделие «из» вещества»). По ним
+ * сравнение говорит, почему запись пришла или ушла.
  */
 function probe(name) {
   const r = lookupProduct(name, { explain: true });
   const explained = Array.isArray(r?.explain) ? r.explain : null;
-  const why = explained ? reasonsOf(explained) : null;
+  const { why = null, whyNot = null } = explained ? reasonsOf(explained) : {};
+  const reasons = { ...(why ? { why } : {}), ...(whyNot ? { whyNot } : {}) };
   if (!r?.found) {
     return {
       found: false,
@@ -170,7 +181,7 @@ function probe(name) {
       ...(r?.placeholder ? { placeholder: true } : {}),
       canon: r?.canon ?? null,
       cas: r?.cas ?? null,
-      ...(why ? { why } : {}),
+      ...reasons,
     };
   }
   if (!explained) perProducer = true;
@@ -191,7 +202,7 @@ function probe(name) {
     canon: r.canon ?? null,
     cas: r.cas ?? null,
     records,
-    ...(why ? { why } : {}),
+    ...reasons,
   };
 }
 
@@ -304,15 +315,18 @@ function recordsWord(n) {
  * Три случая, и смысл у них разный. Запись нашлась, но её отбросил запрет —
  * тогда в снимке есть основание, и проверять надо запрет. Запись не нашлась
  * вовсе — поиск перестал её доставать (написание получило звёздочку, ступень
- * сменилась). Название осталось, но одинаковых записей стало меньше — редкий
- * случай, когда запрос упёрся в предел выдачи.
+ * сменилась). Название осталось, одинаковых записей стало меньше, а
+ * основания отказа нет — редкий случай, когда запрос упёрся в предел выдачи.
+ *
+ * Снимки прежнего образца держали одно основание на название, и отказ
+ * лежал в why; его берём, только если название ушло целиком.
  */
 function goneReasonOf(y, reasonsKnown) {
   const still = new Set(y?.records ?? []);
   return (name) => {
+    const not = own(y?.whyNot, name) ?? (still.has(name) ? undefined : own(y?.why, name));
+    if (not) return `отбор: ${not}`;
     if (still.has(name)) return "одинаковых записей стало меньше";
-    const why = own(y?.why, name);
-    if (why) return `отбор: ${why}`;
     return reasonsKnown ? "больше не находится поиском" : undefined;
   };
 }
@@ -373,7 +387,7 @@ function compare(fileA, fileB, { full = false } = {}) {
   }
   // Основания есть только у снимка текущим кодом; у старого — нет, и тогда
   // «не находится поиском» утверждать нельзя: мы просто не знаем.
-  const reasonsKnown = Object.values(b.results).some((r) => r?.why);
+  const reasonsKnown = Object.values(b.results).some((r) => r?.why || r?.whyNot);
 
   const names = [...new Set([...Object.keys(a.results), ...Object.keys(b.results)])].sort(
     (x, y) => x.localeCompare(y, "ru"),

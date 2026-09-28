@@ -980,14 +980,16 @@ const hasMedicineWord = (stems) =>
   stems.some((w) => w === "рзн" || MEDICINE_PREFIXES.some((p) => w.startsWith(p)));
 
 /**
- * Запись — лекарство или медицинское изделие: по коду ОКПД2 или по названию.
+ * Запись — лекарственная форма или медицинское изделие: судим по названию.
  *
- * 21.20 — «Препараты лекарственные и материалы, применяемые в медицинских
- * целях». Фармацевтические субстанции (21.10) сюда не входят намеренно:
- * субстанция и есть само вещество.
+ * Код ОКПД2 21.20 («Препараты лекарственные…») признаком НЕ служит, хотя
+ * просится. Под ним зарегистрирован медицинский кислород: «Кислород
+ * газообразный медицинский», «Кислород жидкий медицинский» — и это не
+ * лекарство, в которое кислород входит, а сам кислород. Снимок отнял его у
+ * кислорода, пока признаком был код; у хлорида натрия все 22 лекарства
+ * узнаются и по словам.
  */
-function isMedicine(row, rowList) {
-  if (String(row.okpd2 ?? "").startsWith("21.20")) return true;
+function isMedicine(rowList) {
   return hasMedicineWord(rowList);
 }
 
@@ -1325,7 +1327,7 @@ function keepBestOverlap(rows, rawName) {
         basedOnSubstance(row.name || "", queryStems),
       madeOf: madeOfSubstance(row.name || "", queryStems),
       // Лекарство или медизделие — свидетельство второго сорта, см. lookupProduct.
-      medicine: isMedicine(row, rowList),
+      medicine: isMedicine(rowList),
     };
   });
 
