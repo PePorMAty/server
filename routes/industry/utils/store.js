@@ -11,10 +11,15 @@ const fs = require("fs");
 const path = require("path");
 
 const {
+  ELEMENT_NOUNS,
+  STOP_WORDS,
   buildQueryLadder,
+  coreWords,
+  ftsTerm,
   isQualifierOnly,
   normalizeName,
   stemName,
+  stemPairs,
   stemWord,
   words,
 } = require("./normalize");
@@ -392,7 +397,12 @@ function lookupProduct(rawName, opts) {
         // По СВОЕМУ написанию такая ступень работает как прежде: там
         // нечёткость всего одна, и её видно в ответе уровнем совпадения.
         if (!own && step.lossy) continue;
-        yield { level, spelling, run: () => ftsStmt.all(step.query) };
+        yield {
+          level,
+          spelling,
+          required: requiredStems(spelling, level),
+          run: () => ftsStmt.all(step.query),
+        };
       }
     }
   }
@@ -428,6 +438,8 @@ function lookupProduct(rawName, opts) {
   const gathered = [];
   /** Строгие попытки, где отбор не подтвердил ничего, — только для разбора. */
   const refused = [];
+  /** Записи, которые отбор отсеял раньше вето, — тоже только для разбора. */
+  const dropped = [];
   for (const attempt of attempts()) {
     // Уровень кончился, а подтверждённое уже есть — ниже не спускаемся:
     // нижний уровень мягче, и его записи хуже собранных.
@@ -440,12 +452,18 @@ function lookupProduct(rawName, opts) {
       continue;
     }
     if (!found.length) continue;
-    const hit = { rows: found, match: attempt.level, matchedAs: attempt.spelling };
+    const hit = {
+      rows: found,
+      match: attempt.level,
+      matchedAs: attempt.spelling,
+      required: attempt.required,
+    };
     if (!first) first = hit;
     // Мягкая ступень «найдено» не даёт (см. ниже), а строгие к этому месту
     // перебраны все — дальше искать нечего.
     if (LOOSE_LEVELS.has(attempt.level)) break;
-    const trial = keepBestOverlap(found, attempt.spelling);
+    const trial = keepBestOverlap(found, attempt.spelling, attempt.required);
+    if (opts?.explain) dropped.push(...trial.dropped);
     if (trial.rows.some((row, i) => confirms(trial.coverage?.[i]))) {
       tier = tierOf(attempt.level);
       gathered.push({ hit, trial });
@@ -467,7 +485,7 @@ function lookupProduct(rawName, opts) {
   const picked = gathered.length
     ? combineTrials(gathered.map((g) => g.trial))
     : rows.length
-      ? keepBestOverlap(rows, matchedAs)
+      ? keepBestOverlap(rows, matchedAs, hit?.required ?? null)
       : { rows: [], shared: [], coverage: [] };
 
   const kept = picked.rows;
@@ -527,7 +545,9 @@ function lookupProduct(rawName, opts) {
   // Разбор каждой записи — по запросу. Нужен, чтобы спорное подтверждение
   // разбирать не на глаз: видно, какая именно ветка confirms() его пропустила.
   // В обычном ответе этого нет: поле тяжёлое и интерфейсу не нужно.
-  const explain = opts?.explain ? explainRows(picked, refused, finalVerdicts) : undefined;
+  const explain = opts?.explain
+    ? explainRows(picked, refused, finalVerdicts, dropped)
+    : undefined;
   // Помечаем отдельно, когда вещество нашлось ТОЛЬКО в составе препарата:
   // ОКПД2 у такой записи пестицидный, а не глифосатный, и в карточке это
   // должно быть видно.
@@ -673,15 +693,63 @@ const COMPOUND_MODIFIER =
   /([а-яё]{3,})-([а-яё]{3,}(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|ого|его|ому|ему|ым|им|ых|их|ую|юю))(?![а-яё])/gi;
 
 /**
- * Убрать из названия первые половины сложных прилагательных.
+ * Сложное прилагательное в названии записи совпадает с запросом целиком или
+ * никак.
  *
  * «Бутилкаучук (изобутилен-изопреновый каучук)» — это каучук. Завод продаёт
  * каучук, а не изобутилен, и подставлять его в ответ на «Изобутилен» нельзя.
  * Сополимерные каучуки названы именно так, поэтому случай не единичный:
  * бутадиен-стирольный, этилен-пропиленовый и далее по списку.
+ *
+ * Раньше отсюда выбрасывалась только ПЕРВАЯ половина, и вторая совпадала сама
+ * по себе. Снимок показал, чем это кончается: «Селитра известково-аммиачная»
+ * — другое удобрение, аммиачная селитра с известняком, — превращалась в
+ * «Селитра аммиачная» и подтверждала аммиачную селитру. Сложное слово
+ * называет сочетание, и одна его половина — не то же самое, что целое.
+ *
+ * Поэтому: обе половины есть в запросе — слово остаётся двумя словами и
+ * совпадает («Пропан-бутановая смесь» ↔ «Смесь пропано-бутановая»). Нет хотя
+ * бы одной — половины склеиваются в слово, которое не совпадёт ни с чем.
  */
-function dropCompoundModifiers(name) {
-  return String(name ?? "").replace(COMPOUND_MODIFIER, " $2 ");
+function bindCompounds(name, queryStems) {
+  return String(name ?? "").replace(COMPOUND_MODIFIER, (whole, first, second) => {
+    const both =
+      queryStems.has(stemWord(normalizeName(first))) &&
+      queryStems.has(stemWord(normalizeName(second)));
+    return both ? ` ${first} ${second} ` : ` ${first}${second} `;
+  });
+}
+
+/**
+ * Сложное прилагательное, у которого с запросом совпала только одна половина:
+ * «известково-аммиачная» при запросе «Аммиачная селитра». Для объяснения
+ * отказа — см. bindCompounds.
+ */
+function halfCompound(name, queryStems) {
+  for (const m of String(name ?? "").matchAll(COMPOUND_MODIFIER)) {
+    const first = queryStems.has(stemWord(normalizeName(m[1])));
+    const second = queryStems.has(stemWord(normalizeName(m[2])));
+    if (first !== second) return m[0];
+  }
+  return null;
+}
+
+/**
+ * Слова, которые строгая ступень потребовала у индекса. Их же должна
+ * признать в записи сверка — иначе индекс нашёл запись по слову, которое
+ * стоит там не в том качестве (см. keepBestOverlap).
+ *
+ * Мягкие ступени ищут по любому из слов, требовать с них нечего.
+ */
+function requiredStems(spelling, level) {
+  const normalized = normalizeName(spelling);
+  const list =
+    level === "all-words"
+      ? words(normalized).map(stemWord)
+      : level === "core-words"
+        ? coreWords(normalized).map(stemWord)
+        : null;
+  return list ? new Set(list.filter((w) => !STOP_WORDS.has(w))) : null;
 }
 
 /**
@@ -697,9 +765,11 @@ function docFreq(conn, stem) {
   if (cached !== undefined) return cached;
   let n = 0;
   try {
+    // Тем же термином, что и поиск: у «натри» в индексе есть и прежняя
+    // основа «натр» (см. LEGACY_STEMS в normalize.js).
     n = conn
       .prepare("SELECT COUNT(*) AS n FROM products_fts WHERE products_fts MATCH ?")
-      .get(`"${stem.replace(/"/g, '""')}"`).n;
+      .get(ftsTerm(stem)).n;
   } catch {
     // Слово, которое индекс не принимает как запрос. Считаем редким: пусть
     // решает совпадение, а не сбой разбора.
@@ -756,10 +826,17 @@ function confirms(c) {
  */
 function verdict(c) {
   if (!c) return { ok: false, why: "нет разбора" };
+  // Индекс нашёл запись по слову, которого сверка в ней не признаёт: «40» не
+  // при своём слове, половина сложного прилагательного. Сильнее всех
+  // оснований: записи не хватает слова, которое искали.
+  if (c.incomplete) return { ok: false, why: c.incomplete };
   // Запись про СОЕДИНЕНИЕ этого вещества, а не про него само. Запрет сильнее
   // всех оснований ниже: «Закись азота» начинается со второго слова и
   // покрывает половину названия, то есть проходила бы как «второе слово».
   if (c.foreignClass) return { ok: false, why: "соединение вещества, а не оно само" };
+  // Спросили «Натрий», а запись — «Натрия гипохлорит марки А» или «Кали едкое»:
+  // элемент там назван только в косвенном падеже, то есть в имени соединения.
+  if (c.elementCompound) return { ok: false, why: "соединение элемента, а не он сам" };
   // Совпало одно лишь название класса. «Эфиры ЖК»: сокращение «ЖК» короче
   // трёх букв, ступень «значимые слова» его отбрасывает, и от запроса остаётся
   // «эфиры» — то есть КЛАСС соединений. После этого любой сложный эфир
@@ -801,7 +878,7 @@ function verdict(c) {
  * отбрасывалась целиком, в ответ не попадала — и в снимке выглядела так,
  * будто поиск перестал её находить.
  */
-function explainRows(picked, refused, pickedVerdicts) {
+function explainRows(picked, refused, pickedVerdicts, dropped = []) {
   const out = [];
   const seen = new Set();
   const push = (row, cov, v = verdict(cov)) => {
@@ -821,6 +898,11 @@ function explainRows(picked, refused, pickedVerdicts) {
   // что вещество нашлось и само, по одному разбору выглядел бы принятым.
   picked.rows.forEach((row, i) => push(row, picked.coverage?.[i], pickedVerdicts?.[i]));
   for (const t of refused) t.rows.forEach((row, i) => push(row, t.coverage?.[i]));
+  // Отсеянные раньше вето — сравнением числа совпавших слов. Без них снимок
+  // говорил об ушедшей записи «больше не находится поиском», хотя поиск её
+  // находит, а отказ вполне определённый: «40» не при своём слове,
+  // сложное слово совпало половиной.
+  for (const d of dropped) push(d.row, {}, { ok: false, why: d.why });
   return out;
 }
 
@@ -959,9 +1041,13 @@ const SUPPLY_FORM = new Set(
  * не второе имя. Таких записей было шестнадцать.
  */
 const PRODUCT_BEFORE = new Set(
-  ["средство", "средства", "гуашь", "среда", "листы", "пакет", "пакеты", "мешок", "мешки"].map(
-    stemWord,
-  ),
+  [
+    "средство", "средства", "гуашь", "среда", "листы", "пакет", "пакеты", "мешок", "мешки",
+    // «Перчатки из полимерной пленки (полиэтилен низкого давления)» — снимок
+    // после d15de9c: у полиэтилена низкого давления проходило «вторым именем
+    // в скобках», а скобка называет материал плёнки.
+    "перчатки",
+  ].map(stemWord),
 );
 
 /**
@@ -1243,9 +1329,17 @@ function topLevelParens(text) {
  * Порог подбирается замером, а не на глаз: прошлая попытка отсеять мусор
  * угаданным числом провалилась (см. выше про редкость слова).
  */
-function keepBestOverlap(rows, rawName) {
-  const queryStems = new Set(words(stemName(rawName)));
-  if (!queryStems.size) return { rows, shared: [], coverage: [] };
+function keepBestOverlap(rows, rawName, required = null) {
+  const queryPairs = stemPairs(rawName);
+  const queryStems = new Set(queryPairs.map((p) => p.stem));
+  if (!queryStems.size) return { rows, shared: [], coverage: [], dropped: [] };
+  // Слово запроса так, как его написали, — для объяснений: «натрий», а не «натри».
+  const asWritten = new Map(queryPairs.map((p) => [p.stem, p.word]));
+
+  // Числа-обозначения запроса («Фторопласт-40») и спрошенный элемент
+  // («Натрий») — считаются раз на запрос, сверяются с каждой записью.
+  const numbers = designationNumbers(queryPairs);
+  const element = askedElement(queryPairs);
 
   let best = 0;
   const scored = rows.map((row) => {
@@ -1253,10 +1347,15 @@ function keepBestOverlap(rows, rawName) {
     // нет — она нужна была только полнотекстовому индексу и место занимала
     // впустую. Строк тут не больше двух сотен, и ответ кладётся в кэш.
     // Список, а не множество: по нему видно не только ЧТО совпало, но и ГДЕ.
-    const rowList = words(stemName(dropCompoundModifiers(row.name || "")));
+    const rowPairs = stemPairs(bindCompounds(row.name || "", queryStems));
+    const rowList = rowPairs.map((p) => p.stem);
     const rowStems = new Set(rowList);
+    // Число запроса, стоящее в записи не при своём слове, совпадением не
+    // считается — см. designationNumbers.
+    const detached = detachedNumbers(rowList, numbers);
+    const matches = (w) => queryStems.has(w) && !detached.has(w);
     const shared = [];
-    for (const s of queryStems) if (rowStems.has(s)) shared.push(s);
+    for (const s of queryStems) if (rowStems.has(s) && !detached.has(s)) shared.push(s);
     if (shared.length > best) best = shared.length;
 
     // Номер первого совпавшего слова — считаем настоящие слова, пропуская
@@ -1273,7 +1372,7 @@ function keepBestOverlap(rows, rawName) {
     const firstAt = new Map();
     for (let i = 0; i < rowList.length; i++) {
       const w = rowList[i];
-      if (queryStems.has(w) && !firstAt.has(w)) {
+      if (matches(w) && !firstAt.has(w)) {
         firstAt.set(w, long);
         if (at < 0) {
           at = long;
@@ -1287,9 +1386,26 @@ function keepBestOverlap(rows, rawName) {
       ? Math.max(...strongShared.map((s) => firstAt.get(s) ?? -1))
       : -1;
 
+    // Слово, которое требовал индекс, а сверка в записи не признала.
+    // Индекс видит слова по отдельности и находит «40» где угодно, а
+    // «аммиачную» — и внутри «известково-аммиачной»; отбор строже, и
+    // расхождение значит, что запись не про то.
+    const missing = required ? [...required].filter((w) => !shared.includes(w)) : [];
+    let incomplete = null;
+    if (missing.length) {
+      const number = missing.find((w) => detached.has(w));
+      const half = halfCompound(row.name || "", queryStems);
+      incomplete = number
+        ? `число «${number}» не при своём слове`
+        : half
+          ? `сложное слово «${half}» совпало половиной`
+          : `нет слова «${asWritten.get(missing[0]) ?? missing[0]}»`;
+    }
+
     return {
       row,
       shared,
+      incomplete,
       rowWords: rowStems.size,
       at,
       lastAt,
@@ -1299,6 +1415,8 @@ function keepBestOverlap(rows, rawName) {
       parens: matchedInParens(row.name || "", queryStems),
       // Слово-класс впритык к совпавшему: запись про соединение, не про него.
       foreignClass: foreignCompound(rowList, queryStems),
+      // Спросили сам элемент, а в записи он только в косвенном падеже.
+      elementCompound: element ? elementInCompound(rowPairs, element) : false,
       // Совпали ОДНИ слова, не называющие вещество, — названия классов
       // соединений или формы поставки. Значит, спросили про класс, а не про
       // вещество, и подтверждать таким совпадением нечего.
@@ -1331,14 +1449,24 @@ function keepBestOverlap(rows, rawName) {
     };
   });
 
-  if (!best) return { rows: [], shared: [], coverage: [] };
+  // Отсеянные сравнением — для разбора (см. explainRows).
+  const droppedOf = (list) =>
+    list.map((s) => ({
+      row: s.row,
+      why:
+        s.incomplete ??
+        (s.shared.length ? "совпало меньше слов, чем у лучших записей" : "не совпало ни одно слово"),
+    }));
+  if (!best) return { rows: [], shared: [], coverage: [], dropped: droppedOf(scored) };
   const kept = scored.filter((s) => s.shared.length === best);
   return {
+    dropped: droppedOf(scored.filter((s) => s.shared.length !== best)),
     rows: kept.map((s) => s.row),
     // Слова, по которым совпало: объединение по оставшимся записям.
     shared: [...new Set(kept.flatMap((s) => s.shared))],
     coverage: kept.map((s) => ({
       name: s.row.name ?? null,
+      incomplete: s.incomplete,
       rowWords: s.rowWords,
       share: s.rowWords ? s.shared.length / s.rowWords : 0,
       at: s.at,
@@ -1346,6 +1474,7 @@ function keepBestOverlap(rows, rawName) {
       strong: s.strong,
       parens: s.parens,
       foreignClass: s.foreignClass,
+      elementCompound: s.elementCompound,
       onlyClass: s.onlyClass,
       supplyForm: s.supplyForm,
       productBefore: s.productBefore,
@@ -1385,9 +1514,87 @@ function basedOnSubstance(rawName, queryStems) {
  * вещество — материал или основа другого товара.
  */
 function tokensBefore(rawName, queryStems) {
-  const tokens = normalizeName(dropCompoundModifiers(rawName)).split(" ").filter(Boolean);
+  const tokens = normalizeName(bindCompounds(rawName, queryStems)).split(" ").filter(Boolean);
   const first = tokens.findIndex((t) => queryStems.has(stemWord(t)));
   return first > 0 ? tokens.slice(0, first) : [];
+}
+
+/**
+ * Числа, стоящие в запросе сразу за словом: «Фторопласт-40», «Хладон-12».
+ *
+ * Такое число — не отдельное слово, а часть имени: марка, обозначение. В
+ * записи оно совпадает, только если и там стоит при том же слове. Иначе
+ * «Фторопласт-40» (сополимер с этиленом) подтверждался записью «фторопласт-ТМ
+ * моделей ПН25, ПН 40, Ф-4ТМ» — это политетрафторэтилен, а «40» там номер
+ * модели через три слова от «фторопласта».
+ *
+ * Число ПЕРЕД словом сюда не входит: «1,1,2-трифтортрихлорэтан»,
+ * «2,6-ди-трет-бутилфенол» — это места заместителей, и в реестре они
+ * расставлены как попало.
+ *
+ * Число → слова, за которыми оно стоит в запросе.
+ */
+function designationNumbers(queryPairs) {
+  const out = new Map();
+  const isNumber = (s) => /^\d+$/.test(s);
+  for (let i = 1; i < queryPairs.length; i++) {
+    const { stem } = queryPairs[i];
+    const before = queryPairs[i - 1].stem;
+    if (!isNumber(stem) || isNumber(before)) continue;
+    if (!out.has(stem)) out.set(stem, new Set());
+    out.get(stem).add(before);
+  }
+  return out;
+}
+
+/**
+ * Числа-обозначения запроса, которые в записи стоят не при своём слове.
+ *
+ * «При своём» — сразу за словом или за его первой буквой: «Фторопласт Ф-40
+ * марки П» — то же обозначение, записанное сокращённо.
+ */
+function detachedNumbers(rowList, numbers) {
+  const detached = new Set();
+  for (const [number, wordsBefore] of numbers) {
+    const initials = new Set([...wordsBefore].map((w) => w[0]));
+    let seen = false;
+    let attached = false;
+    for (let j = 0; j < rowList.length; j++) {
+      if (rowList[j] !== number) continue;
+      seen = true;
+      const prev = rowList[j - 1];
+      if (prev && (wordsBefore.has(prev) || (prev.length === 1 && initials.has(prev)))) {
+        attached = true;
+      }
+    }
+    if (seen && !attached) detached.add(number);
+  }
+  return detached;
+}
+
+/**
+ * Спрошен сам элемент — «Натрий», «Магний»: все значимые слова запроса —
+ * элементы в именительном падеже. Возвращает их основы, иначе null.
+ */
+function askedElement(queryPairs) {
+  const strong = queryPairs.filter((p) => p.stem.length > 2);
+  if (!strong.length || !strong.every((p) => ELEMENT_NOUNS.has(p.word))) return null;
+  return new Set(strong.map((p) => p.stem));
+}
+
+/**
+ * Элемент назван в записи только в косвенном падеже: «Натрия гипохлорит»,
+ * «Магния стеарат», «Кали едкое».
+ *
+ * Пока «натрий» и «натрия» усекались по-разному, такая запись с запросом
+ * «Натрий» не совпадала вовсе — по случайности, но верно: элемент в
+ * родительном падеже стоит в имени соединения. Теперь основа у падежей общая,
+ * и различие держится здесь, явно. Сам элемент реестр называет в именительном:
+ * «Натрий металлический», «Магний первичный».
+ */
+function elementInCompound(rowPairs, elementStems) {
+  const hits = rowPairs.filter((p) => elementStems.has(p.stem));
+  return hits.length > 0 && !hits.some((p) => ELEMENT_NOUNS.has(p.word));
 }
 
 /**
