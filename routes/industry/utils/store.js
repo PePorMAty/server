@@ -499,13 +499,35 @@ function lookupProduct(rawName, opts) {
   // записью про влажные салфетки, годные в том числе для ноутбуков. Правило
   // подобрано замером на 128 подтверждениях с живых графов (см. --coverage):
   // из 21 отсеянного ни одно не оказалось нужным.
-  const confirmed = kept.filter((row, i) => confirms(picked.coverage?.[i]));
+  const verdicts = kept.map((row, i) => verdict(picked.coverage?.[i]));
+
+  // Препарат и лекарство — свидетельства второго сорта: вещество в них есть,
+  // но продаётся другой товар. Засчитываем их, только если самого вещества в
+  // реестре нет — решение заказчика. Поймано снимком: у «Хлорида натрия» 22
+  // записи из 24 были растворами для инфузий, и код ОКПД2 выходил «Растворы
+  // плазмозамещающие»; у перекиси водорода засчитывались пять «Спрейер-дез»,
+  // у изопропанола — антибактериальное средство. Глифосат через «ТОРНАДО»
+  // остаётся: самого глифосата в реестре нет, и препарат — всё, что есть.
+  const pharmaQuery = isPharmaQuery([rawName, ...spellings]);
+  const secondaryWhy = kept.map((row, i) => {
+    if (!verdicts[i].ok) return null;
+    if (verdicts[i].formulation) return "препарат, а вещество нашлось и само";
+    if (!pharmaQuery && picked.coverage?.[i]?.medicine) {
+      return "лекарство, а вещество нашлось и само";
+    }
+    return null;
+  });
+  const hasDirect = verdicts.some((v, i) => v.ok && !secondaryWhy[i]);
+  const finalVerdicts = verdicts.map((v, i) =>
+    hasDirect && secondaryWhy[i] ? { ok: false, why: secondaryWhy[i] } : v,
+  );
+  const confirmed = kept.filter((row, i) => finalVerdicts[i].ok);
   const rejected = kept.length - confirmed.length;
 
   // Разбор каждой записи — по запросу. Нужен, чтобы спорное подтверждение
   // разбирать не на глаз: видно, какая именно ветка confirms() его пропустила.
   // В обычном ответе этого нет: поле тяжёлое и интерфейсу не нужно.
-  const explain = opts?.explain ? explainRows(picked, refused) : undefined;
+  const explain = opts?.explain ? explainRows(picked, refused, finalVerdicts) : undefined;
   // Помечаем отдельно, когда вещество нашлось ТОЛЬКО в составе препарата:
   // ОКПД2 у такой записи пестицидный, а не глифосатный, и в карточке это
   // должно быть видно.
@@ -750,16 +772,20 @@ function verdict(c) {
   if (c.supplyForm) return { ok: false, why: "набор или мерный реактив" };
   // Изделие ИЗ вещества — «Стержни из фторопласта-4».
   if (c.madeOf) return { ok: false, why: "изделие «из» вещества" };
-  // Продукт, содержащий вещество, — «Гуашь "Белила цинковые"». Уступает
-  // препаративной форме: её считать присутствием — решение заказчика.
+  // Продукт, содержащий вещество, — «Гуашь "Белила цинковые"», — или изделие
+  // из него, названное прежде вещества: «Пакет ПНД (полиэтилен низкого
+  // давления)». Уступает препаративной форме: её считать присутствием —
+  // решение заказчика (но только когда самого вещества нет, см. lookupProduct).
   if (c.productBefore && c.parens !== "formulation") {
-    return { ok: false, why: "продукт с веществом внутри" };
+    return { ok: false, why: "изделие или продукт с веществом" };
   }
   if (c.at === 0) return { ok: true, why: "первое слово" };
   if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return { ok: true, why: "второе слово" };
   if (c.parens === "synonym") return { ok: true, why: "второе имя в скобках" };
   if (nearPair(c)) return { ok: true, why: "два слова рядом" };
-  if (c.parens === "formulation") return { ok: true, why: "в составе препарата" };
+  if (c.parens === "formulation") {
+    return { ok: true, why: "в составе препарата", formulation: true };
+  }
   return {
     ok: false,
     why: c.at === 1 ? "второе слово в длинном названии" : "вещество не в начале названия",
@@ -775,14 +801,13 @@ function verdict(c) {
  * отбрасывалась целиком, в ответ не попадала — и в снимке выглядела так,
  * будто поиск перестал её находить.
  */
-function explainRows(picked, refused) {
+function explainRows(picked, refused, pickedVerdicts) {
   const out = [];
   const seen = new Set();
-  const push = (row, cov) => {
+  const push = (row, cov, v = verdict(cov)) => {
     const key = row.id ?? `${row.name}\u0000${row.producer}`;
     if (seen.has(key)) return;
     seen.add(key);
-    const v = verdict(cov);
     out.push({
       name: row.name,
       producer: row.producer,
@@ -792,7 +817,9 @@ function explainRows(picked, refused) {
       ...cov,
     });
   };
-  picked.rows.forEach((row, i) => push(row, picked.coverage?.[i]));
+  // Записи ответа — с окончательным решением: препарат, отставленный потому,
+  // что вещество нашлось и само, по одному разбору выглядел бы принятым.
+  picked.rows.forEach((row, i) => push(row, picked.coverage?.[i], pickedVerdicts?.[i]));
   for (const t of refused) t.rows.forEach((row, i) => push(row, t.coverage?.[i]));
   return out;
 }
@@ -925,10 +952,53 @@ const SUPPLY_FORM = new Set(
  * дозировкой в первой скобке: «ТОРНАДО, ВР (360 г/л глифосата к-ты)». Такую
  * запись считать присутствием вещества в реестре — решение заказчика, и этот
  * список его не отменяет.
+ *
+ * Пакеты и мешки добавлены по следующему снимку: «Пакет ПНД (полиэтилен
+ * низкого давления) для мусора» проходил у полиэтилена низкого давления как
+ * «второе имя в скобках», хотя скобка после «Пакет ПНД» называет материал, а
+ * не второе имя. Таких записей было шестнадцать.
  */
 const PRODUCT_BEFORE = new Set(
-  ["средство", "средства", "гуашь", "среда", "листы"].map(stemWord),
+  ["средство", "средства", "гуашь", "среда", "листы", "пакет", "пакеты", "мешок", "мешки"].map(
+    stemWord,
+  ),
 );
+
+/**
+ * Признаки лекарства или медицинского изделия в названии записи: «раствор для
+ * инфузий», «для инъекций», «лекарственных форм», «раствор стерильный»,
+ * «физиологический», «изотонический», «№ РЗН …» — номер регистрации
+ * медизделия в Росздравнадзоре.
+ *
+ * Сверяем по НАЧАЛУ усечённого слова: усечение даёт разные хвосты —
+ * «инфузий» → «инфуз», «инфузии» → «инфузи», а «лекарственных» не усекается
+ * вовсе.
+ */
+const MEDICINE_PREFIXES = ["инфуз", "инъекц", "лекарствен", "стерильн", "физиологическ", "изотоническ"];
+
+const hasMedicineWord = (stems) =>
+  stems.some((w) => w === "рзн" || MEDICINE_PREFIXES.some((p) => w.startsWith(p)));
+
+/**
+ * Запись — лекарство или медицинское изделие: по коду ОКПД2 или по названию.
+ *
+ * 21.20 — «Препараты лекарственные и материалы, применяемые в медицинских
+ * целях». Фармацевтические субстанции (21.10) сюда не входят намеренно:
+ * субстанция и есть само вещество.
+ */
+function isMedicine(row, rowList) {
+  if (String(row.okpd2 ?? "").startsWith("21.20")) return true;
+  return hasMedicineWord(rowList);
+}
+
+/**
+ * Спрашивают о самом лекарстве — «Физиологический раствор», «Вода для
+ * инъекций». Тогда лекарственные записи не второй сорт, а ровно то, что
+ * искали.
+ */
+function isPharmaQuery(spellings) {
+  return spellings.some((s) => hasMedicineWord(words(stemName(s))));
+}
 
 /**
  * Слова, называющие ФОРМУ, а не вещество: фракция, марка, порошок, раствор.
@@ -1248,11 +1318,14 @@ function keepBestOverlap(rows, rawName) {
           .some((w) => SUPPLY_FORM.has(w) && !queryStems.has(w)),
       // Перед веществом — продукт, который его содержит. См. PRODUCT_BEFORE.
       productBefore:
-        atRaw > 0 &&
-        rowList
-          .slice(0, atRaw)
-          .some((w) => PRODUCT_BEFORE.has(w) && !queryStems.has(w)),
+        (atRaw > 0 &&
+          rowList
+            .slice(0, atRaw)
+            .some((w) => PRODUCT_BEFORE.has(w) && !queryStems.has(w))) ||
+        basedOnSubstance(row.name || "", queryStems),
       madeOf: madeOfSubstance(row.name || "", queryStems),
+      // Лекарство или медизделие — свидетельство второго сорта, см. lookupProduct.
+      medicine: isMedicine(row, rowList),
     };
   });
 
@@ -1275,6 +1348,7 @@ function keepBestOverlap(rows, rawName) {
       supplyForm: s.supplyForm,
       productBefore: s.productBefore,
       madeOf: s.madeOf,
+      medicine: s.medicine,
     })),
   };
 }
@@ -1285,12 +1359,33 @@ function keepBestOverlap(rows, rawName) {
  * «Стержни из фторопласта-4 общего назначения», «Диск из фторопласта-4
  * прессованный», «Листы из полиэтилена низкого давления» — снимок нашёл их у
  * политетрафторэтилена и полиэтилена, как только поиск стал спрашивать все
- * написания. Предлог words() выбрасывает, поэтому смотрим на слова как есть.
+ * написания.
  */
 function madeOfSubstance(rawName, queryStems) {
+  const before = tokensBefore(rawName, queryStems);
+  return before[before.length - 1] === "из";
+}
+
+/**
+ * «На основе» прямо перед веществом: товар, сделанный на веществе, а не оно
+ * само, — «Добавка на основе пероксида водорода Booster». Снимок нашёл её у
+ * перекиси по правилу «два слова рядом». Считается тем же запретом, что
+ * PRODUCT_BEFORE, и так же уступает препаративной форме.
+ */
+function basedOnSubstance(rawName, queryStems) {
+  const before = tokensBefore(rawName, queryStems);
+  return before[before.length - 2] === "на" && before[before.length - 1] === "основе";
+}
+
+/**
+ * Слова названия, стоящие ДО вещества, — как есть, с предлогами: words()
+ * предлоги выбрасывает, а здесь они и нужны. «Из» и «на основе» говорят, что
+ * вещество — материал или основа другого товара.
+ */
+function tokensBefore(rawName, queryStems) {
   const tokens = normalizeName(dropCompoundModifiers(rawName)).split(" ").filter(Boolean);
   const first = tokens.findIndex((t) => queryStems.has(stemWord(t)));
-  return first > 0 && tokens[first - 1] === "из";
+  return first > 0 ? tokens.slice(0, first) : [];
 }
 
 /**
@@ -1335,6 +1430,18 @@ function codeNamesSubstance(code, spellings) {
     if (stems.every((w) => codeStems.has(w))) return true;
   }
   return false;
+}
+
+/**
+ * Позиция классификатора названа ровно веществом, без уточнений: «Бутан», а
+ * не «Бутан сжиженный». Нужна только ничьей в выборе кода.
+ */
+function codeIsSubstance(code, spellings) {
+  if (!okpd2NameExact(code)) return false;
+  const key = (text) =>
+    [...new Set(words(stemName(text)).filter((w) => w.length > 2))].sort().join(" ");
+  const codeKey = key(okpd2Name(code) ?? "");
+  return Boolean(codeKey) && spellings.some((s) => key(s) === codeKey);
 }
 
 /**
@@ -1390,10 +1497,23 @@ function summarize(rows, spellings = []) {
   // сути потерю: первый код называет само вещество, второй — назначение
   // товара. Поэтому сперва смотрим, какие коды классификатор связывает с этим
   // веществом, и большинство считаем уже среди них.
-  const ranked = byCount(okpd2Counts).sort((a, b) => {
+  //
+  // Ничью решает позиция, названная РОВНО веществом. У «Бутана» две записи:
+  // одна под 20.14.11.112 «Бутан», другая под 19.20.31.120 «Бутан
+  // сжиженный»; при равенстве брался меньший код, и вещество получало
+  // топливную позицию вместо своей.
+  //
+  // Порядок полный: говорит ли код о веществе, сколько у него записей, назван
+  // ли он ровно веществом, и последним — сам код, чтобы ответ не плавал.
+  const ranked = [...okpd2Counts].sort((a, b) => {
     const an = codeNamesSubstance(a[0], spellings);
     const bn = codeNamesSubstance(b[0], spellings);
-    return an === bn ? 0 : an ? -1 : 1;
+    if (an !== bn) return an ? -1 : 1;
+    if (a[1] !== b[1]) return b[1] - a[1];
+    const ae = codeIsSubstance(a[0], spellings);
+    const be = codeIsSubstance(b[0], spellings);
+    if (ae !== be) return ae ? -1 : 1;
+    return String(a[0]).localeCompare(String(b[0]));
   });
   const okpd2 = ranked[0]?.[0] ?? null;
   const rankedTnved = byCount(tnvedCounts);
