@@ -491,11 +491,21 @@ function normalizeAndFilterItems(items) {
     );
 }
 
+/**
+ * Первые max источников, у которых есть текст технологии, и сами тексты.
+ *
+ * Сперва отбираем источники с текстом, потом берём первые max — не наоборот.
+ * Раньше брались первые max как есть, и если это были записи из сохранённого
+ * графа (там у источника только название и ссылка), обобщение отказывало
+ * «Need at least 1 technology_description block», хотя шестой и дальше
+ * источники текст имели.
+ */
 function pickTechnologyBlocksFromSources(sources, max = 5) {
-  const picked = Array.isArray(sources) ? sources.slice(0, max) : [];
-  const blocks = picked
-    .map((s) => String(s?.technology_description || "").trim())
-    .filter(Boolean);
+  const withText = Array.isArray(sources)
+    ? sources.filter((s) => String(s?.technology_description || "").trim())
+    : [];
+  const picked = withText.slice(0, max);
+  const blocks = picked.map((s) => String(s.technology_description).trim());
   return { picked, blocks };
 }
 
