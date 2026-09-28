@@ -736,6 +736,11 @@ function confirms(c) {
   // сильнее оснований ниже: «Стандарт-титры Янтарная кислота 0,1 Н» проходили
   // как «два значимых слова не дальше третьего».
   if (c.supplyForm) return false;
+  // Изделие ИЗ вещества — «Стержни из фторопласта-4».
+  if (c.madeOf) return false;
+  // Продукт, содержащий вещество, — «Гуашь "Белила цинковые"». Уступает
+  // препаративной форме: её считать присутствием — решение заказчика.
+  if (c.productBefore && c.parens !== "formulation") return false;
   if (c.at === 0) return true;
   if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return true;
   if (c.parens === "synonym") return true;
@@ -854,6 +859,26 @@ const SUPPLY_FORM = new Set(
     // «Растворитель» сюда НЕ идёт намеренно: «Ксилол нефтяной растворитель» —
     // это сам ксилол, проданный как растворитель, а не другой продукт.
   ].map(stemWord),
+);
+
+/**
+ * Слова, которыми назван продукт, СОДЕРЖАЩИЙ вещество: препарат, краска,
+ * питательная среда, листовое изделие.
+ *
+ * Поймано снимком, когда поиск стал собирать записи по всем написаниям:
+ * «Изопропанол» ← «Средство дезинфицирующее ОЗАЛИЗ (изопропанол)», «Перекись
+ * водорода» ← «Дезинфицирующее средство "Перекись водорода 6%"», «Оксид
+ * цинка» ← «Гуашь "Белила цинковые" 500 мл», «Полиэтилен низкого давления» ←
+ * «Листы из полиолефинов — полиэтилен (…)». Вещество в них названо верно, но
+ * продаётся не оно.
+ *
+ * В отличие от SUPPLY_FORM, запрет уступает препаративной форме — составу с
+ * дозировкой в первой скобке: «ТОРНАДО, ВР (360 г/л глифосата к-ты)». Такую
+ * запись считать присутствием вещества в реестре — решение заказчика, и этот
+ * список его не отменяет.
+ */
+const PRODUCT_BEFORE = new Set(
+  ["средство", "средства", "гуашь", "среда", "листы"].map(stemWord),
 );
 
 /**
@@ -1172,6 +1197,13 @@ function keepBestOverlap(rows, rawName) {
         rowList
           .slice(0, atRaw)
           .some((w) => SUPPLY_FORM.has(w) && !queryStems.has(w)),
+      // Перед веществом — продукт, который его содержит. См. PRODUCT_BEFORE.
+      productBefore:
+        atRaw > 0 &&
+        rowList
+          .slice(0, atRaw)
+          .some((w) => PRODUCT_BEFORE.has(w) && !queryStems.has(w)),
+      madeOf: madeOfSubstance(row.name || "", queryStems),
     };
   });
 
@@ -1192,8 +1224,24 @@ function keepBestOverlap(rows, rawName) {
       foreignClass: s.foreignClass,
       onlyClass: s.onlyClass,
       supplyForm: s.supplyForm,
+      productBefore: s.productBefore,
+      madeOf: s.madeOf,
     })),
   };
+}
+
+/**
+ * «Из» прямо перед веществом: запись про изделие ИЗ него, а не про него самого.
+ *
+ * «Стержни из фторопласта-4 общего назначения», «Диск из фторопласта-4
+ * прессованный», «Листы из полиэтилена низкого давления» — снимок нашёл их у
+ * политетрафторэтилена и полиэтилена, как только поиск стал спрашивать все
+ * написания. Предлог words() выбрасывает, поэтому смотрим на слова как есть.
+ */
+function madeOfSubstance(rawName, queryStems) {
+  const tokens = normalizeName(dropCompoundModifiers(rawName)).split(" ").filter(Boolean);
+  const first = tokens.findIndex((t) => queryStems.has(stemWord(t)));
+  return first > 0 && tokens[first - 1] === "из";
 }
 
 /**
