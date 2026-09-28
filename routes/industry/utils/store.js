@@ -426,6 +426,8 @@ function lookupProduct(rawName, opts) {
   let tier = null;
   /** Подтвердившиеся попытки уровня — из них и собирается ответ. */
   const gathered = [];
+  /** Строгие попытки, где отбор не подтвердил ничего, — только для разбора. */
+  const refused = [];
   for (const attempt of attempts()) {
     // Уровень кончился, а подтверждённое уже есть — ниже не спускаемся:
     // нижний уровень мягче, и его записи хуже собранных.
@@ -447,6 +449,8 @@ function lookupProduct(rawName, opts) {
     if (trial.rows.some((row, i) => confirms(trial.coverage?.[i]))) {
       tier = tierOf(attempt.level);
       gathered.push({ hit, trial });
+    } else if (opts?.explain) {
+      refused.push(trial);
     }
   }
 
@@ -501,15 +505,7 @@ function lookupProduct(rawName, opts) {
   // Разбор каждой записи — по запросу. Нужен, чтобы спорное подтверждение
   // разбирать не на глаз: видно, какая именно ветка confirms() его пропустила.
   // В обычном ответе этого нет: поле тяжёлое и интерфейсу не нужно.
-  const explain = opts?.explain
-    ? kept.map((row, i) => ({
-        name: row.name,
-        producer: row.producer,
-        okpd2: row.okpd2,
-        confirmed: confirms(picked.coverage?.[i]),
-        ...picked.coverage?.[i],
-      }))
-    : undefined;
+  const explain = opts?.explain ? explainRows(picked, refused) : undefined;
   // Помечаем отдельно, когда вещество нашлось ТОЛЬКО в составе препарата:
   // ОКПД2 у такой записи пестицидный, а не глифосатный, и в карточке это
   // должно быть видно.
@@ -547,6 +543,9 @@ function lookupProduct(rawName, opts) {
         /** Совпало, но не с самим продуктом: слово попало в середину чужого названия. */
         offTarget: true,
       },
+      // Разбор нужен и здесь: продукт, переставший находиться, — первое, что
+      // смотрят в снимке, и без разбора не видно, какой запрет его снял.
+      ...(explain ? { explain } : {}),
     };
   } else if (loose) {
     // Самое редкое из совпавших слов оставляем в разборе: по нему сразу
@@ -721,31 +720,81 @@ function docFreq(conn, stem) {
  * одной нужной среди них.
  */
 function confirms(c) {
-  if (!c) return false;
+  return verdict(c).ok;
+}
+
+/**
+ * Решение отбора по записи — вместе с основанием, словами.
+ *
+ * Основание нужно не самому отбору, а тому, кто его проверяет. Снимок до и
+ * после показывает, какие записи ушли и какие пришли, а по одному названию не
+ * сказать, почему: «Средство дезинфицирующее ОЗАЛИЗ (изопропанол)» ушла по
+ * запрету или потому, что поиск перестал её находить? Решение и основание
+ * считаются в одном месте, чтобы объяснение не разошлось с отбором.
+ */
+function verdict(c) {
+  if (!c) return { ok: false, why: "нет разбора" };
   // Запись про СОЕДИНЕНИЕ этого вещества, а не про него само. Запрет сильнее
   // всех оснований ниже: «Закись азота» начинается со второго слова и
   // покрывает половину названия, то есть проходила бы как «второе слово».
-  if (c.foreignClass) return false;
+  if (c.foreignClass) return { ok: false, why: "соединение вещества, а не оно само" };
   // Совпало одно лишь название класса. «Эфиры ЖК»: сокращение «ЖК» короче
   // трёх букв, ступень «значимые слова» его отбрасывает, и от запроса остаётся
   // «эфиры» — то есть КЛАСС соединений. После этого любой сложный эфир
   // реестра подтверждался первым же словом: заказчику доставались метил-трет-
   // бутиловый эфир и метилакрилат под видом эфиров жирных кислот.
-  if (c.onlyClass) return false;
+  if (c.onlyClass) return { ok: false, why: "совпало одно название класса" };
   // Запись про набор или мерный реактив, а не про само вещество. Запрет
   // сильнее оснований ниже: «Стандарт-титры Янтарная кислота 0,1 Н» проходили
   // как «два значимых слова не дальше третьего».
-  if (c.supplyForm) return false;
+  if (c.supplyForm) return { ok: false, why: "набор или мерный реактив" };
   // Изделие ИЗ вещества — «Стержни из фторопласта-4».
-  if (c.madeOf) return false;
+  if (c.madeOf) return { ok: false, why: "изделие «из» вещества" };
   // Продукт, содержащий вещество, — «Гуашь "Белила цинковые"». Уступает
   // препаративной форме: её считать присутствием — решение заказчика.
-  if (c.productBefore && c.parens !== "formulation") return false;
-  if (c.at === 0) return true;
-  if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return true;
-  if (c.parens === "synonym") return true;
-  if (nearPair(c)) return true;
-  return c.parens === "formulation";
+  if (c.productBefore && c.parens !== "formulation") {
+    return { ok: false, why: "продукт с веществом внутри" };
+  }
+  if (c.at === 0) return { ok: true, why: "первое слово" };
+  if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return { ok: true, why: "второе слово" };
+  if (c.parens === "synonym") return { ok: true, why: "второе имя в скобках" };
+  if (nearPair(c)) return { ok: true, why: "два слова рядом" };
+  if (c.parens === "formulation") return { ok: true, why: "в составе препарата" };
+  return {
+    ok: false,
+    why: c.at === 1 ? "второе слово в длинном названии" : "вещество не в начале названия",
+  };
+}
+
+/**
+ * Разбор для отчётов: каждая найденная запись — с решением отбора и основанием.
+ *
+ * Сначала записи ответа, затем записи строгих попыток, где отбор не подтвердил
+ * ничего. Без вторых запись, найденную и отброшенную запретом, было не отличить
+ * от ненайденной: «Гуашь "Белила цинковые"» по написанию «Белила цинковые»
+ * отбрасывалась целиком, в ответ не попадала — и в снимке выглядела так,
+ * будто поиск перестал её находить.
+ */
+function explainRows(picked, refused) {
+  const out = [];
+  const seen = new Set();
+  const push = (row, cov) => {
+    const key = row.id ?? `${row.name}\u0000${row.producer}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const v = verdict(cov);
+    out.push({
+      name: row.name,
+      producer: row.producer,
+      okpd2: row.okpd2,
+      confirmed: v.ok,
+      why: v.why,
+      ...cov,
+    });
+  };
+  picked.rows.forEach((row, i) => push(row, picked.coverage?.[i]));
+  for (const t of refused) t.rows.forEach((row, i) => push(row, t.coverage?.[i]));
+  return out;
 }
 
 /**

@@ -6,6 +6,8 @@
 #   bash scripts/snapshot-check.sh ORIG_HEAD    сразу после git pull: «до» —
 #                                               то, что стояло до него
 #   bash scripts/snapshot-check.sh 37dce42      «до» — указанный коммит
+#   bash scripts/snapshot-check.sh 37dce42 --full   показать все пришедшие
+#                                               записи, без сокращений
 #
 # Зачем. Снимок «до» обязан сниматься СТАРЫМ кодом (см. lookup-snapshot.js),
 # а после git pull старого кода в папке уже нет — отсюда и путаница. Скрипт
@@ -64,10 +66,17 @@ fi
 # сохранённые графы в git не лежат.
 ln -s "$ROOT/node_modules" "$OLD/node_modules"
 ln -s "$ROOT/data" "$OLD/data"
+# Старый код — предмет измерения, а мерить обе стороны надо одной линейкой:
+# снимок «до» снимается ТЕКУЩЕЙ версией скрипта снимка. Иначе улучшение
+# самого снимка выглядело бы переменой поиска: старый скрипт пишет по одной
+# записи на производителя, новый — все, и сравнение показало бы сотни «+»,
+# которых поиск не давал.
+cp "$ROOT/scripts/lookup-snapshot.js" "$OLD/scripts/lookup-snapshot.js"
 
 echo "Снимок ДО — код $(git -C "$ROOT" rev-parse --short "$BASE")…"
 (cd "$OLD" && node scripts/lookup-snapshot.js --quiet --out "$TMP/before.json")
 echo "Снимок ПОСЛЕ — текущий код $(git -C "$ROOT" rev-parse --short HEAD)…"
 (cd "$ROOT" && node scripts/lookup-snapshot.js --quiet --out "$TMP/after.json")
 echo
-node "$ROOT/scripts/lookup-snapshot.js" "$TMP/before.json" "$TMP/after.json"
+# Всё, что после коммита, — ключи сравнения (--full).
+node "$ROOT/scripts/lookup-snapshot.js" "$TMP/before.json" "$TMP/after.json" "${@:2}"

@@ -10,6 +10,8 @@
 //                       справочника и графов
 //   --limit N           только первые N названий — для быстрой пробы
 //   --quiet             не печатать ход работы
+//   --full              при сравнении показать все пришедшие записи, а не
+//                       первые названия каждой группы (ушедшие — всегда все)
 //
 // ЗАЧЕМ. База реестра меняется: её пересобирают из новой выгрузки, добавляют
 // классы ОКПД2, правят правило совпадения. После каждой такой перемены надо
@@ -30,8 +32,10 @@
 //
 // ЧТО В СНИМКЕ. Для каждого названия: нашлось ли, какой ступенью лестницы,
 // код ОКПД2, сколько записей и производителей, и — главное — ИМЕНА
-// подтверждённых записей. Числа говорят, что изменилось; имена говорят, чем
-// именно, и только по ним видно, верное совпадение или нет.
+// подтверждённых записей, все до одной, и основание отбора по каждой. Числа
+// говорят, что изменилось; имена говорят, чем именно, и только по ним видно,
+// верное совпадение или нет. Основание говорит, почему: запись ушла по
+// запрету отбора или поиск перестал её находить.
 
 const fs = require("fs");
 const path = require("path");
@@ -111,14 +115,52 @@ function collectNames(fromFile) {
 /* ────────────────────────────── снимок ────────────────────────────── */
 
 /**
+ * Записи снимка — все подтверждённые, или по одной на производителя.
+ *
+ * Раньше в снимок шло по одной записи от каждого производителя, как их отдаёт
+ * карточке lookupProduct, да ещё без повторов. На сравнении это прятало
+ * большую часть перемен: у «Изопропанола» ушло 65 записей из 80, а в отчёте
+ * стояла одна строка «−». Одинаковые названия сливались в одно, а от
+ * производителя с десятком записей в снимок попадала одна. Теперь
+ * записи берутся из разбора (explain) — все до одной, с повторами. Разбор есть
+ * у кода начиная с 3851ba0; снимок более старым кодом записывает по-старому и
+ * так и помечается, чтобы сравнение не приняло разницу способов за перемену
+ * поиска.
+ */
+let perProducer = false;
+
+/**
+ * Основание решения отбора по каждому названию записи.
+ *
+ * Подтверждённые идут первыми: одно и то же название могло найтись двумя
+ * написаниями и одним подтвердиться, другим нет, — в ответе оно подтверждено.
+ * Map, а не объект: названия записей — чужие строки, и «constructor» среди
+ * них не должен ничего сломать.
+ */
+function reasonsOf(explained) {
+  const out = new Map();
+  const ordered = [...explained].sort((p, q) => Number(q.confirmed) - Number(p.confirmed));
+  for (const e of ordered) {
+    if (e?.why && !out.has(e.name)) out.set(e.name, e.why);
+  }
+  return out.size ? Object.fromEntries(out) : null;
+}
+
+/**
  * Что записываем про одно название.
  *
  * Имена подтверждённых записей — не украшение отчёта, а его суть: по числам
  * видно, что совпадений стало больше, и только по именам — стали они верными
  * или ложными. Сортируем, чтобы сравнение не спотыкалось о порядок строк.
+ *
+ * why — основание по каждой записи: чем подтвердилась («первое слово») или
+ * каким запретом отброшена («изделие «из» вещества»). По нему сравнение
+ * говорит, почему запись пришла или ушла.
  */
 function probe(name) {
-  const r = lookupProduct(name);
+  const r = lookupProduct(name, { explain: true });
+  const explained = Array.isArray(r?.explain) ? r.explain : null;
+  const why = explained ? reasonsOf(explained) : null;
   if (!r?.found) {
     return {
       found: false,
@@ -128,11 +170,15 @@ function probe(name) {
       ...(r?.placeholder ? { placeholder: true } : {}),
       canon: r?.canon ?? null,
       cas: r?.cas ?? null,
+      ...(why ? { why } : {}),
     };
   }
-  const records = [...new Set((r.producers ?? []).map((p) => p.product))].sort(
-    (a, b) => a.localeCompare(b, "ru"),
-  );
+  if (!explained) perProducer = true;
+  const records = (
+    explained
+      ? explained.filter((e) => e.confirmed).map((e) => e.name)
+      : [...new Set((r.producers ?? []).map((p) => p.product))]
+  ).sort((a, b) => a.localeCompare(b, "ru"));
   return {
     found: true,
     match: r.match ?? null,
@@ -145,6 +191,7 @@ function probe(name) {
     canon: r.canon ?? null,
     cas: r.cas ?? null,
     records,
+    ...(why ? { why } : {}),
   };
 }
 
@@ -183,6 +230,8 @@ function takeSnapshot(names, outFile, quiet) {
     },
     names: names.length,
     found,
+    /** «all» — все подтверждённые записи с повторами; иначе по одной на производителя. */
+    recordsMode: perProducer ? "per-producer" : "all",
     results,
   };
 
@@ -212,12 +261,98 @@ function readSnapshot(file) {
   return parsed;
 }
 
-/** Строки, которых нет во втором списке. */
-const added = (before, after) => after.filter((x) => !before.includes(x));
+/** Сколько раз встречается каждое название в списке записей. */
+function tally(list) {
+  const m = new Map();
+  for (const x of list ?? []) m.set(x, (m.get(x) ?? 0) + 1);
+  return m;
+}
 
-function compare(fileA, fileB) {
+/**
+ * Каких записей во втором списке больше, чем в первом: [[название, на сколько]].
+ *
+ * Считаем с повторами: одно название стоит в реестре записью на каждого
+ * производителя и каждую регистрацию, и «Средство дезинфицирующее ОЗАЛИЗ
+ * (изопропанол)» уходит десятками записей, а не одной.
+ */
+function surplus(before, after) {
+  const was = tally(before);
+  const out = [];
+  for (const [name, n] of tally(after)) {
+    const d = n - (was.get(name) ?? 0);
+    if (d > 0) out.push([name, d]);
+  }
+  return out.sort((p, q) => q[1] - p[1] || p[0].localeCompare(q[0], "ru"));
+}
+
+/** Поле объекта — только собственное: названия записей — чужие строки. */
+const own = (obj, key) =>
+  obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+
+/** «1 запись», «3 записи», «65 записей». */
+function recordsWord(n) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return `${n} запись`;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return `${n} записи`;
+  return `${n} записей`;
+}
+
+/**
+ * Почему запись ушла — по снимку ПОСЛЕ.
+ *
+ * Три случая, и смысл у них разный. Запись нашлась, но её отбросил запрет —
+ * тогда в снимке есть основание, и проверять надо запрет. Запись не нашлась
+ * вовсе — поиск перестал её доставать (написание получило звёздочку, ступень
+ * сменилась). Название осталось, но одинаковых записей стало меньше — редкий
+ * случай, когда запрос упёрся в предел выдачи.
+ */
+function goneReasonOf(y, reasonsKnown) {
+  const still = new Set(y?.records ?? []);
+  return (name) => {
+    if (still.has(name)) return "одинаковых записей стало меньше";
+    const why = own(y?.why, name);
+    if (why) return `отбор: ${why}`;
+    return reasonsKnown ? "больше не находится поиском" : undefined;
+  };
+}
+
+/**
+ * Напечатать записи группами по основанию.
+ *
+ * Группа — одно решение: «отбор: продукт с веществом внутри», «больше не
+ * находится поиском». Так сотня строк читается как три решения, и проверять
+ * надо решение, а не каждую строку порознь. Крупные группы — первыми.
+ * cap — сколько названий показать в группе; 0 — все.
+ */
+function printGrouped(sign, items, reasonOf, cap) {
+  const groups = new Map();
+  for (const [name, n] of items) {
+    const why = reasonOf(name) ?? "основание неизвестно";
+    if (!groups.has(why)) groups.set(why, []);
+    groups.get(why).push([name, n]);
+  }
+  const total = (list) => list.reduce((s, [, n]) => s + n, 0);
+  const ordered = [...groups].sort((p, q) => total(q[1]) - total(p[1]));
+  for (const [why, list] of ordered) {
+    console.log(`      ${sign} ${why} — ${recordsWord(total(list))}:`);
+    const shown = cap ? list.slice(0, cap) : list;
+    for (const [name, n] of shown) {
+      console.log(`          ${n > 1 ? `×${n} ` : ""}${name.slice(0, 90)}`);
+    }
+    if (shown.length < list.length) {
+      console.log(`          … и ещё названий: ${list.length - shown.length} (все — ключ --full)`);
+    }
+  }
+}
+
+function compare(fileA, fileB, { full = false } = {}) {
   const a = readSnapshot(fileA);
   const b = readSnapshot(fileB);
+  // Прибавки режем, убыль — никогда: пропавшая верная запись — потеря, и
+  // спрятать её за «… и ещё» нельзя. Прибавок бывает сотни, когда поиск
+  // расширяют, и там хватает первых названий каждой группы.
+  const capPlus = full ? 0 : 10;
 
   console.log(
     `ДО:    ${path.basename(fileA)} — реестр ${a.registry?.entries ?? "?"} записей,` +
@@ -225,6 +360,20 @@ function compare(fileA, fileB) {
       `ПОСЛЕ: ${path.basename(fileB)} — реестр ${b.registry?.entries ?? "?"} записей,` +
       ` нашлось ${b.found} из ${b.names}`,
   );
+
+  // Записи сравнимы, только если оба снимка записаны одним способом.
+  const comparable = (a.recordsMode ?? "per-producer") === (b.recordsMode ?? "per-producer");
+  if (!comparable) {
+    console.log(
+      "\n⚠ Снимки записаны по-разному: один — всеми записями, другой — по одной\n" +
+        "  на производителя. Записи не сравниваю: разница была бы в способе, а не\n" +
+        "  в поиске. Снимите оба заново одной командой:\n" +
+        "  bash scripts/snapshot-check.sh <коммит «до»>",
+    );
+  }
+  // Основания есть только у снимка текущим кодом; у старого — нет, и тогда
+  // «не находится поиском» утверждать нельзя: мы просто не знаем.
+  const reasonsKnown = Object.values(b.results).some((r) => r?.why);
 
   const names = [...new Set([...Object.keys(a.results), ...Object.keys(b.results)])].sort(
     (x, y) => x.localeCompare(y, "ru"),
@@ -262,7 +411,7 @@ function compare(fileA, fileB) {
       // Разные вещи: «находилось и перестало» — беда, а «спрашивать
       // перестали, потому что это не название вещества» — ровно то, чего
       // добивались.
-      (y.placeholder ? refused : lost).push([name, x]);
+      (y.placeholder ? refused : lost).push([name, x, y]);
       continue;
     }
     if (!x.found && !y.found) {
@@ -270,8 +419,8 @@ function compare(fileA, fileB) {
       continue;
     }
 
-    const fresh = added(x.records ?? [], y.records ?? []);
-    const gone = added(y.records ?? [], x.records ?? []);
+    const fresh = comparable ? surplus(x.records, y.records) : [];
+    const gone = comparable ? surplus(y.records, x.records) : [];
     const codeMoved = x.okpd2 !== y.okpd2;
 
     if (codeMoved) codeChanged.push([name, x, y]);
@@ -285,9 +434,9 @@ function compare(fileA, fileB) {
   // быть не должно: расширение реестра не может отнять то, что находилось.
   head("ПРОПАЛО (не должно быть ничего)", lost.length);
   if (!lost.length) console.log("  пусто — хорошо");
-  for (const [name, x] of lost) {
-    console.log(`  «${name}» — было ${x.entries} записей, код ${x.okpd2 ?? "—"}`);
-    for (const r of (x.records ?? []).slice(0, 3)) console.log(`      ${r.slice(0, 90)}`);
+  for (const [name, x, y] of lost) {
+    console.log(`  «${name}» — было ${recordsWord(x.entries)}, код ${x.okpd2 ?? "—"}`);
+    printGrouped("−", surplus([], x.records), goneReasonOf(y, reasonsKnown), 0);
   }
 
   // Отдельно от пропаж: это не потеря, а отказ отвечать на вопрос, которого
@@ -298,9 +447,11 @@ function compare(fileA, fileB) {
     head("ПЕРЕСТАЛО СЧИТАТЬСЯ НАЗВАНИЕМ ВЕЩЕСТВА — это не потеря", refused.length);
     for (const [name, x] of refused) {
       console.log(
-        `  «${name}» — приносило ${x.entries} записей, код ${x.okpd2 ?? "—"}`,
+        `  «${name}» — приносило ${recordsWord(x.entries)}, код ${x.okpd2 ?? "—"}`,
       );
-      for (const r of (x.records ?? []).slice(0, 3)) console.log(`      ${r.slice(0, 90)}`);
+      for (const [r, n] of surplus([], x.records).slice(0, 3)) {
+        console.log(`      ${n > 1 ? `×${n} ` : ""}${r.slice(0, 90)}`);
+      }
     }
     console.log(
       "\n  Такой узел стоит переименовать: пока он подписан так, вещества за\n" +
@@ -314,14 +465,18 @@ function compare(fileA, fileB) {
     newRecords.length
       ? "  Здесь прячутся ложные совпадения: к верной записи могла добавиться\n" +
           "  чужая. Читайте названия — числа тут ничего не скажут.\n" +
-          "  «+» прибавилось, «−» убыло.\n"
+          "  «+» пришло, «−» ушло; после знака — основание отбора.\n" +
+          "  «×N» — столько одинаковых записей (разные производители, регистрации).\n"
       : "",
   );
+  let plusTotal = 0;
+  let minusTotal = 0;
   for (const [name, x, y, fresh, gone] of newRecords) {
-    console.log(`  «${name}»  ${x.entries} → ${y.entries} записей`);
-    for (const r of fresh.slice(0, 6)) console.log(`      + ${r.slice(0, 90)}`);
-    if (fresh.length > 6) console.log(`      + … и ещё ${fresh.length - 6}`);
-    for (const r of gone.slice(0, 3)) console.log(`      − ${r.slice(0, 90)}`);
+    console.log(`  «${name}»  ${x.entries} → ${recordsWord(y.entries)}`);
+    printGrouped("+", fresh, (n) => own(y.why, n), capPlus);
+    printGrouped("−", gone, goneReasonOf(y, reasonsKnown), 0);
+    plusTotal += fresh.reduce((s, [, n]) => s + n, 0);
+    minusTotal += gone.reduce((s, [, n]) => s + n, 0);
   }
 
   head("ДРУГОЙ КОД ОКПД2", codeChanged.length);
@@ -342,13 +497,10 @@ function compare(fileA, fileB) {
   }
   for (const [name, y] of gained) {
     console.log(
-      `  «${name}» → ${y.entries} записей, ${y.producers} производителей,` +
+      `  «${name}» → ${recordsWord(y.entries)}, ${y.producers} производителей,` +
         ` код ${y.okpd2 ?? "—"} [${MATCH_LABELS[y.match] ?? y.match ?? "—"}]`,
     );
-    for (const r of (y.records ?? []).slice(0, 3)) console.log(`      ${r.slice(0, 90)}`);
-    if ((y.records ?? []).length > 3) {
-      console.log(`      … и ещё ${y.records.length - 3}`);
-    }
+    printGrouped("+", surplus([], y.records), (n) => own(y.why, n), capPlus);
   }
 
   // Новые названия — пополнение справочника или графов. Сравнивать их не с
@@ -374,13 +526,10 @@ function compare(fileA, fileB) {
       const alone = names.length === 1 && names[0] === canon;
       console.log(
         `  ${listed}${alone ? "" : ` — вещество «${canon}»`}` +
-          `\n      → ${y.entries} записей, ${y.producers} производителей,` +
+          `\n      → ${recordsWord(y.entries)}, ${y.producers} производителей,` +
           ` код ${y.okpd2 ?? "—"} [${MATCH_LABELS[y.match] ?? y.match ?? "—"}]`,
       );
-      for (const r of (y.records ?? []).slice(0, 3)) console.log(`      ${r.slice(0, 90)}`);
-      if ((y.records ?? []).length > 3) {
-        console.log(`      … и ещё ${y.records.length - 3}`);
-      }
+      printGrouped("+", surplus([], y.records), (n) => own(y.why, n), full ? 0 : 3);
     }
     if (freshMissing.length) {
       console.log(
@@ -403,6 +552,9 @@ function compare(fileA, fileB) {
         ? `  не спрашивали:      ${refused.length}   (подпись не называет вещество — так и задумано)\n`
         : "") +
       `  новые записи:       ${newRecords.length}${newRecords.length ? "   ← прочитать названия" : ""}\n` +
+      (newRecords.length
+        ? `    из них записей пришло: ${plusTotal}, ушло: ${minusTotal}\n`
+        : "") +
       `  сменился код ОКПД2: ${codeChanged.length}` +
       (onlyInB.length
         ? `\n  новые названия:     ${onlyInB.length}, нашли ${freshFound.length}` +
@@ -425,6 +577,7 @@ function main() {
   let namesFrom = null;
   let limit = 0;
   let quiet = false;
+  let full = false;
   const files = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -433,10 +586,11 @@ function main() {
     else if (a === "--names-from") namesFrom = argv[++i];
     else if (a === "--limit") limit = Number(argv[++i]) || 0;
     else if (a === "--quiet") quiet = true;
+    else if (a === "--full") full = true;
     else if (!a.startsWith("--")) files.push(a);
   }
 
-  if (files.length === 2 && !out) return compare(files[0], files[1]);
+  if (files.length === 2 && !out) return compare(files[0], files[1], { full });
 
   if (!out) {
     console.error(

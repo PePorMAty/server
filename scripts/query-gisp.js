@@ -100,6 +100,7 @@ if (why) {
     }
     for (const e of r.explain) {
       const marks = [
+        e.why ? `основание: ${e.why}` : null,
         `место ${e.at}`,
         `значимых ${e.strong}`,
         `покрытие ${(e.share ?? 0).toFixed(2)}`,
