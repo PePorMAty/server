@@ -407,13 +407,29 @@ function lookupProduct(rawName, opts) {
   // словом), и до «КАС» с пятью записями «Удобрение карбамидоаммиачное (КАС)»
   // очередь не доходила.
   //
-  // Правка только добавляет найденное: то, что находилось, находится
-  // по-прежнему — первая подтверждённая попытка и раньше была первой. А если
-  // подтверждённых нет нигде, ответ прежний: первое, что нашлось, с разбором
-  // того, почему отклонено.
+  // Если подтверждённых нет нигде, ответ прежний: первое, что нашлось, с
+  // разбором того, почему отклонено.
+  //
+  // И собираем записи по ВСЕМ написаниям, а не по первому сработавшему. Иначе
+  // ответ был записями одной попытки: «Дихлорметан» находил свою запись и до
+  // «Метилен хлористый технический» не доходил, «Карбамидоформальдегидный
+  // концентрат» находил одну запись с точно таким названием и не видел пяти
+  // «Концентрат карбамидоформальдегидный (КФК-85)». Справочник обещал «поиск
+  // по всем написаниям сразу» — теперь это правда.
+  //
+  // Собираем в пределах УРОВНЯ: «точно» и «все слова» — один уровень (точно
+  // названная запись и так содержит все слова), «значимые слова» — следующий,
+  // и к нему спускаемся, только если на первом не подтвердилось ничего. Каждое
+  // написание проверяется отбором по себе самому: «ПЭНД» — по «ПЭНД».
+  const tierOf = (level) => (level === "exact" ? "all-words" : level);
   let first = null;
-  let chosen = null;
+  let tier = null;
+  /** Подтвердившиеся попытки уровня — из них и собирается ответ. */
+  const gathered = [];
   for (const attempt of attempts()) {
+    // Уровень кончился, а подтверждённое уже есть — ниже не спускаемся:
+    // нижний уровень мягче, и его записи хуже собранных.
+    if (tier && tierOf(attempt.level) !== tier) break;
     let found;
     try {
       found = attempt.run();
@@ -429,12 +445,12 @@ function lookupProduct(rawName, opts) {
     if (LOOSE_LEVELS.has(attempt.level)) break;
     const trial = keepBestOverlap(found, attempt.spelling);
     if (trial.rows.some((row, i) => confirms(trial.coverage?.[i]))) {
-      chosen = hit;
-      break;
+      tier = tierOf(attempt.level);
+      gathered.push({ hit, trial });
     }
   }
 
-  const hit = chosen ?? first;
+  const hit = gathered[0]?.hit ?? first;
   const rows = hit?.rows ?? [];
   const match = hit?.match ?? null;
   // Написание, которым нашли: по нему же считается отбор. Искали «ПЭНД», нашли
@@ -444,9 +460,11 @@ function lookupProduct(rawName, opts) {
 
   // Отбор может отклонить всё найденное: полнотекстовый индекс ищет по словам
   // и не знает, что слово было частью сложного прилагательного.
-  const picked = rows.length
-    ? keepBestOverlap(rows, matchedAs)
-    : { rows: [], shared: [], coverage: [] };
+  const picked = gathered.length
+    ? combineTrials(gathered.map((g) => g.trial))
+    : rows.length
+      ? keepBestOverlap(rows, matchedAs)
+      : { rows: [], shared: [], coverage: [] };
 
   const kept = picked.rows;
 
@@ -723,6 +741,38 @@ function confirms(c) {
   if (c.parens === "synonym") return true;
   if (nearPair(c)) return true;
   return c.parens === "formulation";
+}
+
+/**
+ * Свести разборы нескольких написаний в один.
+ *
+ * Одна и та же запись может найтись по двум написаниям — «Медный купорос
+ * (сульфат меди)» и по «сульфату меди», и по «медному купоросу». Считаем её
+ * один раз, иначе записей в ответе стало бы больше, чем в реестре. Из двух
+ * её разборов оставляем подтверждающий: подтвердило хоть одно написание —
+ * значит, запись про это вещество.
+ */
+function combineTrials(trials) {
+  const rows = [];
+  const coverage = [];
+  const shared = new Set();
+  const seen = new Map();
+  for (const t of trials) {
+    t.rows.forEach((row, i) => {
+      const cov = t.coverage?.[i];
+      const key = row.id ?? `${row.name}\u0000${row.producer}`;
+      const at = seen.get(key);
+      if (at === undefined) {
+        seen.set(key, rows.length);
+        rows.push(row);
+        coverage.push(cov);
+      } else if (!confirms(coverage[at]) && confirms(cov)) {
+        coverage[at] = cov;
+      }
+    });
+    for (const s of t.shared ?? []) shared.add(s);
+  }
+  return { rows, coverage, shared: [...shared] };
 }
 
 /**
