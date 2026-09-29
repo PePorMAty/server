@@ -279,6 +279,15 @@ const CLASS_STEMS = new Map([
   ["перекис", "пероксид"],
 ]);
 
+/**
+ * Названия, которые только похожи на словоформу, и усекать их нельзя.
+ *
+ * «Нафтам» — имя продукта, а общее правило срезало «-ам» как окончание
+ * дательного падежа: «нафтам» → «нафт», как у «нафты». Снимок 2778f2f →
+ * d26090d показал цену: «Нафтам 04» подтверждал запрос «Нафта».
+ */
+const KEEP_WHOLE = new Set(["нафтам"]);
+
 /** Усечение по общему правилу — без особых слов выше. */
 function stemByEndings(word) {
   for (const end of ENDINGS) {
@@ -298,6 +307,7 @@ function stemByEndings(word) {
  * построении индекса, и в запросе.
  */
 function stemWord(word) {
+  if (KEEP_WHOLE.has(word)) return word;
   if (ELEMENT_NOUNS.has(word)) return word.slice(0, -1);
   const stem = FLEETING_VOWEL.get(word) ?? stemByEndings(word);
   return CLASS_STEMS.get(stem) ?? stem;
@@ -325,6 +335,7 @@ const addLegacy = (stem, legacy) => {
 for (const word of ELEMENT_NOUNS) addLegacy(stemWord(word), stemByEndings(word));
 for (const [word, stem] of FLEETING_VOWEL) addLegacy(stem, word);
 for (const [legacy, stem] of CLASS_STEMS) addLegacy(stem, legacy);
+for (const word of KEEP_WHOLE) addLegacy(word, stemByEndings(word));
 
 /** Строка целиком в усечённом виде — то, что лежит в полнотекстовом индексе. */
 function stemName(rawOrNormalized) {
