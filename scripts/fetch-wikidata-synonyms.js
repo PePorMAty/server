@@ -265,25 +265,33 @@ async function idsByTitles(titles) {
 
   // Википедия отвечает про КОНЕЧНЫЕ заголовки, а спрашивали мы про исходные:
   // по дороге их могли нормализовать и провести через перенаправление.
-  // Разматываем цепочку обратно, иначе ответ не с чем сопоставить.
-  const backwards = new Map();
-  for (const step of [
-    ...(data?.query?.normalized ?? []),
-    ...(data?.query?.redirects ?? []),
-  ]) {
-    if (step?.from && step?.to) backwards.set(step.to, step.from);
+  // Идём от каждого спрошенного вперёд. Раньше цепочку разматывали от
+  // конечного заголовка назад — и из двух названий, ведущих на одну статью
+  // («Кумол» и «Кумен» → «Изопропилбензол»), статью получало только одно.
+  const forward = new Map();
+  for (const step of data?.query?.normalized ?? []) {
+    if (step?.from && step?.to) forward.set(step.from, { to: step.to, redirect: false });
   }
-  const original = (title) => {
-    let cur = title;
-    for (let i = 0; i < 5 && backwards.has(cur); i++) cur = backwards.get(cur);
-    return cur;
-  };
-
-  const out = new Map();
+  for (const step of data?.query?.redirects ?? []) {
+    if (step?.from && step?.to) forward.set(step.from, { to: step.to, redirect: true });
+  }
+  const qidOfPage = new Map();
   for (const page of data?.query?.pages ?? []) {
     const qid = page?.pageprops?.wikibase_item;
-    if (!qid || !page?.title) continue;
-    out.set(original(page.title), qid);
+    if (qid && page?.title) qidOfPage.set(page.title, qid);
+  }
+
+  const out = new Map();
+  for (const asked of titles) {
+    let cur = asked;
+    let redirect = false;
+    for (let i = 0; i < 5 && forward.has(cur); i++) {
+      const step = forward.get(cur);
+      if (step.redirect) redirect = true;
+      cur = step.to;
+    }
+    const qid = qidOfPage.get(cur);
+    if (qid) out.set(asked, { qid, title: cur, redirect });
   }
   return out;
 }
@@ -406,8 +414,13 @@ function reportNoCas({ noCasOf, casFor, cap }) {
   for (const canon of substances) {
     const byCas = new Map();
     for (const h of casFor.get(canon) ?? []) {
-      if (!byCas.has(h.cas)) byCas.set(h.cas, { ...h, asked: new Set() });
-      byCas.get(h.cas).asked.add(h.asked);
+      if (!byCas.has(h.cas)) {
+        byCas.set(h.cas, { ...h, asked: new Set(), redirects: new Set(), exact: false });
+      }
+      const o = byCas.get(h.cas);
+      o.asked.add(h.asked);
+      if (h.redirect) o.redirects.add(`«${h.asked}» → «${h.redirect}»`);
+      else o.exact = true;
     }
     if (!byCas.size) continue;
     (byCas.size === 1 ? found : clashes).push({ canon, options: [...byCas.values()] });
@@ -422,7 +435,13 @@ function reportNoCas({ noCasOf, casFor, cap }) {
     const via = [...o.asked].filter((a) => key(a) !== key(canon));
     const notes = [
       key(o.label) !== key(canon) ? `в Wikidata — «${o.label}»` : null,
-      via.length ? `по написанию «${via.join("», «")}»` : null,
+      // Только по перенаправлению — проверять особенно: оно бывает и на
+      // статью шире вещества («Жидкое стекло» → «Силикаты натрия»).
+      !o.exact && o.redirects.size
+        ? `только по перенаправлению Википедии: ${[...o.redirects].join(", ")}`
+        : via.length
+          ? `по написанию «${via.join("», «")}»`
+          : null,
       owner.has(o.cas) ? `!!! этот номер уже у «${owner.get(o.cas)}»` : null,
     ].filter(Boolean);
     console.log(
@@ -555,6 +574,8 @@ async function main() {
   console.log(`Сперва пачками через Википедию: ${queue.length} запрос(ов).`);
 
   let byTitle = new Map();
+  /** Спрошенное название → статья, на которую Википедия его перенаправила. */
+  const redirectTo = new Map();
   let asked = 0;
   let batchNo = 0;
   while (queue.length) {
@@ -562,7 +583,10 @@ async function main() {
     batchNo += 1;
     try {
       const got = await idsByTitles(chunk);
-      for (const [title, qid] of got) byTitle.set(title, qid);
+      for (const [title, hit] of got) {
+        byTitle.set(title, hit.qid);
+        if (hit.redirect) redirectTo.set(title, hit.title);
+      }
       inARow = 0;
     } catch (e) {
       // Бюджет длины прикинут на глаз. Если адрес всё же вышел длинным, пачку
@@ -663,7 +687,16 @@ async function main() {
     const canon = noCasOf.get(name);
     if (canon) {
       if (!casFor.has(canon)) casFor.set(canon, []);
-      for (const h of hits) casFor.get(canon).push({ ...h, asked: name });
+      let found = hits.map((h) => ({ ...h, asked: name }));
+      // Буква в букву не совпало, но Википедия ведёт это название на статью о
+      // веществе с номером: «Гексафторпропилен» → «Гексафторпропен». Такое
+      // перенаправление заводит человек, и для печати на проверку его
+      // довольно. В файл синонимов так не пишем — там нужно точное имя.
+      if (!found.length && redirectTo.has(name)) {
+        const item = info.get(byTitle.get(name));
+        if (item?.cas) found = [{ ...item, asked: name, redirect: redirectTo.get(name) }];
+      }
+      casFor.get(canon).push(...found);
       continue;
     }
 
@@ -808,8 +841,9 @@ async function main() {
   // файл при этом переписывался ими одними, и всё собранное прежде пропадало
   // молча — теперь старые строки остаются как были, новые дописываются.
   // Совпадение — по коду элемента Wikidata: одно вещество — одна строка.
-  // Опрос одного графа — тот же случай: он знает не обо всём.
-  if (missingOnly || onlyGraph) {
+  // Опрос одного графа или списка --names — тот же случай: он знает не обо
+  // всём, и перезапись файла его находками стёрла бы остальное.
+  if (missingOnly || onlyGraph || namesArg >= 0) {
     const kept = readEntryLines();
     const have = new Set(kept.map(qidOf).filter(Boolean));
     const added = lines.filter((l) => !have.has(qidOf(l)));
