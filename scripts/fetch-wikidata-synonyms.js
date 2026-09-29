@@ -23,7 +23,7 @@
 // он отваливается по таймауту (проверено). Да и незачем: нужны названия,
 // которые реально стоят на графах.
 //
-// Как спрашиваем. Сперва пачками по полусотне через русскую Википедию: она
+// Как спрашиваем. Сперва пачками до полусотни через русскую Википедию: она
 // отдаёт коды элементов и сама разворачивает перенаправления, так что шестьсот
 // названий укладываются в дюжину запросов. Остаток — поиском по Wikidata, по
 // одному. Такой порядок взят не для красоты: поиск по одному упирался в
@@ -72,6 +72,15 @@ const CANDIDATES = 5;
 const BATCH = 40;
 /** По скольку названий спрашиваем у Википедии (предел тот же). */
 const TITLE_BATCH = 50;
+/**
+ * Сколько знаков может занять список заголовков в адресе запроса.
+ *
+ * Полсотни — предел API по счёту, но не по длине. Русская буква в адресе
+ * занимает шесть знаков («%D0%B1»), и полсотни длинных названий выходят за
+ * восемь тысяч — Википедия отвечает на такое «414 URI Too Long». Так в прогоне
+ * 2026-09-29 пропали две пачки из восьми. Поэтому пачку набираем и по длине.
+ */
+const TITLE_URL_BUDGET = 6000;
 
 /** Ключ сравнения — тот же, что у справочника. */
 const key = (s) => foldLookalikes(normalizeName(s));
@@ -205,7 +214,9 @@ async function request(endpoint, params) {
     }
 
     if (!res.ok) {
-      throw new Error(`ответ ${res.status} ${res.statusText}`);
+      const err = new Error(`ответ ${res.status} ${res.statusText}`);
+      err.status = res.status; // по нему пачка заголовков узнаёт, что адрес длинен
+      throw err;
     }
 
     const data = await res.json();
@@ -268,6 +279,30 @@ async function idsByTitles(titles) {
     out.set(original(page.title), qid);
   }
   return out;
+}
+
+/**
+ * Разложить названия по пачкам: не больше TITLE_BATCH и не длиннее бюджета.
+ *
+ * Длину считаем с запасом: пробел encodeURIComponent пишет тремя знаками, а в
+ * адрес он уходит одним «+».
+ */
+function titleBatches(names) {
+  const batches = [];
+  let cur = [];
+  let size = 0;
+  for (const name of names) {
+    const cost = encodeURIComponent(name).length + 3; // «%7C» — разделитель
+    if (cur.length && (cur.length >= TITLE_BATCH || size + cost > TITLE_URL_BUDGET)) {
+      batches.push(cur);
+      cur = [];
+      size = 0;
+    }
+    cur.push(name);
+    size += cost;
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
 }
 
 /** Кандидаты по русскому названию. */
@@ -407,21 +442,33 @@ async function main() {
 
   // ── 1) быстрый проход: коды элементов пачками через Википедию ──
   // Он и есть лекарство от 429: шестьсот запросов превращаются в дюжину.
-  const batches = Math.ceil(names.length / TITLE_BATCH);
-  console.log(`Сперва пачками через Википедию: ${batches} запрос(ов).`);
+  const queue = titleBatches(names);
+  console.log(`Сперва пачками через Википедию: ${queue.length} запрос(ов).`);
 
   let byTitle = new Map();
-  for (let i = 0; i < names.length; i += TITLE_BATCH) {
-    const chunk = names.slice(i, i + TITLE_BATCH);
+  let asked = 0;
+  let batchNo = 0;
+  while (queue.length) {
+    const chunk = queue.shift();
+    batchNo += 1;
     try {
       const got = await idsByTitles(chunk);
       for (const [title, qid] of got) byTitle.set(title, qid);
       inARow = 0;
     } catch (e) {
-      if (note(`пачка заголовков ${i / TITLE_BATCH + 1}`, e)) break;
+      // Бюджет длины прикинут на глаз. Если адрес всё же вышел длинным, пачку
+      // делим пополам и спрашиваем снова, а не теряем её целиком.
+      if (e.status === 414 && chunk.length > 1) {
+        const half = Math.ceil(chunk.length / 2);
+        queue.unshift(chunk.slice(0, half), chunk.slice(half));
+        await sleep(delayMs);
+        continue;
+      }
+      if (note(`пачка заголовков ${batchNo}`, e)) break;
     }
+    asked += chunk.length;
     process.stdout.write(
-      `\rстатей разобрано: ${Math.min(i + TITLE_BATCH, names.length)} из ${names.length}, нашлось ${byTitle.size}   `,
+      `\rстатей разобрано: ${asked} из ${names.length}, нашлось ${byTitle.size}   `,
     );
     await sleep(delayMs);
   }
@@ -545,12 +592,35 @@ async function main() {
     }
   }
 
-  // Вещество с единственным написанием в справочнике бесполезно: одинаковые
-  // названия схлопываются и без него.
+  // Вещество с единственным написанием в файле синонимов бесполезно:
+  // одинаковые названия схлопываются и без него.
   const useful = [...entries.values()].filter((e) => e.spellings.length > 1);
+
+  // …но не бесполезно для карточки: Wikidata подтвердила, что это вещество, и
+  // дала номер CAS — единственный международный идентификатор, какой у нас
+  // бывает. В файл такие не пишем: строка из одного имени ничего не
+  // схлопывает, а при полном пересборе прицепила бы номер к записи, которую
+  // человек мог понимать иначе («Известь» — гашёная или негашёная?). Поэтому
+  // только показываем, и лишь те, кому справочник номера не даёт. Годные
+  // переносятся в synonyms.txt руками — строкой «Имя   # CAS …».
+  const casOnly = [];
+  for (const e of entries.values()) {
+    if (e.spellings.length !== 1) continue;
+    const known = identify(e.spellings[0]);
+    if (known?.cas === e.cas) continue; // справочник этот номер уже знает
+    casOnly.push({
+      ...e,
+      note: !known
+        ? ""
+        : known.cas
+          ? `   ← в справочнике «${known.canon}» с ДРУГИМ номером ${known.cas}`
+          : `   ← в справочнике «${known.canon}», без номера`,
+    });
+  }
 
   console.log(`Опознано веществ:        ${entries.size}`);
   console.log(`Из них с разнописанием:  ${useful.length}  ← только они идут в файл`);
+  console.log(`С одним именем и CAS:    ${casOnly.length}  ← только показываем`);
   console.log(`Названий без совпадения: ${unresolved.length}`);
   console.log(`Неоднозначных:           ${ambiguous.length}`);
   console.log(`Синонимов отсеяно:       ${dropped.length}`);
@@ -577,6 +647,19 @@ async function main() {
     console.log("\nНеоднозначные (под одним названием разные вещества, пропущены):");
     for (const a of ambiguous.slice(0, cap(15))) {
       console.log(`  ${a.name} → CAS ${a.cas.join(", ")}`);
+    }
+  }
+
+  if (casOnly.length) {
+    console.log(
+      "\nС номером CAS, но без второго имени (в файл не идут; годные можно" +
+        "\nвзять в reference/synonyms.txt — у продукта появится CAS в карточке):",
+    );
+    for (const e of casOnly.slice(0, cap(12))) {
+      console.log(`  ${e.spellings[0]}   # CAS ${e.cas} ${e.id}${e.note}`);
+    }
+    if (casOnly.length > cap(12)) {
+      console.log(`  … и ещё ${casOnly.length - 12} (все — ключ --all)`);
     }
   }
 
