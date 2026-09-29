@@ -30,9 +30,6 @@
 // Названия считаются по частоте: продукт, встречающийся на пяти графах,
 // важнее встретившегося однажды.
 
-const fs = require("fs");
-const path = require("path");
-
 const {
   identify,
   synonymsStatus,
@@ -56,7 +53,9 @@ const {
 
 const { nameKind, parenName } = require("./lib/name-kind");
 
-const GRAPHS_DIR = path.resolve(__dirname, "../data/saved-graphs");
+// Названия с графов читает общий модуль — тот же, что у сборщика синонимов:
+// аудит и сборщик обязаны видеть одни и те же названия.
+const { GRAPHS_DIR, collectProducts } = require("./lib/graph-products");
 
 /** Ступени лестницы поиска на человеческом языке — те же, что в query-gisp. */
 const MATCH_LABELS = {
@@ -66,52 +65,6 @@ const MATCH_LABELS = {
   partial: "часть слов",
   prefix: "по началу слова",
 };
-
-/** Сохранённый граф → список названий продуктов (с повторами внутри графа не считаем). */
-function productLabels(file) {
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return { name: path.basename(file), labels: [] };
-  }
-
-  // Формат сохранения менялся: узлы лежат то в graph.nodes, то в корне.
-  const nodes = parsed?.graph?.nodes ?? parsed?.nodes ?? [];
-  const name =
-    parsed?.meta?.name ?? parsed?.name ?? parsed?.prompt ?? path.basename(file);
-
-  const seen = new Set();
-  const labels = [];
-  for (const n of nodes) {
-    if (n?.type !== "product") continue;
-    const label = String(n?.data?.label ?? "").trim();
-    if (!label || seen.has(label)) continue;
-    seen.add(label);
-    labels.push(label);
-  }
-  return { name, labels };
-}
-
-function collect(onlyGraph) {
-  if (!fs.existsSync(GRAPHS_DIR)) return { graphs: [], counts: new Map() };
-
-  const graphs = [];
-  // Название → на скольких графах встретилось.
-  const counts = new Map();
-
-  for (const entry of fs.readdirSync(GRAPHS_DIR)) {
-    if (!entry.endsWith(".json")) continue;
-    if (onlyGraph && !entry.includes(onlyGraph)) continue;
-    const { name, labels } = productLabels(path.join(GRAPHS_DIR, entry));
-    if (!labels.length) continue;
-    graphs.push({ file: entry, name, count: labels.length });
-    for (const label of labels) {
-      counts.set(label, (counts.get(label) ?? 0) + 1);
-    }
-  }
-  return { graphs, counts };
-}
 
 /**
  * Значимые основы названия: коротышки и цифры в сравнении только мешают.
@@ -294,13 +247,19 @@ function main() {
       : `Реестр не подключён: ${reg.reason}`,
   );
 
-  const { graphs, counts } = collect(onlyGraph);
+  const { graphs, counts } = collectProducts(onlyGraph);
   if (!graphs.length) {
     console.log(`\nГрафов с продуктами не нашлось в ${GRAPHS_DIR}`);
     return;
   }
 
   console.log(`\nГрафов: ${graphs.length}, различных названий продуктов: ${counts.size}\n`);
+  // Отбор по графу — назовём, какие именно подошли: «ТИТАН» мог найтись в
+  // названиях нескольких графов.
+  if (onlyGraph) {
+    for (const g of graphs) console.log(`  граф «${g.name}» (${g.file}), продуктов: ${g.count}`);
+    console.log("");
+  }
 
   const rows = [];
   for (const [label, freq] of counts) {

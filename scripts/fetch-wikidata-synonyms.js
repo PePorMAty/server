@@ -7,6 +7,11 @@
 //   node scripts/fetch-wikidata-synonyms.js --missing-only  — только незнакомые справочнику;
 //                                                             найденное ДОПИСЫВАЕТСЯ к файлу
 //   node scripts/fetch-wikidata-synonyms.js --all           — показать все записи, а не первые
+//   node scripts/fetch-wikidata-synonyms.js --graph ТИТАН   — только названия с этого графа
+//                                                             (по имени файла или названию)
+//   node scripts/fetch-wikidata-synonyms.js --no-cas        — спросить про вещества справочника
+//                                                             без номера CAS; только печатает,
+//                                                             номера вносятся руками после проверки
 //   node scripts/fetch-wikidata-synonyms.js --names "Бензол,Кумол"
 //   node scripts/fetch-wikidata-synonyms.js --limit 50      — оборвать после N названий
 //   node scripts/fetch-wikidata-synonyms.js --fast          — только пачками, без поиска по одному
@@ -40,7 +45,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { collectProducts } = require("./lib/graph-products");
-const { identify } = require("../routes/industry/utils/synonyms");
+const { identify, allEntries } = require("../routes/industry/utils/synonyms");
 const {
   foldLookalikes,
   normalizeName,
@@ -379,6 +384,69 @@ function qidOf(line) {
   return /\b(Q\d+)\s*$/.exec(line)?.[1] ?? null;
 }
 
+/**
+ * Номера CAS для веществ справочника, у которых номера нет (--no-cas).
+ *
+ * Решаем по веществу, а не по написанию: у «Сульфата меди» спрошены и он
+ * сам, и «Медный купорос», и если они привели к РАЗНЫМ номерам (безводная
+ * соль и пентагидрат), выбирать за человека нельзя — показываем оба.
+ *
+ * Файлы не трогаем. Номер ложится в строку synonyms.txt, а за каждую строку
+ * того файла отвечает человек: номер без его взгляда туда попасть не должен.
+ */
+function reportNoCas({ noCasOf, casFor, cap }) {
+  // Номер, который уже стоит у ДРУГОГО вещества справочника, — либо дубль
+  // записи, либо чужое совпадение. И то и другое надо видеть.
+  const owner = new Map();
+  for (const e of allEntries()) if (e.cas) owner.set(e.cas, e.canon);
+
+  const substances = [...new Set(noCasOf.values())];
+  const found = [];
+  const clashes = [];
+  for (const canon of substances) {
+    const byCas = new Map();
+    for (const h of casFor.get(canon) ?? []) {
+      if (!byCas.has(h.cas)) byCas.set(h.cas, { ...h, asked: new Set() });
+      byCas.get(h.cas).asked.add(h.asked);
+    }
+    if (!byCas.size) continue;
+    (byCas.size === 1 ? found : clashes).push({ canon, options: [...byCas.values()] });
+  }
+  const silent = substances.filter((c) => !found.some((f) => f.canon === c) && !clashes.some((f) => f.canon === c));
+
+  console.log(
+    `\n── Номера CAS для веществ справочника: нашлось у ${found.length} из ${substances.length} ──` +
+      "\n  Файлы не трогаются: годные номера вносятся в reference/synonyms.txt после проверки.",
+  );
+  for (const { canon, options: [o] } of found) {
+    const via = [...o.asked].filter((a) => key(a) !== key(canon));
+    const notes = [
+      key(o.label) !== key(canon) ? `в Wikidata — «${o.label}»` : null,
+      via.length ? `по написанию «${via.join("», «")}»` : null,
+      owner.has(o.cas) ? `!!! этот номер уже у «${owner.get(o.cas)}»` : null,
+    ].filter(Boolean);
+    console.log(
+      `  ${canon}   # CAS ${o.cas} (Wikidata ${o.id})${notes.length ? `   ← ${notes.join("; ")}` : ""}`,
+    );
+  }
+  if (clashes.length) {
+    console.log("\nРазные номера под написаниями одного вещества (не берём, смотреть глазами):");
+    for (const { canon, options } of clashes) {
+      const list = options
+        .map((o) => `${o.cas} (${o.id}, «${o.label}») по «${[...o.asked].join("», «")}»`)
+        .join("; ");
+      console.log(`  ${canon}: ${list}`);
+    }
+  }
+  if (silent.length) {
+    console.log(`\nНе нашлось (${silent.length}) — смеси, марки, классы или нет в Wikidata:`);
+    const shown = silent.slice(0, cap(30));
+    console.log(
+      `  ${shown.join(", ")}${shown.length < silent.length ? ` … и ещё ${silent.length - shown.length} (все — ключ --all)` : ""}`,
+    );
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
@@ -394,6 +462,27 @@ async function main() {
   const namesArg = args.indexOf("--names");
   const limitArg = args.indexOf("--limit");
   const limit = limitArg >= 0 ? Number(args[limitArg + 1]) : Infinity;
+  // Только один граф — например, новый. Остальные уже опрошены, и спрашивать
+  // про них заново — лишние минуты под ограничением частоты.
+  const graphArg = args.indexOf("--graph");
+  const onlyGraph = graphArg >= 0 ? args[graphArg + 1] : null;
+  // Вещества справочника без номера CAS. Их больше сотни, и часть — обычные
+  // вещества (оксид цинка, хладоны), которым номер записать просто не успели.
+  const noCas = args.includes("--no-cas");
+
+  /** Написание вещества справочника без номера → его канон. */
+  const noCasOf = new Map();
+  if (noCas) {
+    for (const e of allEntries()) {
+      if (e.cas) continue;
+      for (const s of e.spellings) {
+        // Со звёздочкой — сокращение, двусмысленное вне узла («*ТЭН» —
+        // и нагреватель); спрашивать Wikidata таким нельзя.
+        if (e.noSearch?.has(s)) continue;
+        noCasOf.set(s, e.canon);
+      }
+    }
+  }
 
   let names;
   if (namesArg >= 0) {
@@ -401,9 +490,16 @@ async function main() {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+  } else if (noCas && !missingOnly && !onlyGraph) {
+    // Только справочник: названия графов не спрашиваем, файл не пишем.
+    names = [];
   } else {
-    const { counts, graphs } = collectProducts();
+    const { counts, graphs } = collectProducts(onlyGraph);
     console.log(`Графов: ${graphs.length}, различных названий: ${counts.size}`);
+    if (onlyGraph) {
+      for (const g of graphs) console.log(`  граф «${g.name}» (${g.file})`);
+      if (!graphs.length) console.log(`  графа «${onlyGraph}» не нашлось`);
+    }
     names = [...counts.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([label]) => label);
@@ -415,6 +511,17 @@ async function main() {
   }
 
   names = names.filter(usableName).slice(0, limit);
+  /** Сколько спрошено названий с графов — без веществ справочника. */
+  const graphAsked = names.length;
+  if (noCas) {
+    const asked = new Set(names.map(key));
+    const extra = [...noCasOf.keys()].filter((s) => usableName(s) && !asked.has(key(s)));
+    console.log(
+      `Веществ справочника без номера CAS: ${new Set(noCasOf.values()).size}, ` +
+        `их написаний к опросу: ${extra.length}`,
+    );
+    names = [...names, ...extra];
+  }
   if (!names.length) {
     console.log("Спрашивать нечего.");
     return;
@@ -537,6 +644,8 @@ async function main() {
   const unresolved = [];
   // Что выброшено отсевом — показываем, чтобы он не работал молча.
   const dropped = [];
+  /** Канон вещества справочника без номера → что нашлось по его написаниям. */
+  const casFor = new Map();
 
   for (const [name, candidateIds] of candidatesByName) {
     const wanted = key(name);
@@ -547,6 +656,15 @@ async function main() {
       const spellings = [item.label, ...item.aliases].filter(usableName);
       if (!spellings.some((s) => key(s) === wanted)) continue; // похожее, но не то
       hits.push(item);
+    }
+
+    // Написание вещества, которое справочник уже знает, но без номера: копим
+    // находки по веществу, а решаем по всем его написаниям сразу — ниже.
+    const canon = noCasOf.get(name);
+    if (canon) {
+      if (!casFor.has(canon)) casFor.set(canon, []);
+      for (const h of hits) casFor.get(canon).push({ ...h, asked: name });
+      continue;
     }
 
     if (!hits.length) {
@@ -620,12 +738,14 @@ async function main() {
     });
   }
 
-  console.log(`Опознано веществ:        ${entries.size}`);
-  console.log(`Из них с разнописанием:  ${useful.length}  ← только они идут в файл`);
-  console.log(`С одним именем и CAS:    ${casOnly.length}  ← только показываем`);
-  console.log(`Названий без совпадения: ${unresolved.length}`);
-  console.log(`Неоднозначных:           ${ambiguous.length}`);
-  console.log(`Синонимов отсеяно:       ${dropped.length}`);
+  if (graphAsked) {
+    console.log(`Опознано веществ:        ${entries.size}`);
+    console.log(`Из них с разнописанием:  ${useful.length}  ← только они идут в файл`);
+    console.log(`С одним именем и CAS:    ${casOnly.length}  ← только показываем`);
+    console.log(`Названий без совпадения: ${unresolved.length}`);
+    console.log(`Неоднозначных:           ${ambiguous.length}`);
+    console.log(`Синонимов отсеяно:       ${dropped.length}`);
+  }
   if (failed) console.log(`Запросов не прошло:      ${failed}`);
 
   if (dropped.length) {
@@ -665,6 +785,8 @@ async function main() {
     }
   }
 
+  if (noCas) reportNoCas({ noCasOf, casFor, cap });
+
   if (!useful.length) {
     console.log("\nЗаписывать нечего.");
     return;
@@ -686,7 +808,8 @@ async function main() {
   // файл при этом переписывался ими одними, и всё собранное прежде пропадало
   // молча — теперь старые строки остаются как были, новые дописываются.
   // Совпадение — по коду элемента Wikidata: одно вещество — одна строка.
-  if (missingOnly) {
+  // Опрос одного графа — тот же случай: он знает не обо всём.
+  if (missingOnly || onlyGraph) {
     const kept = readEntryLines();
     const have = new Set(kept.map(qidOf).filter(Boolean));
     const added = lines.filter((l) => !have.has(qidOf(l)));

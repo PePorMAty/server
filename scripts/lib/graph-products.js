@@ -49,11 +49,20 @@ function collectProducts(onlyGraph = null) {
 
   const graphs = [];
   const counts = new Map();
+  // Граф ищем и по имени файла, и по названию, без учёта регистра: файл
+  // назван идентификатором, а человек знает граф как «ГК ТИТАН».
+  const wanted = onlyGraph ? String(onlyGraph).toLowerCase() : null;
 
   for (const entry of fs.readdirSync(GRAPHS_DIR)) {
     if (!entry.endsWith(".json")) continue;
-    if (onlyGraph && !entry.includes(onlyGraph)) continue;
     const { name, labels } = productLabels(path.join(GRAPHS_DIR, entry));
+    if (
+      wanted &&
+      !entry.toLowerCase().includes(wanted) &&
+      !String(name).toLowerCase().includes(wanted)
+    ) {
+      continue;
+    }
     if (!labels.length) continue;
     graphs.push({ file: entry, name, count: labels.length });
     for (const label of labels) {
