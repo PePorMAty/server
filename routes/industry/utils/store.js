@@ -1245,13 +1245,35 @@ const ISOMER_MARK =
  * Запрос, которого справочник не знает, не судим: неизвестно, какое из
  * веществ спрашивали.
  */
-function otherIsomer(name, queryStems, askedCanon) {
+function otherIsomer(name, queryStems, askedCanon, queryMarked = new Set()) {
   if (!askedCanon) return null;
-  for (const m of String(name ?? "").matchAll(ISOMER_MARK)) {
+  const text = String(name ?? "");
+  // Слова записи, у которых есть приставка, — для обратного случая ниже.
+  const markedInRow = new Set();
+  for (const m of text.matchAll(ISOMER_MARK)) {
     const word = m[2];
-    if (!queryStems.has(stemWord(normalizeName(word)))) continue;
+    const stem = stemWord(normalizeName(word));
+    markedInRow.add(stem);
+    if (!queryStems.has(stem)) continue;
     const isomer = identify(`${m[1]}-${word}`)?.canon;
     if (isomer && isomer !== askedCanon) return `${m[1]}-${word}`;
+  }
+
+  // Обратный случай: спросили изомер — «м-Ксилол», — а в записи то же слово
+  // без приставки: «Ксилол нефтяной». Снимок d26090d → 01dbd59: у мета- и
+  // пара-ксилола оставались записи смеси изомеров. Справочник знает голое
+  // слово ДРУГИМ веществом — значит, запись не про спрошенный изомер.
+  for (const stem of queryMarked) {
+    if (markedInRow.has(stem)) continue;
+    const bare = normalizeName(text)
+      .split(" ")
+      .find((w) => w && stemWord(w) === stem);
+    if (!bare) continue;
+    // Номер ПОСЛЕ слова — «Бутандиол-1,4» — та же приставка, только сзади.
+    const escaped = bare.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?<![а-яёa-z])${escaped}\\s*-\\s*\\d`, "i").test(text)) continue;
+    const other = identify(bare)?.canon;
+    if (other && other !== askedCanon) return bare;
   }
   return null;
 }
@@ -1546,6 +1568,11 @@ function keepBestOverlap(rows, rawName, required = null) {
   // Спрошенное вещество по справочнику — чтобы узнать запись про другой
   // изомер того же корня: «О-Ксилол» при запросе «Ксилол». См. otherIsomer.
   const askedCanon = identify(rawName)?.canon ?? null;
+  // Слова запроса с приставкой изомера: «м-Ксилол» спрашивает изомер.
+  const queryMarked = new Set();
+  for (const m of String(rawName ?? "").matchAll(ISOMER_MARK)) {
+    queryMarked.add(stemWord(normalizeName(m[2])));
+  }
 
   let best = 0;
   const scored = rows.map((row) => {
@@ -1659,7 +1686,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       // Препаративная форма пестицида: «Сера 400, КС (фунгицид)».
       pesticideForm: isPesticideForm(row.name || ""),
       // Изомер, который справочник знает отдельным веществом.
-      otherIsomer: otherIsomer(row.name || "", queryStems, askedCanon),
+      otherIsomer: otherIsomer(row.name || "", queryStems, askedCanon, queryMarked),
     };
   });
 
