@@ -243,6 +243,42 @@ const FLEETING_VOWEL = new Map([
   ["свинец", "свинц"],
 ]);
 
+/**
+ * Старые названия классов солей и окислов — те же слова, что новые:
+ * «Натрий хлористый» — это хлорид натрия, «Кальций углекислый» — карбонат
+ * кальция, «Окись цинка» — оксид цинка.
+ *
+ * В реестре старые названия сплошь и рядом, а на графах пишут новые. Пока
+ * это были разные слова, «Хлорид натрия» не находил «Натрий хлористый
+ * пищевой», а запись «Кальций углекислый (карбонат кальция)» отсекалась
+ * вовсе: «углекислый» стоял рядом с кальцием и считался названием ДРУГОГО
+ * соединения. Сводим по основе — старая основа → новая.
+ *
+ * «Сернистый» сюда не входит: это и сульфид («натрий сернистый»), и
+ * соединения четырёхвалентной серы («сернистый газ», «сернистая кислота»).
+ * «Закись» — тоже: закись азота и оксид азота — разные вещества.
+ */
+const CLASS_STEMS = new Map([
+  ["хлорист", "хлорид"],
+  ["фторист", "фторид"],
+  ["бромист", "бромид"],
+  ["йодист", "иодид"],
+  ["иодист", "иодид"],
+  ["йодид", "иодид"],
+  ["углекисл", "карбонат"],
+  ["сернокисл", "сульфат"],
+  ["азотнокисл", "нитрат"],
+  ["фосфорнокисл", "фосфат"],
+  ["кремнекисл", "силикат"],
+  ["уксуснокисл", "ацетат"],
+  ["хромовокисл", "хромат"],
+  ["марганцовокисл", "перманганат"],
+  ["окис", "оксид"],
+  ["двуокис", "диоксид"],
+  ["гидроокис", "гидроксид"],
+  ["перекис", "пероксид"],
+]);
+
 /** Усечение по общему правилу — без особых слов выше. */
 function stemByEndings(word) {
   for (const end of ENDINGS) {
@@ -263,27 +299,32 @@ function stemByEndings(word) {
  */
 function stemWord(word) {
   if (ELEMENT_NOUNS.has(word)) return word.slice(0, -1);
-  return FLEETING_VOWEL.get(word) ?? stemByEndings(word);
+  const stem = FLEETING_VOWEL.get(word) ?? stemByEndings(word);
+  return CLASS_STEMS.get(stem) ?? stem;
 }
 
 /**
- * Основы, которые у тех же слов лежат в индексе, собранном ДО правки выше.
+ * Основы, которые у тех же слов лежат в индексе, собранном ДО правок выше.
  *
  * Индекс реестра хранит уже усечённые слова, и собран он прежним правилом:
- * в нём «натрий» лежит как «натр». Перестраивать его ради десятка слов значит
- * заставить пересобрать базу на сервере, и, главное, сломать сравнение
- * снимков: старый код читает тот же индекс. Поэтому индекс остаётся как был,
- * а запрос к нему спрашивает обе основы — новую и прежнюю. Решает всё равно
- * не индекс, а сверка записи с запросом, и она идёт новым усечением.
+ * в нём «натрий» лежит как «натр», а «хлористый» — как «хлорист».
+ * Перестраивать его ради пары десятков слов значит заставить пересобрать базу
+ * на сервере, и, главное, сломать сравнение снимков: старый код читает тот же
+ * индекс. Поэтому индекс остаётся как был, а запрос к нему спрашивает все
+ * основы — новую и прежние. Решает всё равно не индекс, а сверка записи с
+ * запросом, и она идёт новым усечением.
  *
- * Новая основа → прежняя основа именительного падежа.
+ * Новая основа → прежние основы.
  */
 const LEGACY_STEMS = new Map();
-for (const word of ELEMENT_NOUNS) {
-  const legacy = stemByEndings(word);
-  if (legacy !== stemWord(word)) LEGACY_STEMS.set(stemWord(word), legacy);
-}
-for (const [word, stem] of FLEETING_VOWEL) LEGACY_STEMS.set(stem, word);
+const addLegacy = (stem, legacy) => {
+  if (legacy === stem) return;
+  if (!LEGACY_STEMS.has(stem)) LEGACY_STEMS.set(stem, []);
+  if (!LEGACY_STEMS.get(stem).includes(legacy)) LEGACY_STEMS.get(stem).push(legacy);
+};
+for (const word of ELEMENT_NOUNS) addLegacy(stemWord(word), stemByEndings(word));
+for (const [word, stem] of FLEETING_VOWEL) addLegacy(stem, word);
+for (const [legacy, stem] of CLASS_STEMS) addLegacy(stem, legacy);
 
 /** Строка целиком в усечённом виде — то, что лежит в полнотекстовом индексе. */
 function stemName(rawOrNormalized) {
@@ -315,15 +356,15 @@ function ftsQuote(word) {
  */
 function ftsTerm(word) {
   const legacy = LEGACY_STEMS.get(word);
-  return legacy ? `(${ftsQuote(word)} OR ${ftsQuote(legacy)})` : ftsQuote(word);
+  if (!legacy) return ftsQuote(word);
+  return `(${[word, ...legacy].map(ftsQuote).join(" OR ")})`;
 }
 
 /** То же для поиска по началу слова. */
 function ftsPrefix(word) {
   const legacy = LEGACY_STEMS.get(word);
-  return legacy
-    ? `(${ftsQuote(word)}* OR ${ftsQuote(legacy)}*)`
-    : `${ftsQuote(word)}*`;
+  if (!legacy) return `${ftsQuote(word)}*`;
+  return `(${[word, ...legacy].map((w) => `${ftsQuote(w)}*`).join(" OR ")})`;
 }
 
 /**

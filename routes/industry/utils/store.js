@@ -527,8 +527,12 @@ function lookupProduct(rawName, opts) {
   // у изопропанола — антибактериальное средство. Глифосат через «ТОРНАДО»
   // остаётся: самого глифосата в реестре нет, и препарат — всё, что есть.
   const pharmaQuery = isPharmaQuery([rawName, ...spellings]);
+  // Спрашивают о самом растворе — «AdBlue», «Раствор мочевины AUS 32»: тогда
+  // такие записи и есть ответ, а не второй сорт.
+  const ureaQuery = [rawName, ...spellings].some((sp) => isUreaSolution(words(stemName(sp))));
   const secondaryWhy = kept.map((row, i) => {
     if (!verdicts[i].ok) return null;
+    if (verdicts[i].ureaSolution && ureaQuery) return null;
     if (verdicts[i].formulation) return "препарат, а вещество нашлось и само";
     if (!pharmaQuery && picked.coverage?.[i]?.medicine) {
       return "лекарство, а вещество нашлось и само";
@@ -551,9 +555,14 @@ function lookupProduct(rawName, opts) {
   // Помечаем отдельно, когда вещество нашлось ТОЛЬКО в составе препарата:
   // ОКПД2 у такой записи пестицидный, а не глифосатный, и в карточке это
   // должно быть видно.
+  // Препарат — по дозировке в скобке или по решению отбора: мочевинный
+  // раствор для дизелей скобки с дозировкой не имеет, а препаратом считается.
   const onlyFormulation =
     confirmed.length > 0 &&
-    confirmed.every((row, i) => picked.coverage?.[kept.indexOf(row)]?.parens === "formulation");
+    confirmed.every((row) => {
+      const i = kept.indexOf(row);
+      return picked.coverage?.[i]?.parens === "formulation" || finalVerdicts[i]?.formulation;
+    });
 
   let result;
   if (!kept.length) {
@@ -845,6 +854,18 @@ function confirms(c) {
  * считаются в одном месте, чтобы объяснение не разошлось с отбором.
  */
 function verdict(c) {
+  const v = baseVerdict(c);
+  // Мочевинный раствор для дизелей («Мочевина восстановитель оксидов азота
+  // AUS 32», «Мочевина UNIX AdBlue SCR») — не карбамид, а товар из него.
+  // Решение заказчика (сентябрь 2026): считать как препарат — только если
+  // самого карбамида в реестре нет.
+  if (v.ok && c?.ureaSolution && !v.formulation) {
+    return { ...v, formulation: true, ureaSolution: true };
+  }
+  return v;
+}
+
+function baseVerdict(c) {
   if (!c) return { ok: false, why: "нет разбора" };
   // Индекс нашёл запись по слову, которого сверка в ней не признаёт: «40» не
   // при своём слове, половина сложного прилагательного. Сильнее всех
@@ -1002,6 +1023,13 @@ const COMPOUND_CLASS = new Set(
     // Прилагательные того же смысла: «водород фтористый», «газ сернистый».
     "фтористый", "хлористый", "бромистый", "йодистый", "сернистый",
     "азотистый", "углекислый", "фосфористый", "кремнистый",
+    // Старые названия солей: усечение сводит их к новым («сернокислый» →
+    // «сульфат», см. CLASS_STEMS), здесь — чтобы список читался целиком.
+    "сернокислый", "азотнокислый", "фосфорнокислый", "кремнекислый",
+    "уксуснокислый",
+    // Кислая соль: «Натрий углекислый кислый» — это пищевая сода, а не
+    // карбонат натрия. Рядом с совпавшим словом «кислый» меняет вещество.
+    "кислый",
   ].map(stemWord),
 );
 
@@ -1099,6 +1127,20 @@ const hasMedicineWord = (stems) =>
  */
 function isMedicine(rowList) {
   return hasMedicineWord(rowList);
+}
+
+/**
+ * Мочевинный раствор для дизелей: «AUS 32» — его имя по ISO 22241, «AdBlue» —
+ * торговая марка. Признаки узкие нарочно: «Карбамид для DEF» — это сам
+ * карбамид, сырьё для такого раствора, и отнимать его нельзя.
+ */
+function isUreaSolution(rowList) {
+  for (let i = 0; i < rowList.length; i++) {
+    const w = rowList[i];
+    if (w === "adblue" || /^aus\d+$/.test(w)) return true;
+    if (w === "aus" && /^\d+$/.test(rowList[i + 1] ?? "")) return true;
+  }
+  return false;
 }
 
 /**
@@ -1470,6 +1512,8 @@ function keepBestOverlap(rows, rawName, required = null) {
       madeOf: madeOfSubstance(row.name || "", queryStems),
       // Лекарство или медизделие — свидетельство второго сорта, см. lookupProduct.
       medicine: isMedicine(rowList),
+      // Мочевинный раствор для дизелей — тоже второго сорта, как препарат.
+      ureaSolution: isUreaSolution(rowList),
     };
   });
 
@@ -1505,6 +1549,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       productBefore: s.productBefore,
       madeOf: s.madeOf,
       medicine: s.medicine,
+      ureaSolution: s.ureaSolution,
     })),
   };
 }
