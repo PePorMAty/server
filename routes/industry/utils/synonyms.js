@@ -570,6 +570,12 @@ function identifyParenthesized(map, rawName) {
   if (head && (isDesignation(innerText) || allGeneric(innerText))) return head;
 
   const inner = lookupHalf(map, innerText);
+  // То же наоборот: обозначение впереди, название в скобке — «BR (бутадиеновый
+  // каучук)», «PET (полиэтилентерефталат)». Обозначение пересказывает
+  // название, как формула в «Хлор (Cl2)», и судить надо по скобке. Поймано
+  // аудитом: «BR (бутадиеновый каучук)» стоял на трёх графах неопознанным,
+  // хотя бутадиеновый каучук справочник знает.
+  if (!head && inner && isDesignation(text.slice(0, open))) return inner;
   if (!head || !inner) return null;
   return head.canon === inner.canon ? head : null;
 }

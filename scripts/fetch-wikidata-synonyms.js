@@ -4,7 +4,9 @@
 //
 //   node scripts/fetch-wikidata-synonyms.js --dry-run       — посмотреть, что выйдет
 //   node scripts/fetch-wikidata-synonyms.js                 — записать файл
-//   node scripts/fetch-wikidata-synonyms.js --missing-only  — только незнакомые справочнику
+//   node scripts/fetch-wikidata-synonyms.js --missing-only  — только незнакомые справочнику;
+//                                                             найденное ДОПИСЫВАЕТСЯ к файлу
+//   node scripts/fetch-wikidata-synonyms.js --all           — показать все записи, а не первые
 //   node scripts/fetch-wikidata-synonyms.js --names "Бензол,Кумол"
 //   node scripts/fetch-wikidata-synonyms.js --limit 50      — оборвать после N названий
 //   node scripts/fetch-wikidata-synonyms.js --fast          — только пачками, без поиска по одному
@@ -322,10 +324,32 @@ function asCanon(name) {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
+/** Строки записей уже собранного файла — без шапки и пустых. */
+function readEntryLines() {
+  let text;
+  try {
+    text = fs.readFileSync(OUT, "utf8");
+  } catch {
+    return [];
+  }
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !line.trimStart().startsWith("#"));
+}
+
+/** Код элемента Wikidata в хвосте строки: «… # CAS 71-43-2 Q2270». */
+function qidOf(line) {
+  return /\b(Q\d+)\s*$/.exec(line)?.[1] ?? null;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
   const missingOnly = args.includes("--missing-only");
+  // Весь список, а не образцы: по нему проверяют, прежде чем брать в
+  // справочник, — а проверять по двенадцати первым значит не проверять.
+  const showAll = args.includes("--all");
+  const cap = (n) => (showAll ? Infinity : n);
   // Поиск по одному стоит дорого и даёт мало: на шестидесяти названиях
   // Википедия дала 22 кода, а 38 медленных запросов добавили пять кандидатов.
   // Кому нужна скорость, а не последние проценты, — этот флаг.
@@ -544,14 +568,14 @@ async function main() {
     console.log("\nОтсеяно из синонимов:");
     for (const [why, list] of byReason) {
       console.log(`  ${why}: ${list.length}`);
-      for (const n of list.slice(0, 12)) console.log(`      ${n}`);
-      if (list.length > 12) console.log(`      … и ещё ${list.length - 12}`);
+      for (const n of list.slice(0, cap(12))) console.log(`      ${n}`);
+      if (list.length > cap(12)) console.log(`      … и ещё ${list.length - 12}`);
     }
   }
 
   if (ambiguous.length) {
     console.log("\nНеоднозначные (под одним названием разные вещества, пропущены):");
-    for (const a of ambiguous.slice(0, 15)) {
+    for (const a of ambiguous.slice(0, cap(15))) {
       console.log(`  ${a.name} → CAS ${a.cas.join(", ")}`);
     }
   }
@@ -561,14 +585,28 @@ async function main() {
     return;
   }
 
-  console.log("\nПервые записи:");
-  for (const e of useful.slice(0, 12)) {
+  console.log(showAll ? "\nЗаписи:" : "\nПервые записи (все — ключ --all):");
+  for (const e of useful.slice(0, cap(12))) {
     console.log(`  ${e.spellings.join(" | ")}   # CAS ${e.cas} ${e.id}`);
   }
 
   if (dryRun) {
     console.log(`\n--dry-run: файл не тронут. Уберите флаг, чтобы записать\n  ${OUT}`);
     return;
+  }
+
+  const lines = useful.map((e) => `${e.spellings.join(" | ")}   # CAS ${e.cas} ${e.id}`);
+
+  // Опрос только незнакомых названий знает лишь о новых веществах. Раньше
+  // файл при этом переписывался ими одними, и всё собранное прежде пропадало
+  // молча — теперь старые строки остаются как были, новые дописываются.
+  // Совпадение — по коду элемента Wikidata: одно вещество — одна строка.
+  if (missingOnly) {
+    const kept = readEntryLines();
+    const have = new Set(kept.map(qidOf).filter(Boolean));
+    const added = lines.filter((l) => !have.has(qidOf(l)));
+    lines.splice(0, lines.length, ...kept, ...added);
+    console.log(`\nБыло записей: ${kept.length}, дописано новых: ${added.length}.`);
   }
 
   const head = [
@@ -581,15 +619,11 @@ async function main() {
     "# В хвосте строки — номер CAS и код элемента Wikidata. По коду запись",
     "# открывается и проверяется: https://www.wikidata.org/wiki/Q…",
     "#",
-    `# Собрано: ${new Date().toISOString().slice(0, 10)}, веществ: ${useful.length}`,
+    `# Собрано: ${new Date().toISOString().slice(0, 10)}, веществ: ${lines.length}`,
     "",
   ].join("\n");
 
-  const body = useful
-    .map((e) => `${e.spellings.join(" | ")}   # CAS ${e.cas} ${e.id}`)
-    .join("\n");
-
-  fs.writeFileSync(OUT, `${head}${body}\n`, "utf8");
+  fs.writeFileSync(OUT, `${head}${lines.join("\n")}\n`, "utf8");
   console.log(`\nЗаписано: ${OUT}`);
   console.log("Проверьте, что вышло:  node scripts/audit-products.js");
 }
