@@ -530,8 +530,11 @@ function lookupProduct(rawName, opts) {
   // Спрашивают о самом растворе — «AdBlue», «Раствор мочевины AUS 32»: тогда
   // такие записи и есть ответ, а не второй сорт.
   const ureaQuery = [rawName, ...spellings].some((sp) => isUreaSolution(words(stemName(sp))));
-  // То же для препарата пестицида: узел «Сера 400, КС» спрашивает о нём самом.
-  const formQuery = [rawName, ...spellings].some((sp) => isPesticideForm(sp));
+  // То же для препарата пестицида: узел «Сера 400, КС» спрашивает о нём самом,
+  // а «Средства защиты растений» — о препаратах вообще.
+  const formQuery = [rawName, ...spellings].some(
+    (sp) => isPesticideForm(sp) || namesPesticideClass(sp),
+  );
   /** Препарат в ответ на вопрос о препарате — это и есть ответ. */
   const answersQuery = (v) =>
     Boolean((v.ureaSolution && ureaQuery) || (v.pesticideForm && formQuery));
@@ -1205,6 +1208,32 @@ const PESTICIDE_WORD_RE =
 function isPesticideForm(name) {
   const text = String(name ?? "");
   return FORM_CODE_RE.test(text) || PESTICIDE_WORD_RE.test(text);
+}
+
+/** Основы названий классов препаратов — в любом числе и падеже. */
+const PESTICIDE_CLASS_STEMS = new Set([
+  "пестицид", "фунгицид", "гербицид", "инсектицид", "акарицид", "инсектоакарицид",
+  "дефолиант", "родентицид", "нематицид", "моллюскоцид", "фумигант", "арборицид",
+  "сзр",
+]);
+
+/**
+ * Спрашивают о КЛАССЕ препаратов: «Средства защиты растений», «Пестициды»,
+ * «Гербициды». Препарат в ответ на такой вопрос — сам ответ, а не вещество
+ * в составе.
+ *
+ * Поймано снимком: узел «Средства защиты растений» (в справочнике рядом с
+ * ним «Пестициды») получил пометку «вещество названо в составе препарата» на
+ * записях «Пестицид Гардо Голд, СЭ (…)» — а вещества там никто не спрашивал.
+ *
+ * В отличие от записей реестра, здесь смотрим основы, а не точную форму:
+ * класс и называют во множественном числе. Ложного срабатывания бояться
+ * нечего — название запроса, в котором стоят «гербициды», и так про них.
+ */
+function namesPesticideClass(name) {
+  const stems = words(stemName(String(name ?? "")));
+  if (stems.some((w) => PESTICIDE_CLASS_STEMS.has(w))) return true;
+  return stems.includes("средств") && stems.includes("защит") && stems.includes("растен");
 }
 
 /**
