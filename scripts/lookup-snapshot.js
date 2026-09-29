@@ -201,6 +201,10 @@ function probe(name) {
     rejected: r.rejected ?? 0,
     canon: r.canon ?? null,
     cas: r.cas ?? null,
+    // Вещество нашлось только в составе препарата — в карточке это отдельная
+    // пометка. Записи при её смене могут остаться теми же («Сера 400, КС»
+    // была и остаётся единственной), поэтому сравнивать надо и её.
+    viaFormulation: Boolean(r.viaFormulation),
     records,
     ...reasons,
   };
@@ -399,6 +403,8 @@ function compare(fileA, fileB, { full = false } = {}) {
   const refused = [];
   const codeChanged = [];
   const newRecords = [];
+  /** Сменилась пометка «вещество только в составе препарата». */
+  const formChanged = [];
   const onlyInB = [];
   const onlyInA = [];
   let same = 0;
@@ -436,10 +442,16 @@ function compare(fileA, fileB, { full = false } = {}) {
     const fresh = comparable ? surplus(x.records, y.records) : [];
     const gone = comparable ? surplus(y.records, x.records) : [];
     const codeMoved = x.okpd2 !== y.okpd2;
+    // Снимки прежнего образца пометки не держат — тогда и сравнивать нечего.
+    const formMoved =
+      typeof x.viaFormulation === "boolean" &&
+      typeof y.viaFormulation === "boolean" &&
+      x.viaFormulation !== y.viaFormulation;
 
     if (codeMoved) codeChanged.push([name, x, y]);
     if (fresh.length || gone.length) newRecords.push([name, x, y, fresh, gone]);
-    if (!codeMoved && !fresh.length && !gone.length) same += 1;
+    if (formMoved) formChanged.push([name, x, y]);
+    if (!codeMoved && !fresh.length && !gone.length && !formMoved) same += 1;
   }
 
   const head = (title, n) => console.log(`\n── ${title}: ${n} ──`);
@@ -500,6 +512,19 @@ function compare(fileA, fileB, { full = false } = {}) {
         `\n      было:  ${x.okpd2Name ?? "—"}` +
         `\n      стало: ${y.okpd2Name ?? "—"}`,
     );
+  }
+
+  // Записи те же, а смысл находки другой: «производитель серы» или «сера есть
+  // только в составе препарата». В карточке это видно, значит и здесь должно.
+  if (formChanged.length) {
+    head("ПОМЕТКА «В СОСТАВЕ ПРЕПАРАТА» — смотреть глазами", formChanged.length);
+    for (const [name, , y] of formChanged) {
+      console.log(
+        `  «${name}»: ${y.viaFormulation ? "теперь — только в составе препарата" : "больше не «в составе препарата»"}` +
+          `, ${recordsWord(y.entries)}`,
+      );
+      printGrouped("·", surplus([], y.records), (n) => own(y.why, n), capPlus);
+    }
   }
 
   head("НАШЛОСЬ ВПЕРВЫЕ — тоже смотреть глазами", gained.length);
@@ -570,6 +595,9 @@ function compare(fileA, fileB, { full = false } = {}) {
         ? `    из них записей пришло: ${plusTotal}, ушло: ${minusTotal}\n`
         : "") +
       `  сменился код ОКПД2: ${codeChanged.length}` +
+      (formChanged.length
+        ? `\n  пометка «препарат»: ${formChanged.length}   ← прочитать названия`
+        : "") +
       (onlyInB.length
         ? `\n  новые названия:     ${onlyInB.length}, нашли ${freshFound.length}` +
           (freshFound.length ? "   ← прочитать названия" : "")

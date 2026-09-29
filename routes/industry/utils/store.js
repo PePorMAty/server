@@ -530,9 +530,14 @@ function lookupProduct(rawName, opts) {
   // Спрашивают о самом растворе — «AdBlue», «Раствор мочевины AUS 32»: тогда
   // такие записи и есть ответ, а не второй сорт.
   const ureaQuery = [rawName, ...spellings].some((sp) => isUreaSolution(words(stemName(sp))));
+  // То же для препарата пестицида: узел «Сера 400, КС» спрашивает о нём самом.
+  const formQuery = [rawName, ...spellings].some((sp) => isPesticideForm(sp));
+  /** Препарат в ответ на вопрос о препарате — это и есть ответ. */
+  const answersQuery = (v) =>
+    Boolean((v.ureaSolution && ureaQuery) || (v.pesticideForm && formQuery));
   const secondaryWhy = kept.map((row, i) => {
     if (!verdicts[i].ok) return null;
-    if (verdicts[i].ureaSolution && ureaQuery) return null;
+    if (answersQuery(verdicts[i])) return null;
     if (verdicts[i].formulation) return "препарат, а вещество нашлось и само";
     if (!pharmaQuery && picked.coverage?.[i]?.medicine) {
       return "лекарство, а вещество нашлось и само";
@@ -557,11 +562,17 @@ function lookupProduct(rawName, opts) {
   // должно быть видно.
   // Препарат — по дозировке в скобке или по решению отбора: мочевинный
   // раствор для дизелей скобки с дозировкой не имеет, а препаратом считается.
+  // Спросили о самом препарате — пометка «вещество в составе» была бы
+  // неправдой: узел и есть препарат.
   const onlyFormulation =
     confirmed.length > 0 &&
     confirmed.every((row) => {
       const i = kept.indexOf(row);
-      return picked.coverage?.[i]?.parens === "formulation" || finalVerdicts[i]?.formulation;
+      const v = finalVerdicts[i];
+      return (
+        picked.coverage?.[i]?.parens === "formulation" ||
+        Boolean(v?.formulation && !answersQuery(v))
+      );
     });
 
   let result;
@@ -855,12 +866,21 @@ function confirms(c) {
  */
 function verdict(c) {
   const v = baseVerdict(c);
+  if (!v.ok || v.formulation) return v;
+  // Основание пишем с пометкой: в снимке «+ первое слово» у препарата
+  // выглядело бы как находка самого вещества.
+  //
   // Мочевинный раствор для дизелей («Мочевина восстановитель оксидов азота
   // AUS 32», «Мочевина UNIX AdBlue SCR») — не карбамид, а товар из него.
   // Решение заказчика (сентябрь 2026): считать как препарат — только если
   // самого карбамида в реестре нет.
-  if (v.ok && c?.ureaSolution && !v.formulation) {
-    return { ...v, formulation: true, ureaSolution: true };
+  if (c?.ureaSolution) {
+    return { ...v, why: `препарат: ${v.why}`, formulation: true, ureaSolution: true };
+  }
+  // Препаративная форма пестицида, названная по веществу: «Сера 400, КС
+  // (фунгицид)». Решение то же, что для скобки с дозировкой.
+  if (c?.pesticideForm) {
+    return { ...v, why: `препарат: ${v.why}`, formulation: true, pesticideForm: true };
   }
   return v;
 }
@@ -1141,6 +1161,50 @@ function isUreaSolution(rowList) {
     if (w === "aus" && /^\d+$/.test(rowList[i + 1] ?? "")) return true;
   }
   return false;
+}
+
+/**
+ * Коды препаративных форм пестицидов: КЭ — концентрат эмульсии, КС —
+ * концентрат суспензии, ВР — водный раствор, СП — смачивающийся порошок,
+ * ВДГ — водно-диспергируемые гранулы и так далее, как в Государственном
+ * каталоге пестицидов.
+ *
+ * Однобуквенных (Г, П, Д) и двусмысленных (ВС — «высший сорт», ВК) здесь
+ * нет: цена ложного срабатывания выше пользы.
+ */
+const FORM_CODES = [
+  "ВДГ", "ВДК", "ВР", "ВРГ", "ВРК", "ВРП", "ВСК", "ВЭ", "ККР", "КМЭ", "КНЭ",
+  "КС", "КЭ", "МД", "МКС", "МКЭ", "МЭ", "РП", "СК", "СП", "СЭ", "ТАБ", "ТКС",
+  "ТПС", "ЭМВ",
+];
+// Код стоит после запятой и замыкает название или идёт перед скобкой:
+// «Сера 400, КС (фунгицид)», «Би-58 Новый, КЭ (400 г/л диметоата)». Регистр
+// строгий: в реестре коды пишут прописными, а строчные «вр», «сп» бывают и
+// обычными сокращениями.
+const FORM_CODE_RE = new RegExp(`,\\s*(?:${FORM_CODES.join("|")})\\s*(?=$|[(,;.])`);
+// Назначение, названное словом. Только именительный падеж: «Сера для
+// производства фунгицидов» — это сама сера, сырьё, а не препарат.
+//
+// «Десиканта» и «протравителя» нет намеренно: десикант — это и осушитель
+// («Силикагель-десикант»), протравитель — и для дерева или металла. Препараты
+// для протравки семян и так узнаются по коду формы (КС, ТПС, ВСК).
+const PESTICIDE_WORD_RE =
+  /(?<![а-яё])(?:пестицид|фунгицид|гербицид|инсектицид|акарицид|инсектоакарицид|дефолиант|родентицид|нематицид|моллюскоцид|фумигант|арборицид)(?![а-яё])/i;
+
+/**
+ * Препаративная форма пестицида, названная по действующему веществу:
+ * «Сера 400, КС (фунгицид)» — концентрат суспензии, 400 г/л серы.
+ *
+ * Отбор узнавал препарат только по скобке с дозировкой — «ТОРНАДО, ВР (360
+ * г/л глифосата к-ты)». Когда вещество названо в самом имени препарата,
+ * запись подтверждалась первым словом как само вещество: «Сера» и
+ * «Элементная сера» получали в карточку производителя фунгицида. Решение
+ * заказчика то же, что для скобки: препарат засчитывается, только если
+ * самого вещества в реестре нет, и помечается отдельно.
+ */
+function isPesticideForm(name) {
+  const text = String(name ?? "");
+  return FORM_CODE_RE.test(text) || PESTICIDE_WORD_RE.test(text);
 }
 
 /**
@@ -1514,6 +1578,8 @@ function keepBestOverlap(rows, rawName, required = null) {
       medicine: isMedicine(rowList),
       // Мочевинный раствор для дизелей — тоже второго сорта, как препарат.
       ureaSolution: isUreaSolution(rowList),
+      // Препаративная форма пестицида: «Сера 400, КС (фунгицид)».
+      pesticideForm: isPesticideForm(row.name || ""),
     };
   });
 
@@ -1550,6 +1616,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       madeOf: s.madeOf,
       medicine: s.medicine,
       ureaSolution: s.ureaSolution,
+      pesticideForm: s.pesticideForm,
     })),
   };
 }
