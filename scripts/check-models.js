@@ -9,14 +9,16 @@
 //   node scripts/check-models.js --models qwen3.6-flash,deepseek-v4-pro
 //   node scripts/check-models.js --tasks card            # только карточка
 //   node scripts/check-models.js --tasks graph           # граф целиком (долго)
+//   node scripts/check-models.js --parallel 2            # сколько моделей разом (по умолчанию 4)
 //   node scripts/check-models.js --serial                # по одной модели за раз
 //   node scripts/check-models.js --port 3210             # сервер на другом порту
 //
 // Нужен запущенный сервер (pm2): скрипт ходит в него по HTTP, так что
 // проверяется ровно то, что получает интерфейс. Порт — из .env; если там его
 // нет или сервер слушает другой (pm2 мог получить PORT при запуске), скрипт
-// находит сервер сам среди портов, которые слушает node. Запросы настоящие и
-// расходуют токены тарифа: полный прогон — примерно по три запроса на модель.
+// находит сервер сам среди портов, которые слушает node. Сразу после
+// pm2 restart сервер поднимается не мгновенно — скрипт ждёт его до 45 с.
+// Запросы настоящие и расходуют токены тарифа: по три запроса на модель.
 
 require("dotenv").config();
 
@@ -24,13 +26,23 @@ const { execFileSync } = require("child_process");
 
 const PORT = Number(process.argv.includes("--port") ? arg("port") : process.env.PORT || 3001);
 
-/** Модели из выпадающего списка интерфейса (src/hooks/useAiConfig.ts). */
+/**
+ * Текстовые модели тарифа (Token Plan) — все, что в нём есть, а не только
+ * выпадающий список интерфейса (src/hooks/useAiConfig.ts): скрипт и решает,
+ * какие модели в список брать и на каких стадиях.
+ */
 const DEFAULT_MODELS = [
+  "qwen3.8-max",
+  "qwen3.8-flash",
   "qwen3.7-plus",
   "qwen3.7-max",
   "qwen3.6-flash",
+  "deepseek-v4.1-flash",
+  "deepseek-v4-pro-0813",
   "deepseek-v4-pro",
   "deepseek-v4-flash-0731",
+  "glm-5.3",
+  "glm-5.2",
 ];
 
 function arg(name, fallback) {
@@ -48,8 +60,16 @@ const TASKS = arg("tasks", "search,card,build")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const SERIAL = process.argv.includes("--serial");
+/**
+ * Сколько моделей проверять одновременно. Все разом упираются в лимит
+ * запросов тарифа (429) — и отказ был бы про лимит, а не про модель.
+ */
+const PARALLEL = process.argv.includes("--serial")
+  ? 1
+  : Math.max(1, Number(arg("parallel", "4")) || 4);
 const TIMEOUT_MIN = Number(arg("timeout", "12"));
+/** Сколько ждать, пока сервер поднимется (после pm2 restart). */
+const WAIT_SEC = Number(arg("wait", "45"));
 /** Адрес указан явно — искать сервер на других портах не надо. */
 const EXPLICIT = process.argv.includes("--url") || process.argv.includes("--port");
 let BASE = arg("url", `http://127.0.0.1:${PORT}/api/graphs`);
@@ -141,20 +161,11 @@ function nodePortsFromProc() {
   }
 }
 
-/**
- * Найти сервер до начала проверок.
- *
- * Без этого при неверном порте все проверки падали одна за другой с одинаковым
- * «сервер недоступен», и было непонятно — сервер лёг или просто не тот порт.
- */
-async function locateServer() {
+/** Один заход поиска сервера: порт из .env, затем порты, которые слушает node. */
+async function findServerOnce() {
   if (await isOurServer(BASE)) return true;
-  if (EXPLICIT) {
-    console.error(`Сервер не отвечает по адресу ${BASE}.`);
-    return false;
-  }
-  const ports = nodePorts();
-  for (const p of (ports ?? []).filter((x) => x !== PORT)) {
+  if (EXPLICIT) return false;
+  for (const p of (nodePorts() ?? []).filter((x) => x !== PORT)) {
     const base = `http://127.0.0.1:${p}/api/graphs`;
     if (await isOurServer(base)) {
       console.log(`На порту ${PORT} сервера нет — нашёл его на порту ${p}.\n`);
@@ -162,6 +173,40 @@ async function locateServer() {
       return true;
     }
   }
+  return false;
+}
+
+/**
+ * Найти сервер до начала проверок.
+ *
+ * Без этого при неверном порте все проверки падали одна за другой с одинаковым
+ * «сервер недоступен», и было непонятно — сервер лёг или просто не тот порт.
+ * Сразу после pm2 restart сервер ещё поднимается — ждём его до WAIT_SEC.
+ */
+async function locateServer() {
+  const deadline = Date.now() + WAIT_SEC * 1000;
+  let announced = false;
+  for (;;) {
+    if (await findServerOnce()) {
+      if (announced) console.log("сервер поднялся.\n");
+      return true;
+    }
+    if (Date.now() >= deadline) break;
+    if (!announced) {
+      process.stdout.write(
+        `Сервер пока не отвечает — жду до ${WAIT_SEC} с (после pm2 restart он поднимается не сразу)… `,
+      );
+      announced = true;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (announced) console.log("не дождался.\n");
+
+  if (EXPLICIT) {
+    console.error(`Сервер не отвечает по адресу ${BASE}.`);
+    return false;
+  }
+  const ports = nodePorts();
   console.error(`Сервер не отвечает на порту ${PORT}.`);
   if (ports && ports.length) {
     console.error(`node слушает порты: ${ports.join(", ")} — но нашего сервера среди них нет.`);
@@ -373,14 +418,17 @@ async function checkModel(model) {
   console.log(
     `Сервер: ${BASE}\nПровайдер: ${provider}; модели: ${MODELS.join(", ")}\n` +
       `Проверки: ${TASKS.map((t) => TASK_DEFS[t].title).join(", ")}` +
-      `${SERIAL ? "; по одной модели" : "; модели параллельно"}\n`,
+      `${PARALLEL === 1 ? "; по одной модели" : `; до ${PARALLEL} моделей одновременно`}\n`,
   );
 
-  if (SERIAL) {
-    for (const m of MODELS) await checkModel(m);
-  } else {
-    await Promise.all(MODELS.map(checkModel));
-  }
+  // Очередь моделей на PARALLEL «потоков»: каждый берёт следующую модель,
+  // когда закончил с предыдущей.
+  const queue = MODELS.slice();
+  await Promise.all(
+    Array.from({ length: Math.min(PARALLEL, queue.length) }, async () => {
+      while (queue.length) await checkModel(queue.shift());
+    }),
+  );
 
   // Сводка: модель × проверка.
   const width = Math.max(...MODELS.map((m) => m.length), 6) + 2;
