@@ -13,6 +13,19 @@ const {
   safeJsonParse,
 } = require("./utils/openai");
 
+const {
+  cardKeys,
+  formatInstruction,
+  cardFromAnswer,
+  buildCardContext,
+  asText,
+} = require("./utils/card");
+
+const { explainBadAnswer } = require("../sources/utils");
+
+/** Что ждали от модели — для текста ошибки. */
+const CARD_ANSWER = { acc: "карточку", gen: "карточки" };
+
 router.post("/gpt/fill-card", async (req, res) => {
   const t0 = Date.now();
 
@@ -42,22 +55,9 @@ router.post("/gpt/fill-card", async (req, res) => {
     if (typeof rawText === "string" && rawText.trim()) {
       inputText = rawText.trim();
     } else {
-      // ✅ собираем контекст из node + chain
-      const nodeText =
-        nodeObj && typeof nodeObj === "object"
-          ? JSON.stringify(nodeObj, null, 2)
-          : "";
-      const chainText =
-        chainObj && typeof chainObj === "object"
-          ? JSON.stringify(chainObj, null, 2)
-          : "";
-
-      inputText = [
-        nodeText && `SELECTED_NODE:\n${nodeText}`,
-        chainText && `FULL_CHAIN:\n${chainText}`,
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      // Контекст — выбранный узел и граф в сжатом виде (см. buildCardContext):
+      // весь граф как есть не помещался в окно контекста моделей.
+      inputText = buildCardContext(nodeObj, chainObj);
     }
 
     if (!inputText) {
@@ -67,9 +67,15 @@ router.post("/gpt/fill-card", async (req, res) => {
       });
     }
 
-    const systemPrompt = customSystemPrompt
-      ? String(customSystemPrompt)
-      : buildFillCardSystemPrompt({ nodeType, productName });
+    const keys = cardKeys(nodeType, selectedFields);
+    // Формат ответа дописываем к любому промпту, и к правленому в интерфейсе
+    // тоже: сам промпт описывает поля в виде «Поле: …», и без этой приписки
+    // модели, не держащие схему, отвечали текстом.
+    const systemPrompt = `${
+      customSystemPrompt
+        ? String(customSystemPrompt)
+        : buildFillCardSystemPrompt({ nodeType, productName })
+    }\n\n${formatInstruction(nodeType, keys)}`;
     const userPrompt = buildFillCardUserPrompt({ nodeType, inputText });
     const useWebSearch = !!req.body?.useWebSearch;
 
@@ -85,79 +91,37 @@ router.post("/gpt/fill-card", async (req, res) => {
 
     // Модель называем в тексте ошибки: без неё в UI не видно, какая именно не
     // справилась, а провайдеров и моделей теперь несколько.
-    const usedBy = `${provider || process.env.AI_PROVIDER || "openai"}/${
-      model || "по умолчанию"
-    }`;
+    const usedModel = model || openaiResp?.ai?.model || null;
 
-    if (openaiResp?.status !== "completed") {
+    const text = extractOutputText(openaiResp);
+    const card = cardFromAnswer(safeJsonParse(text), text, nodeType, keys);
+
+    // Оборванный ответ не бракуем, если поля из него прочитались.
+    if (!card || typeof card !== "object") {
+      // Пустой ответ, обрыв и ответ не по схеме — разные причины и разные
+      // лечения: первое обычно значит, что бюджет ушёл в размышления, второе —
+      // мало места на ответ, третье — модель не поняла, что от неё ждут.
+      const cut = openaiResp?.status === "incomplete";
       return res.status(502).json({
         success: false,
-        error: `Модель ${usedBy}: ответ не завершён`,
+        error:
+          text && !cut
+            ? `Модель «${usedModel ?? "по умолчанию"}» вернула ответ не по схеме: полей карточки в нём не нашлось. Повторите или выберите другую модель.`
+            : explainBadAnswer(openaiResp, text, usedModel, CARD_ANSWER),
+        ai: openaiResp?.ai,
         debug: {
           status: openaiResp?.status,
-          incomplete_details: openaiResp?.incomplete_details ?? null,
+          output_text_preview: (text || "").slice(0, 1200),
         },
       });
     }
 
-    const text = extractOutputText(openaiResp);
-    const parsed = safeJsonParse(text);
-    const card = parsed?.productCard;
+    const productCard = {};
 
-    if (!card || typeof card !== "object") {
-      // Пустой ответ и ответ не по схеме — разные причины и разные лечения:
-      // первое обычно значит, что весь бюджет токенов ушёл в размышления,
-      // второе — что модель проигнорировала json_schema.
-      return res.status(502).json({
-        success: false,
-        error: text
-          ? `Модель ${usedBy} вернула ответ не по схеме (нет productCard)`
-          : `Модель ${usedBy} вернула пустой ответ`,
-        debug: { output_text_preview: (text || "").slice(0, 1200) },
-      });
-    }
-
-    // нормализация по типу
-    let productCard;
-
-    if (Array.isArray(selectedFields) && selectedFields.length > 0) {
-      // кастомный набор полей — берём только запрошенные
-      productCard = {};
-      for (const key of selectedFields) {
-        productCard[key] = String(card[key] || "").trim();
-      }
-    } else if (nodeType === "transformation") {
-      productCard = {
-        technology_name: String(card.technology_name || "").trim(),
-        technology_short_description: String(
-          card.technology_short_description || "",
-        ).trim(),
-        equipment: String(card.equipment || "").trim(),
-        conditions: String(card.conditions || "").trim(),
-        constraints_or_key_property: String(
-          card.constraints_or_key_property || "",
-        ).trim(),
-        additional_materials_or_catalysts: String(
-          card.additional_materials_or_catalysts || "",
-        ).trim(),
-        energy: String(card.energy || "").trim(),
-        enterprise_and_plant: String(card.enterprise_and_plant || "").trim(),
-      };
-    } else {
-      productCard = {
-        product_name: String(card.product_name || "").trim(),
-        product_type: String(card.product_type || "").trim(),
-        purity: String(card.purity || "").trim(),
-        main_impurities: String(card.main_impurities || "").trim(),
-        allowed_impurities: String(card.allowed_impurities || "").trim(),
-        conversion_yield: String(card.conversion_yield || "").trim(),
-        typical_scale: String(card.typical_scale || "").trim(),
-        storage: String(card.storage || "").trim(),
-        carbon_footprint: String(card.carbon_footprint || "").trim(),
-        producers: String(card.producers || "").trim(),
-        applications: String(card.applications || "").trim(),
-        price: String(card.price || "").trim(),
-      };
+    // Ровно запрошенные поля и в том же порядке: выбранные в интерфейсе или
+    // все поля этого типа узла. Лишнее, что дописала модель, не берём.
+    for (const key of keys) {
+      productCard[key] = asText(card[key]);
     }
 
     return res.json({
@@ -165,6 +129,7 @@ router.post("/gpt/fill-card", async (req, res) => {
       product: productName || null,
       card_kind: nodeType, // ✅ UI поймёт что это за карточка
       productCard,
+      ai: openaiResp?.ai,
       took_ms: Date.now() - t0,
     });
   } catch (err) {

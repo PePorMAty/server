@@ -7,7 +7,9 @@ const {
   buildSourcesPromptUp,
   callOpenAIResponses,
   extractOutputText,
+  explainBadAnswer,
   safeJsonParse,
+  pickItems,
   normalizeAndFilterItems,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
@@ -105,37 +107,32 @@ router.post("/gpt/sources", async (req, res) => {
     stream.stop();
     if (stream.aborted) return;
 
-    if (openaiResp?.status !== "completed") {
-      // статус уже 200 — поэтому реальный статус кладём внутрь
+    const text = extractOutputText(openaiResp);
+    const rawItems = pickItems(safeJsonParse(text));
+
+    // Оборванный ответ всё равно разбираем: если JSON в нём цел, источники
+    // годятся. Статус уже 200 — поэтому причину отказа кладём внутрь.
+    if (!rawItems) {
       return res.end(
         JSON.stringify({
           success: false,
           http_status: 502,
-          error: "OpenAI response status is not completed",
+          error: explainBadAnswer(openaiResp, text, model, {
+            acc: "список источников",
+            gen: "списка источников",
+          }),
+          ai: openaiResp?.ai,
           debug: {
             status: openaiResp?.status,
             incomplete_details: openaiResp?.incomplete_details ?? null,
+            output_text_preview: (text || "").slice(0, 1200),
           },
         }),
       );
     }
 
-    const text = extractOutputText(openaiResp);
-    const parsed = safeJsonParse(text);
-
-    if (!parsed || !Array.isArray(parsed.items)) {
-      return res.end(
-        JSON.stringify({
-          success: false,
-          http_status: 502,
-          error: "OpenAI did not return valid JSON items[]",
-          debug: { output_text_preview: (text || "").slice(0, 1200) },
-        }),
-      );
-    }
-
     const items = filterItemsByAllowedDomains(
-      normalizeAndFilterItems(parsed.items),
+      normalizeAndFilterItems(rawItems),
       allowedDomains,
     );
 
@@ -145,8 +142,8 @@ router.post("/gpt/sources", async (req, res) => {
           success: false,
           http_status: 422,
           error: allowedDomains.length
-            ? "No valid sources found on allowed domains"
-            : "No valid sources found",
+            ? "Модель не нашла источников на разрешённых сайтах."
+            : "Модель не нашла ни одного источника со ссылкой и описанием.",
           got: 0,
           expected: maxItems,
         }),

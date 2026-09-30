@@ -12,8 +12,26 @@ const router = express.Router();
 const {
   callOpenAIResponsesRaw,
   extractOutputText,
+  explainBadAnswer,
   safeJsonParse,
 } = require("../sources/utils");
+
+/** Что ждали от модели — для текста ошибки. */
+const STEP_ANSWER = { acc: "шаг", gen: "шага" };
+
+/**
+ * Шаг из ответа модели: без строгой схемы модель порой заворачивает его в
+ * { "step": {…} } или { "StepChainApiStep": {…} }.
+ */
+function unwrapStep(parsed) {
+  if (!parsed || typeof parsed !== "object" || parsed.transformation) {
+    return parsed;
+  }
+  const inner = Object.values(parsed).filter(
+    (v) => v && typeof v === "object" && !Array.isArray(v) && v.transformation,
+  );
+  return inner.length === 1 ? inner[0] : parsed;
+}
 
 // ---------- heartbeat ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -350,7 +368,9 @@ router.post("/gpt/step/build", async (req, res) => {
       instructions,
       input,
       truncation: "auto",
-      max_output_tokens: 4000,
+      // Было 4000: шаг с описаниями продуктов в него едва помещался, а у
+      // моделей, которые не выключают размышления, лимит делится с ними.
+      max_output_tokens: 8000,
       text: {
         format: {
           type: "json_schema",
@@ -368,20 +388,11 @@ router.post("/gpt/step/build", async (req, res) => {
       model,
     });
 
-    if (resp?.status !== "completed") {
-      return reply(502, {
-        success: false,
-        error: "OpenAI response status is not completed",
-        debug: {
-          status: resp?.status,
-          incomplete_details: resp?.incomplete_details ?? null,
-        },
-      });
-    }
-
     const text = extractOutputText(resp);
-    const parsed = safeJsonParse(text);
+    const parsed = unwrapStep(safeJsonParse(text));
+    const usedModel = model || resp?.ai?.model || null;
 
+    // Оборванный ответ не бракуем, если шаг из него разобрался целиком.
     if (
       !parsed ||
       typeof parsed !== "object" ||
@@ -389,10 +400,19 @@ router.post("/gpt/step/build", async (req, res) => {
       !Array.isArray(parsed.inputProducts) ||
       !Array.isArray(parsed.outputProducts)
     ) {
+      const cut = resp?.status === "incomplete";
       return reply(502, {
         success: false,
-        error: "OpenAI did not return valid StepChainApiStep JSON",
-        debug: { output_text_preview: (text || "").slice(0, 1200) },
+        error:
+          text && !cut && parsed
+            ? `Модель «${usedModel ?? "по умолчанию"}» вернула шаг не по схеме: нет преобразования или списков продуктов. Повторите или выберите другую модель.`
+            : explainBadAnswer(resp, text, usedModel, STEP_ANSWER),
+        ai: resp?.ai,
+        debug: {
+          status: resp?.status,
+          incomplete_details: resp?.incomplete_details ?? null,
+          output_text_preview: (text || "").slice(0, 1200),
+        },
       });
     }
 

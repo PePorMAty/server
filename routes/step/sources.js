@@ -12,11 +12,16 @@ const router = express.Router();
 const {
   callOpenAIResponses,
   extractOutputText,
+  explainBadAnswer,
   safeJsonParse,
+  pickItems,
   normalizeAndFilterItems,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
 } = require("../sources/utils");
+
+/** Что ждали от модели — для текста ошибки. */
+const SOURCES_ANSWER = { acc: "список источников", gen: "списка источников" };
 
 const {
   buildStepSourcesPromptDown,
@@ -123,30 +128,23 @@ router.post("/gpt/step/sources", async (req, res) => {
     stream.stop();
     if (stream.aborted) return;
 
-    if (openaiResp?.status !== "completed") {
+    const text = extractOutputText(openaiResp);
+    const rawItems = pickItems(safeJsonParse(text));
+
+    // Оборванный ответ всё равно разбираем: если JSON в нём цел, источники
+    // годятся, и выбрасывать их из-за статуса незачем.
+    if (!rawItems) {
       return res.end(
         JSON.stringify({
           success: false,
           http_status: 502,
-          error: "OpenAI response status is not completed",
+          error: explainBadAnswer(openaiResp, text, model, SOURCES_ANSWER),
+          ai: openaiResp?.ai,
           debug: {
             status: openaiResp?.status,
             incomplete_details: openaiResp?.incomplete_details ?? null,
+            output_text_preview: (text || "").slice(0, 1200),
           },
-        }),
-      );
-    }
-
-    const text = extractOutputText(openaiResp);
-    const parsed = safeJsonParse(text);
-
-    if (!parsed || !Array.isArray(parsed.items)) {
-      return res.end(
-        JSON.stringify({
-          success: false,
-          http_status: 502,
-          error: "OpenAI did not return valid JSON items[]",
-          debug: { output_text_preview: (text || "").slice(0, 1200) },
         }),
       );
     }
@@ -154,7 +152,7 @@ router.post("/gpt/step/sources", async (req, res) => {
     // Пост-фильтр ДО веток «пусто»/exhausted: отброшенные чужие домены
     // не должны считаться «новыми» источниками.
     const items = filterItemsByAllowedDomains(
-      normalizeAndFilterItems(parsed.items),
+      normalizeAndFilterItems(rawItems),
       allowedDomains,
     );
     if (items.length < 1) {
@@ -171,6 +169,7 @@ router.post("/gpt/step/sources", async (req, res) => {
           blocks_preview: [],
           sources: existingUrls.size > 0 ? existingSources : [],
           exhausted: true,
+          ai: openaiResp?.ai,
           took_ms: Date.now() - t0,
         }),
       );
@@ -203,6 +202,7 @@ router.post("/gpt/step/sources", async (req, res) => {
         blocks_preview,
         sources: picked,
         exhausted,
+        ai: openaiResp?.ai,
         took_ms: Date.now() - t0,
       }),
     );

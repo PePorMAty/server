@@ -12,6 +12,7 @@ const router = express.Router();
 const {
   callOpenAIResponsesRaw,
   extractOutputText,
+  explainBadAnswer,
   pickTechnologyBlocksFromSources,
 } = require("../sources/utils");
 
@@ -185,22 +186,26 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       model,
     });
 
-    if (resp?.status !== "completed") {
+    const markdown = (extractOutputText(resp) || "").trim();
+    if (resp?.status !== "completed" || !markdown) {
+      const usedModel = model || resp?.ai?.model || null;
+      const whose = usedModel ? `модели «${usedModel}»` : "модели";
       return reply(502, {
         success: false,
-        error: "OpenAI response status is not completed",
+        // Обрыв с текстом — отдельный случай: обобщение — Markdown, а не JSON,
+        // и общий текст про «обычный текст вместо JSON» здесь не к месту.
+        error:
+          markdown && resp?.status === "incomplete"
+            ? `Обобщение ${whose} оборвалось на пределе длины. Сократите число источников или выберите другую модель.`
+            : explainBadAnswer(resp, markdown, usedModel, {
+                acc: "обобщение",
+                gen: "обобщения",
+              }),
+        ai: resp?.ai,
         debug: {
           status: resp?.status,
           incomplete_details: resp?.incomplete_details ?? null,
         },
-      });
-    }
-
-    const markdown = (extractOutputText(resp) || "").trim();
-    if (!markdown) {
-      return reply(502, {
-        success: false,
-        error: "OpenAI returned empty output",
       });
     }
 

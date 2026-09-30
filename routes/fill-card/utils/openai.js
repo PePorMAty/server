@@ -1,41 +1,13 @@
 // routes/fill-card/utils/openai.js
 
-const { callOpenAIResponsesRaw } = require("../../sources/utils");
-
-function extractOutputText(resp) {
-  if (!resp) return "";
-
-  if (typeof resp.output_text === "string" && resp.output_text.trim()) {
-    return resp.output_text.trim();
-  }
-
-  const out = Array.isArray(resp.output) ? resp.output : [];
-  const parts = [];
-
-  for (const item of out) {
-    const content = Array.isArray(item?.content) ? item.content : [];
-    for (const c of content) {
-      if (typeof c?.text === "string") parts.push(c.text);
-    }
-  }
-
-  return parts.join("\n").trim();
-}
-
-function safeJsonParse(text) {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    try {
-      return JSON.parse(m[0]);
-    } catch {
-      return null;
-    }
-  }
-}
+// Разбор ответа — общий: он понимает JSON в ```json```, с пояснениями вокруг
+// и с лишним текстом после. Своя копия здесь брала жадным выражением от первой
+// «{» до последней «}» и ломалась, если модель что-то дописывала.
+const {
+  callOpenAIResponsesRaw,
+  extractOutputText,
+  safeJsonParse,
+} = require("../../sources/utils");
 
 function buildFillCardSchema(nodeType, selectedFields) {
   // все поля для данного типа
