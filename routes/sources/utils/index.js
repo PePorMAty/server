@@ -20,6 +20,8 @@ const {
   getClient,
 } = require("./openai");
 
+const { searchSources } = require("./search");
+
 // Санитайзер списка доменов для web_search filters.allowed_domains:
 // API принимает только «голые» домены (без протокола/пути), максимум 20.
 function sanitizeAllowedDomains(raw) {
@@ -92,4 +94,5 @@ module.exports = {
   getClient,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
+  searchSources,
 };

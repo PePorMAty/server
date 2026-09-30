@@ -5,15 +5,11 @@ const router = express.Router();
 const {
   buildSourcesPrompt,
   buildSourcesPromptUp,
-  callOpenAIResponses,
-  extractOutputText,
   explainBadAnswer,
-  safeJsonParse,
-  pickItems,
   isSchemaEcho,
-  normalizeAndFilterItems,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
+  searchSources,
 } = require("./utils");
 
 // аккуратный heartbeat, который НЕ ломает JSON
@@ -96,21 +92,27 @@ router.post("/gpt/sources", async (req, res) => {
         ? buildSourcesPromptUp(productName, maxItems)
         : buildSourcesPrompt(productName, maxItems);
 
-    const openaiResp = await callOpenAIResponses({
+    // Пустой результат поиск повторяет сам (searchSources): модели порой
+    // отвечают, не поискав, а со второго раза находят.
+    const {
+      resp: openaiResp,
+      text,
+      parsed,
+      rawItems,
+      items,
+    } = await searchSources({
       prompt,
       maxItems,
       timeoutMs: 35 * 60 * 1000,
       provider,
       model,
       allowedDomains,
+      filter: (xs) => filterItemsByAllowedDomains(xs, allowedDomains),
+      isAborted: () => stream.aborted,
     });
 
     stream.stop();
     if (stream.aborted) return;
-
-    const text = extractOutputText(openaiResp);
-    const parsed = safeJsonParse(text);
-    const rawItems = pickItems(parsed);
 
     // Оборванный ответ всё равно разбираем: если JSON в нём цел, источники
     // годятся. Статус уже 200 — поэтому причину отказа кладём внутрь.
@@ -134,11 +136,6 @@ router.post("/gpt/sources", async (req, res) => {
         }),
       );
     }
-
-    const items = filterItemsByAllowedDomains(
-      normalizeAndFilterItems(rawItems),
-      allowedDomains,
-    );
 
     if (items.length < 1) {
       return res.end(

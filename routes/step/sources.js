@@ -10,16 +10,12 @@ const router = express.Router();
 
 // reuse OpenAI utils from existing sources module
 const {
-  callOpenAIResponses,
-  extractOutputText,
   explainBadAnswer,
-  safeJsonParse,
-  pickItems,
   isSchemaEcho,
   droppedReasons,
-  normalizeAndFilterItems,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
+  searchSources,
 } = require("../sources/utils");
 
 /** Что ждали от модели — для текста ошибки. */
@@ -118,21 +114,29 @@ router.post("/gpt/step/sources", async (req, res) => {
         : buildStepSourcesPromptDown(productName, maxItems);
     const prompt = customSystemPrompt || defaultPrompt;
 
-    const openaiResp = await callOpenAIResponses({
+    // Пустой результат поиск повторяет сам (searchSources): модели порой
+    // отвечают, не поискав, а со второго раза находят.
+    // Пост-фильтр доменов — до веток «пусто»/exhausted: отброшенные чужие
+    // домены не должны считаться «новыми» источниками.
+    const {
+      resp: openaiResp,
+      text,
+      parsed,
+      rawItems,
+      items,
+    } = await searchSources({
       prompt,
       maxItems,
       timeoutMs: 35 * 60 * 1000,
       provider,
       model,
       allowedDomains,
+      filter: (xs) => filterItemsByAllowedDomains(xs, allowedDomains),
+      isAborted: () => stream.aborted,
     });
 
     stream.stop();
     if (stream.aborted) return;
-
-    const text = extractOutputText(openaiResp);
-    const parsed = safeJsonParse(text);
-    const rawItems = pickItems(parsed);
 
     // Оборванный ответ всё равно разбираем: если JSON в нём цел, источники
     // годятся, и выбрасывать их из-за статуса незачем.
@@ -154,12 +158,6 @@ router.post("/gpt/step/sources", async (req, res) => {
       );
     }
 
-    // Пост-фильтр ДО веток «пусто»/exhausted: отброшенные чужие домены
-    // не должны считаться «новыми» источниками.
-    const items = filterItemsByAllowedDomains(
-      normalizeAndFilterItems(rawItems),
-      allowedDomains,
-    );
     if (items.length < 1) {
       // Ничего не нашли. Для UI это не ошибка, а сигнал «источники закончились»:
       // были прежние — возвращаем их; не было — пустой массив. В обоих случаях

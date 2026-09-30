@@ -94,9 +94,11 @@ function withThinking(params) {
  * forced_search — искать всегда: иначе модель сама решает, нужен ли поиск, и
  * порой отвечает по памяти одним-двумя источниками. search_strategy (из
  * QWEN_SEARCH_STRATEGY, по умолчанию max) — глубина поиска: max собирает
- * больше страниц, чем turbo, ценой времени и токенов. enable_source — вернуть
- * найденные страницы (search_info): по ним видно, искала ли модель на самом
- * деле. Ответ за три секунды «с источниками» — это ответ по памяти.
+ * больше страниц, чем turbo, ценой времени и токенов.
+ *
+ * Список найденных страниц (enable_source → search_info) пробовали: шлюз
+ * тарифа его не возвращает, так что искала ли модель на самом деле, видно
+ * только по времени ответа и по ссылкам в нём.
  */
 function searchOptions() {
   const strategy = String(process.env.QWEN_SEARCH_STRATEGY || "max")
@@ -104,7 +106,6 @@ function searchOptions() {
     .toLowerCase();
   return {
     forced_search: true,
-    enable_source: true,
     ...(strategy && strategy !== "default" ? { search_strategy: strategy } : {}),
   };
 }
@@ -191,7 +192,7 @@ function paramFix(err, params, { searchRequired = false } = {}) {
 
   // Жалоба на один ключ настроек поиска — убираем только его, остальные
   // (прежде всего forced_search) оставляем.
-  for (const key of ["search_strategy", "enable_source"]) {
+  for (const key of ["search_strategy"]) {
     if (params.search_options?.[key] !== undefined && new RegExp(key, "i").test(msg)) {
       return {
         params: {
@@ -485,11 +486,6 @@ function chatToResponsesFormat(chatResp, meta = {}) {
       ms: meta.ms ?? null,
       fixes: meta.fixes ?? [],
       reasoningChars: reasoning.length,
-      // Сколько страниц нашёл веб-поиск (search_info, при enable_source).
-      // null — провайдер не сообщил; 0 — поиск был, но ничего не дал.
-      searchResults: Array.isArray(chatResp.search_info?.search_results)
-        ? chatResp.search_info.search_results.length
-        : null,
       usage: chatResp.usage ?? null,
     },
   };

@@ -395,16 +395,12 @@ async function checkModel(model) {
     const verdict = def.judge(res);
     const fixes = res?.ai?.fixes ?? [];
     const think = res?.ai?.reasoningChars ?? 0;
-    // Сколько страниц нашёл веб-поиск, если провайдер сообщил. Без этого
-    // ответ «по памяти» за три секунды выглядел бы как настоящий поиск.
-    const pages = task === "search" ? res?.ai?.searchResults : null;
     results.push({ model, task, secs, ...verdict, fixes, think });
     // При отказе показываем, что модель ответила на самом деле: без этого
     // «ни одного источника» не отличить от ответа по памяти или пустого текста.
     const preview = !verdict.ok && res?.debug?.output_text_preview;
     console.log(
       `${verdict.ok ? "✓" : "✗"} ${model} · ${def.title}: ${verdict.detail} — ${secs} с` +
-        (typeof pages === "number" ? `, поиск в сети: ${pages} стр.` : "") +
         (think ? `, размышления ${think} симв.` : "") +
         (fixes.length ? `\n    поправки: ${fixes.join("; ")}` : "") +
         (preview
