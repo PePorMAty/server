@@ -3,10 +3,13 @@
 // База источников на сервере — HTTP.
 //
 //   GET    /api/local-sources/documents              — документы и ход разбора
-//   POST   /api/local-sources/documents              — загрузить PDF (тело — сам файл,
-//                                                       Content-Type: application/pdf,
-//                                                       имя — в заголовке X-File-Name,
-//                                                       модель разбора — X-Provider, X-Model)
+//   POST   /api/local-sources/uploads/:uploadId      — загрузить PDF кусками (так грузит
+//     ?offset=&size=&name=&provider=&model=            клиент): тело — кусок файла с байта
+//                                                       offset, size — размер всего файла;
+//                                                       последний кусок добавляет документ
+//   POST   /api/local-sources/documents              — загрузить PDF одним запросом (curl):
+//     ?name=&provider=&model=                          тело — сам файл,
+//                                                       Content-Type: application/pdf
 //   DELETE /api/local-sources/documents/:id          — удалить документ
 //   GET    /api/local-sources/documents/:id/file     — открыть PDF (#page=N — страница)
 //   GET    /api/local-sources/documents/:id/sections — разделы документа и их продукты
@@ -25,6 +28,7 @@ const express = require("express");
 
 const store = require("./utils/store");
 const decode = require("./utils/decode");
+const uploads = require("./utils/uploads");
 
 const router = express.Router();
 
@@ -41,10 +45,46 @@ function fail(res, status, error) {
   return res.status(status).json({ success: false, error });
 }
 
-/** Модель разбора из заголовков: та, что выбрана в интерфейсе. */
+/**
+ * Модель разбора — та, что выбрана в интерфейсе. Приходит в адресе: свои
+ * заголовки не проходят CORS nginx (у него свой список разрешённых).
+ * Заголовки X-Provider / X-Model — для прежних клиентов.
+ */
 function modelFrom(req) {
   const clean = (v) => String(v || "").trim().slice(0, 100) || null;
-  return { provider: clean(req.get("X-Provider")), model: clean(req.get("X-Model")) };
+  return {
+    provider: clean(req.query.provider ?? req.get("X-Provider")),
+    model: clean(req.query.model ?? req.get("X-Model")),
+  };
+}
+
+/** Имя файла: из адреса (?name=), у прежних клиентов — из X-File-Name. */
+function fileNameFrom(req) {
+  let name = typeof req.query.name === "string" ? req.query.name : "";
+  if (!name) {
+    try {
+      name = decodeURIComponent(String(req.get("X-File-Name") || ""));
+    } catch {
+      // кривое кодирование имени — не повод отказывать в загрузке
+    }
+  }
+  return (name.trim() || "document.pdf").replace(/[\\/]/g, "_").slice(0, 200);
+}
+
+/** Добавить загруженный PDF в базу и ответить клиенту. */
+async function addUploaded(req, res, buf) {
+  const fileName = fileNameFrom(req);
+  try {
+    const result = await store.addDocument(buf, { fileName, via: "ui", ...modelFrom(req) });
+    // Разделы записаны — модель разбирает их в фоне, клиент смотрит ход
+    // по списку документов.
+    if (!result.duplicate) decode.kick();
+    res.json({ success: true, ...result });
+  } catch (e) {
+    // Ошибки разбора PDF написаны для человека — отдаём как есть.
+    console.error(`[local-sources] загрузка «${fileName}»:`, e.message);
+    fail(res, 422, e.message);
+  }
 }
 
 router.get("/local-sources/documents", (req, res) => {
@@ -74,36 +114,47 @@ const readPdfBody = (req, res, next) =>
     next(err);
   });
 
-router.post(
-  "/local-sources/documents",
-  readPdfBody,
-  async (req, res) => {
-    const buf = req.body;
-    if (!Buffer.isBuffer(buf) || !buf.length) {
-      return fail(res, 400, "Пустой запрос: пришлите PDF телом запроса (Content-Type: application/pdf).");
-    }
-    // Имя файла идёт заголовком: в теле — сам PDF. Кириллицу клиент кодирует.
-    let fileName = "document.pdf";
-    try {
-      fileName = decodeURIComponent(String(req.get("X-File-Name") || "")) || fileName;
-    } catch {
-      // кривое кодирование имени — не повод отказывать в загрузке
-    }
-    fileName = fileName.replace(/[\\/]/g, "_").slice(0, 200);
+router.post("/local-sources/documents", readPdfBody, async (req, res) => {
+  const buf = req.body;
+  if (!Buffer.isBuffer(buf) || !buf.length) {
+    return fail(res, 400, "Пустой запрос: пришлите PDF телом запроса (Content-Type: application/pdf).");
+  }
+  await addUploaded(req, res, buf);
+});
 
-    try {
-      const result = await store.addDocument(buf, { fileName, via: "ui", ...modelFrom(req) });
-      // Разделы записаны — модель разбирает их в фоне, клиент смотрит ход
-      // по списку документов.
-      if (!result.duplicate) decode.kick();
-      res.json({ success: true, ...result });
-    } catch (e) {
-      // Ошибки разбора PDF написаны для человека — отдаём как есть.
-      console.error(`[local-sources] загрузка «${fileName}»:`, e.message);
-      fail(res, 422, e.message);
+/** Кусок файла. Клиент шлёт по 512 КБ; запас — на случай кусков крупнее. */
+const readChunkBody = (req, res, next) =>
+  express.raw({ type: () => true, limit: 16 * 1024 * 1024 })(req, res, (err) => {
+    if (err?.type === "entity.too.large") return fail(res, 413, "Кусок файла больше 16 МБ.");
+    next(err);
+  });
+
+router.post("/local-sources/uploads/:uploadId", readChunkBody, async (req, res) => {
+  const { uploadId } = req.params;
+  const total = Number(req.query.size);
+  let received;
+  try {
+    received = uploads.appendChunk(uploadId, Number(req.query.offset), total, req.body, MAX_PDF_BYTES);
+  } catch (e) {
+    if (!(e instanceof uploads.UploadError)) {
+      console.error("[local-sources] кусок загрузки:", e);
+      return fail(res, 500, e.message);
     }
-  },
-);
+    return res
+      .status(e.status)
+      .json({ success: false, error: e.message, ...(e.received !== undefined ? { received: e.received } : {}) });
+  }
+  if (received < total) return res.json({ success: true, received });
+  // Последний кусок — файл собран.
+  let buf;
+  try {
+    buf = uploads.takeUpload(uploadId);
+  } catch (e) {
+    console.error("[local-sources] сборка загрузки:", e);
+    return fail(res, 500, `Не удалось собрать файл: ${e.message}`);
+  }
+  await addUploaded(req, res, buf);
+});
 
 router.delete("/local-sources/documents/:id", (req, res) => {
   const id = Number(req.params.id);

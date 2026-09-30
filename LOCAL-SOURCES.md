@@ -106,7 +106,8 @@
 | Запрос | Что делает |
 |---|---|
 | `GET /api/local-sources/documents` | документы и ход разбора (`sections: { total, done, failed, pending }`) |
-| `POST /api/local-sources/documents` | загрузить PDF: тело — сам файл (`Content-Type: application/pdf`), имя — `X-File-Name` (encodeURIComponent), модель разбора — `X-Provider`, `X-Model` |
+| `POST /api/local-sources/uploads/:uploadId?offset=&size=&name=&provider=&model=` | загрузить PDF кусками (так грузит клиент): тело — кусок файла с байта `offset`, `size` — размер всего файла. Ответ — `{ received }`, на последний кусок — документ, как ниже. Кусок не с того места — `409 { received }`: продолжить с него |
+| `POST /api/local-sources/documents?name=&provider=&model=` | загрузить PDF одним запросом (curl): тело — сам файл (`Content-Type: application/pdf`) |
 | `DELETE /api/local-sources/documents/:id` | удалить документ с разделами |
 | `GET /api/local-sources/documents/:id/file` | открыть PDF (`#page=N` — на странице) |
 | `GET /api/local-sources/documents/:id/sections` | разделы: страницы, состояние разбора, продукты вверх/вниз, описание |
@@ -143,10 +144,12 @@ node scripts/import-pdf.js --delete 1                 # удалить доку�
 прошлой версии (документы, нарезанные на фрагменты) при первом запуске сама
 разбирается на разделы из сохранённых файлов.
 
-Если перед сервером стоит nginx, проверьте `client_max_body_size`: по
-умолчанию он пропускает запросы до 1 МБ, и загрузка PDF побольше оборвётся
-ответом 413 ещё до сервера. Сервер принимает PDF до 100 МБ:
+nginx перед сервером настраивать не нужно. Клиент грузит PDF кусками по
+512 КБ — меньше предела nginx по умолчанию (`client_max_body_size 1m`), а
+имя файла и модель передаёт в адресе, а не своими заголовками: CORS ставит
+nginx, и заголовков не из его списка браузер не пропустит. Сервер собирает
+куски в `data/local-sources/uploads/` и, получив последний, добавляет
+документ; брошенные загрузки удаляются через 6 часов.
 
-```nginx
-client_max_body_size 100m;
-```
+Одним запросом (`POST /documents`) PDF больше 1 МБ пройдёт через nginx,
+только если поднять `client_max_body_size` — это нужно лишь для curl.

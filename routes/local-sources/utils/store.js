@@ -849,6 +849,7 @@ function close() {
 }
 
 module.exports = {
+  baseDir,
   addDocument,
   reparseLegacyDocuments,
   listDocuments,
