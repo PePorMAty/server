@@ -15,6 +15,8 @@ const {
   explainBadAnswer,
   safeJsonParse,
   pickItems,
+  isSchemaEcho,
+  droppedReasons,
   normalizeAndFilterItems,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
@@ -129,7 +131,8 @@ router.post("/gpt/step/sources", async (req, res) => {
     if (stream.aborted) return;
 
     const text = extractOutputText(openaiResp);
-    const rawItems = pickItems(safeJsonParse(text));
+    const parsed = safeJsonParse(text);
+    const rawItems = pickItems(parsed);
 
     // Оборванный ответ всё равно разбираем: если JSON в нём цел, источники
     // годятся, и выбрасывать их из-за статуса незачем.
@@ -138,7 +141,9 @@ router.post("/gpt/step/sources", async (req, res) => {
         JSON.stringify({
           success: false,
           http_status: 502,
-          error: explainBadAnswer(openaiResp, text, model, SOURCES_ANSWER),
+          error: isSchemaEcho(parsed)
+            ? `Модель «${model || "по умолчанию"}» вернула схему ответа вместо источников — для поиска она не подходит, выберите другую модель.`
+            : explainBadAnswer(openaiResp, text, model, SOURCES_ANSWER),
           ai: openaiResp?.ai,
           debug: {
             status: openaiResp?.status,
@@ -174,6 +179,7 @@ router.post("/gpt/step/sources", async (req, res) => {
           // ссылок или вовсе текст — по «ничего не нашлось» не различить.
           debug: {
             raw_items: rawItems.length,
+            dropped: droppedReasons(rawItems),
             output_text_preview: (text || "").slice(0, 1200),
           },
           took_ms: Date.now() - t0,

@@ -94,7 +94,9 @@ function withThinking(params) {
  * forced_search — искать всегда: иначе модель сама решает, нужен ли поиск, и
  * порой отвечает по памяти одним-двумя источниками. search_strategy (из
  * QWEN_SEARCH_STRATEGY, по умолчанию max) — глубина поиска: max собирает
- * больше страниц, чем turbo, ценой времени и токенов.
+ * больше страниц, чем turbo, ценой времени и токенов. enable_source — вернуть
+ * найденные страницы (search_info): по ним видно, искала ли модель на самом
+ * деле. Ответ за три секунды «с источниками» — это ответ по памяти.
  */
 function searchOptions() {
   const strategy = String(process.env.QWEN_SEARCH_STRATEGY || "max")
@@ -102,6 +104,7 @@ function searchOptions() {
     .toLowerCase();
   return {
     forced_search: true,
+    enable_source: true,
     ...(strategy && strategy !== "default" ? { search_strategy: strategy } : {}),
   };
 }
@@ -186,14 +189,18 @@ function paramFix(err, params, { searchRequired = false } = {}) {
     };
   }
 
-  if (params.search_options?.search_strategy && /search_strategy/i.test(msg)) {
-    return {
-      params: {
-        ...params,
-        search_options: without(params.search_options, "search_strategy"),
-      },
-      note: "модель не знает search_strategy",
-    };
+  // Жалоба на один ключ настроек поиска — убираем только его, остальные
+  // (прежде всего forced_search) оставляем.
+  for (const key of ["search_strategy", "enable_source"]) {
+    if (params.search_options?.[key] !== undefined && new RegExp(key, "i").test(msg)) {
+      return {
+        params: {
+          ...params,
+          search_options: without(params.search_options, key),
+        },
+        note: `модель не знает ${key}`,
+      };
+    }
   }
   if (params.search_options && /search_options|forced_search/i.test(msg)) {
     return {
@@ -364,8 +371,12 @@ function ensureJsonMention(messages) {
  */
 function withSchemaNote(messages, schema) {
   if (!schema) return messages;
+  // Формулировка важна: на «ответ — по этой схеме» малая модель возвращала
+  // саму схему. Прямо говорим, что это описание формата, а не образец ответа.
   const note =
-    "Ответ — один JSON-объект строго по этой схеме (JSON Schema), без пояснений вне JSON:\n" +
+    "ФОРМАТ ОТВЕТА. Ниже — JSON Schema: описание формата, а НЕ ответ. Не " +
+    "повторяй схему — верни один JSON-объект с данными, заполненный по ней, " +
+    "без пояснений вне JSON.\n" +
     JSON.stringify(schema);
   const sysIndex = messages.findIndex(
     (m) => m?.role === "system" && typeof m?.content === "string",
@@ -474,6 +485,11 @@ function chatToResponsesFormat(chatResp, meta = {}) {
       ms: meta.ms ?? null,
       fixes: meta.fixes ?? [],
       reasoningChars: reasoning.length,
+      // Сколько страниц нашёл веб-поиск (search_info, при enable_source).
+      // null — провайдер не сообщил; 0 — поиск был, но ничего не дал.
+      searchResults: Array.isArray(chatResp.search_info?.search_results)
+        ? chatResp.search_info.search_results.length
+        : null,
       usage: chatResp.usage ?? null,
     },
   };
@@ -631,12 +647,59 @@ function safeJsonParse(text) {
  */
 function pickItems(parsed) {
   if (Array.isArray(parsed)) return parsed;
-  if (!parsed || typeof parsed !== "object") return null;
+  if (!parsed || typeof parsed !== "object" || isSchemaEcho(parsed)) return null;
   for (const key of ["items", "sources", "results", "technology_sources"]) {
     if (Array.isArray(parsed[key])) return parsed[key];
   }
-  const arrays = Object.values(parsed).filter(Array.isArray);
+  // Поле назвали по-своему — берём единственный массив записей. Массив строк
+  // не годится: так у схемы выглядит required: ["items"].
+  const arrays = Object.values(parsed).filter(
+    (v) => Array.isArray(v) && v.some((x) => x && typeof x === "object"),
+  );
   return arrays.length === 1 ? arrays[0] : null;
+}
+
+/**
+ * Модель вернула саму схему ответа, а не данные по ней.
+ *
+ * Так делают малые модели, когда схема есть в промпте: qwen3.6-flash на поиске
+ * отдала { "type": "object", "properties": … } вместо источников.
+ */
+function isSchemaEcho(parsed) {
+  return (
+    !!parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    parsed.type === "object" &&
+    !!parsed.properties &&
+    typeof parsed.properties === "object"
+  );
+}
+
+/**
+ * Почему источники не прошли отбор: у скольких нет ссылки, названия или
+ * описания технологии. Нужно, чтобы «ни одного источника» не гадать.
+ */
+function droppedReasons(rawItems) {
+  let noUrl = 0;
+  let noTitle = 0;
+  let noText = 0;
+  for (const x of Array.isArray(rawItems) ? rawItems : []) {
+    if (!x || typeof x !== "object") {
+      noText++;
+      continue;
+    }
+    if (!String(x.url || "").replace(/^URL:\s*/i, "").trim()) noUrl++;
+    if (!String(x.title || "").trim()) noTitle++;
+    if (!String(x.technology_description || "").trim()) noText++;
+  }
+  return [
+    noUrl && `без ссылки — ${noUrl}`,
+    noTitle && `без названия — ${noTitle}`,
+    noText && `без описания технологии — ${noText}`,
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function buildSourcesSchema(maxItems) {
@@ -924,6 +987,8 @@ module.exports = {
   explainBadAnswer,
   safeJsonParse,
   pickItems,
+  isSchemaEcho,
+  droppedReasons,
   callOpenAIResponses,
   callOpenAIResponsesRaw,
   normalizeAndFilterItems,

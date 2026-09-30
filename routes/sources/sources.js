@@ -10,6 +10,7 @@ const {
   explainBadAnswer,
   safeJsonParse,
   pickItems,
+  isSchemaEcho,
   normalizeAndFilterItems,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
@@ -108,7 +109,8 @@ router.post("/gpt/sources", async (req, res) => {
     if (stream.aborted) return;
 
     const text = extractOutputText(openaiResp);
-    const rawItems = pickItems(safeJsonParse(text));
+    const parsed = safeJsonParse(text);
+    const rawItems = pickItems(parsed);
 
     // Оборванный ответ всё равно разбираем: если JSON в нём цел, источники
     // годятся. Статус уже 200 — поэтому причину отказа кладём внутрь.
@@ -117,10 +119,12 @@ router.post("/gpt/sources", async (req, res) => {
         JSON.stringify({
           success: false,
           http_status: 502,
-          error: explainBadAnswer(openaiResp, text, model, {
-            acc: "список источников",
-            gen: "списка источников",
-          }),
+          error: isSchemaEcho(parsed)
+            ? `Модель «${model || "по умолчанию"}» вернула схему ответа вместо источников — для поиска она не подходит, выберите другую модель.`
+            : explainBadAnswer(openaiResp, text, model, {
+                acc: "список источников",
+                gen: "списка источников",
+              }),
           ai: openaiResp?.ai,
           debug: {
             status: openaiResp?.status,
