@@ -10,14 +10,19 @@
 //   node scripts/check-models.js --tasks card            # только карточка
 //   node scripts/check-models.js --tasks graph           # граф целиком (долго)
 //   node scripts/check-models.js --serial                # по одной модели за раз
+//   node scripts/check-models.js --port 3210             # сервер на другом порту
 //
-// Нужен запущенный сервер (pm2): скрипт ходит в него по HTTP на порт из .env,
-// так что проверяется ровно то, что получает интерфейс. Запросы настоящие и
+// Нужен запущенный сервер (pm2): скрипт ходит в него по HTTP, так что
+// проверяется ровно то, что получает интерфейс. Порт — из .env; если там его
+// нет или сервер слушает другой (pm2 мог получить PORT при запуске), скрипт
+// находит сервер сам среди портов, которые слушает node. Запросы настоящие и
 // расходуют токены тарифа: полный прогон — примерно по три запроса на модель.
 
 require("dotenv").config();
 
-const PORT = process.env.PORT || 3001;
+const { execFileSync } = require("child_process");
+
+const PORT = Number(process.argv.includes("--port") ? arg("port") : process.env.PORT || 3001);
 
 /** Модели из выпадающего списка интерфейса (src/hooks/useAiConfig.ts). */
 const DEFAULT_MODELS = [
@@ -45,11 +50,131 @@ const TASKS = arg("tasks", "search,card,build")
   .filter(Boolean);
 const SERIAL = process.argv.includes("--serial");
 const TIMEOUT_MIN = Number(arg("timeout", "12"));
-const BASE = arg("url", `http://127.0.0.1:${PORT}/api/graphs`);
+/** Адрес указан явно — искать сервер на других портах не надо. */
+const EXPLICIT = process.argv.includes("--url") || process.argv.includes("--port");
+let BASE = arg("url", `http://127.0.0.1:${PORT}/api/graphs`);
 
 if (!MODELS.length) {
   console.error("Не заданы модели: --models имя1,имя2");
   process.exit(1);
+}
+
+/** Наш ли это сервер и жив ли он: у него есть шаблон промта графа. */
+async function isOurServer(base) {
+  try {
+    const r = await fetch(`${base}/prompt-layout`, { signal: AbortSignal.timeout(5000) });
+    const j = await r.json();
+    return typeof j?.promptLayout === "string";
+  } catch {
+    return false;
+  }
+}
+
+/** Порты, которые слушает node на этой машине (Linux), или null. */
+function nodePorts() {
+  try {
+    const out = execFileSync("ss", ["-ltnp"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const ports = new Set();
+    for (const line of out.split("\n")) {
+      if (!/users:\(\("node"/.test(line)) continue;
+      const addr = line.trim().split(/\s+/)[3] || "";
+      const port = Number(addr.slice(addr.lastIndexOf(":") + 1));
+      if (port) ports.add(port);
+    }
+    return [...ports];
+  } catch {
+    return nodePortsFromProc();
+  }
+}
+
+/**
+ * То же без ss — по /proc: сокеты процессов node и таблица слушающих портов.
+ * ss есть не везде (в минимальных образах его нет).
+ */
+function nodePortsFromProc() {
+  const fs = require("fs");
+  try {
+    const inodes = new Set();
+    for (const pid of fs.readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
+      let comm = "";
+      try {
+        comm = fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim();
+      } catch {
+        continue;
+      }
+      if (!comm.startsWith("node")) continue;
+      let fds = [];
+      try {
+        fds = fs.readdirSync(`/proc/${pid}/fd`);
+      } catch {
+        continue;
+      }
+      for (const fd of fds) {
+        try {
+          const m = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${pid}/fd/${fd}`));
+          if (m) inodes.add(m[1]);
+        } catch {}
+      }
+    }
+    const ports = new Set();
+    for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+      let lines = [];
+      try {
+        lines = fs.readFileSync(file, "utf8").split("\n").slice(1);
+      } catch {
+        continue;
+      }
+      for (const line of lines) {
+        // local_address · rem_address · st · … · inode; 0A — LISTEN
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 10 || cols[3] !== "0A" || !inodes.has(cols[9])) continue;
+        const port = parseInt(cols[1].split(":").pop(), 16);
+        if (port) ports.add(port);
+      }
+    }
+    return [...ports];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Найти сервер до начала проверок.
+ *
+ * Без этого при неверном порте все проверки падали одна за другой с одинаковым
+ * «сервер недоступен», и было непонятно — сервер лёг или просто не тот порт.
+ */
+async function locateServer() {
+  if (await isOurServer(BASE)) return true;
+  if (EXPLICIT) {
+    console.error(`Сервер не отвечает по адресу ${BASE}.`);
+    return false;
+  }
+  const ports = nodePorts();
+  for (const p of (ports ?? []).filter((x) => x !== PORT)) {
+    const base = `http://127.0.0.1:${p}/api/graphs`;
+    if (await isOurServer(base)) {
+      console.log(`На порту ${PORT} сервера нет — нашёл его на порту ${p}.\n`);
+      BASE = base;
+      return true;
+    }
+  }
+  console.error(`Сервер не отвечает на порту ${PORT}.`);
+  if (ports && ports.length) {
+    console.error(`node слушает порты: ${ports.join(", ")} — но нашего сервера среди них нет.`);
+  } else if (ports) {
+    console.error("node не слушает ни одного порта: похоже, сервер не запущен или упал.");
+  }
+  console.error(
+    "\nЧто проверить:\n" +
+      "  pm2 status                                   — сервер online? не растёт ли ↺ (перезапуски)?\n" +
+      "  pm2 logs --lines 40 --nostream               — ошибка при запуске?\n" +
+      "  node scripts/check-models.js --port <порт>   — если сервер на другом порту",
+  );
+  return false;
 }
 
 /** POST к серверу. Долгие маршруты шлют пробелы, пока ждут модель, — срезаем. */
@@ -213,6 +338,11 @@ async function checkModel(model) {
 }
 
 (async () => {
+  if (!(await locateServer())) {
+    process.exitCode = 2;
+    return;
+  }
+
   console.log(
     `Сервер: ${BASE}\nПровайдер: ${provider}; модели: ${MODELS.join(", ")}\n` +
       `Проверки: ${TASKS.map((t) => TASK_DEFS[t].title).join(", ")}` +
