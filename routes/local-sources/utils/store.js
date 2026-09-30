@@ -39,8 +39,12 @@ const EXCERPT_CHARS = 2500;
 /** Раздел «в работе» дольше этого — разбор умер вместе с процессом. */
 const STALE_WORK_MS = 30 * 60 * 1000;
 
-/** Версия расчёта ключей продуктов: сменилась — связи пересчитываются. */
-const KEYS_VERSION = 2;
+/**
+ * Версия расчёта связей раздела с продуктами (ключи названий, отбор отходов
+ * и катализаторов): сменилась — связи пересчитываются из сохранённых
+ * названий, без модели.
+ */
+const KEYS_VERSION = 3;
 
 /** Греческие буквы и цифры в названии не различают продукты для поиска. */
 const GREEK = new Set(["альф", "бет", "гамм", "дельт", "омег"]);
@@ -143,8 +147,12 @@ function migrate(conn) {
   const version = conn.prepare("SELECT value FROM meta WHERE name = 'keys_version'").get()?.value;
   if (Number(version) !== KEYS_VERSION) {
     conn.transaction(() => {
+      // В прежнем порядке: модель пишет целевой продукт первым.
       const links = conn
-        .prepare("SELECT DISTINCT section_id, label, role, origin FROM section_products")
+        .prepare(
+          `SELECT section_id, label, role, origin FROM section_products
+           GROUP BY section_id, label, role, origin ORDER BY MIN(rowid)`,
+        )
         .all();
       conn.exec("DELETE FROM section_products");
       for (const l of links) linkSection(conn, l.section_id, [l.label], l.role, l.origin);
@@ -228,10 +236,32 @@ function productKeys(productName) {
 }
 
 /**
+ * Отходы и выбросы процесса. Продуктом раздела они не бывают, как бы модель
+ * их ни записала («Отходящие газы», «Кубовая жидкость», «Отработанный
+ * катализатор»). Сырьём — бывают (очистка сточных вод), поэтому отбор только
+ * для того, что получают.
+ */
+const WASTE =
+  /(^|[\s-])(отход|сточн|кубов|примес|осмол|шлам)|загрязн|стоки(\s|$)|отработанн\S*\s+(\S+\s+)?(катализатор|сорбент|адсорбент|абсорбент|уголь|силикагел|масл|смол|кислот|щелоч|раствор)/;
+/** Катализатор в продукт не переходит — сырьём он не бывает. */
+const CATALYST = /катализатор|цеолит/;
+
+/**
+ * Вещество не в своём списке: отход среди продуктов, катализатор среди
+ * сырья. Возвращает, куда оно на самом деле относится, или null.
+ */
+function misfiled(name, role) {
+  const s = String(name || "").toLowerCase().replace(/ё/g, "е");
+  if (role === "raw") return CATALYST.test(s) ? "auxiliaries" : null;
+  return WASTE.test(s) ? "wastes" : null;
+}
+
+/**
  * Связать раздел с продуктами. Роль задаёт направление:
  *   product, byproduct — раздел о том, как их получают («вверх»);
  *   raw — они сырьё, раздел о том, что из них делают («вниз»);
  *   intermediate — промежуточный поток: получают и тут же перерабатывают.
+ * Отходы и катализаторы от модели (misfiled) не связываются.
  */
 function linkSection(conn, sectionId, names, role, origin) {
   const dirs =
@@ -249,7 +279,7 @@ function linkSection(conn, sectionId, names, role, origin) {
   );
   for (const name of names) {
     const label = String(name || "").trim();
-    if (!label) continue;
+    if (!label || (origin === "model" && misfiled(label, role))) continue;
     for (const key of nameKeys(label)) {
       for (const dir of dirs) stmt.run(sectionId, key, label, dir, role, origin);
     }
@@ -485,6 +515,14 @@ function pageLabel(from, to, offset) {
   return a === b ? `стр. ${a}` : `стр. ${a}–${b}`;
 }
 
+/**
+ * Название из заголовка — в родительном падеже («оксида пропилена»): для
+ * подписи берём главное имя из справочника, если он вещество знает.
+ */
+function titleLabel(label) {
+  return identify(label)?.canon || label;
+}
+
 /** Разделы документа с их продуктами — для списка в интерфейсе. */
 function listSections(docId) {
   const conn = getDb();
@@ -492,53 +530,73 @@ function listSections(docId) {
   if (!doc) return null;
   const links = conn
     .prepare(
-      `SELECT sp.section_id, sp.label, sp.direction, sp.role, sp.origin
+      `SELECT sp.section_id, sp.label, sp.role, sp.origin
        FROM section_products sp JOIN sections s ON s.id = sp.section_id
        WHERE s.doc_id = ?
-       ORDER BY CASE sp.role WHEN 'product' THEN 0 WHEN 'byproduct' THEN 1
-                             WHEN 'intermediate' THEN 2 ELSE 3 END, sp.rowid`,
+       ORDER BY sp.rowid`,
     )
     .all(docId);
-  // Названия — от модели; пока модель раздел не разобрала — из заголовка
-  // («этилена» в родительном падеже — ключ для поиска, а не подпись).
+  // Названия — от модели; пока модель раздел не разобрала — из заголовка.
   const byId = new Map();
   for (const l of links) {
-    if (!byId.has(l.section_id)) {
-      byId.set(l.section_id, {
-        model: { up: new Set(), down: new Set() },
-        title: { up: new Set(), down: new Set() },
-      });
-    }
-    byId.get(l.section_id)[l.origin === "model" ? "model" : "title"][l.direction].add(l.label);
+    if (!byId.has(l.section_id)) byId.set(l.section_id, { model: new Map(), title: new Map() });
+    const bucket = byId.get(l.section_id)[l.origin === "model" ? "model" : "title"];
+    if (!bucket.has(l.role)) bucket.set(l.role, new Set());
+    bucket.get(l.role).add(l.origin === "model" ? l.label : titleLabel(l.label));
   }
-  const labels = (id, dir) => {
+  const names = (id, role) => {
     const e = byId.get(id);
     if (!e) return [];
-    return [...(e.model[dir].size ? e.model[dir] : e.title[dir])];
+    const fromModel = [...e.model.values()].some((s) => s.size);
+    return [...((fromModel ? e.model : e.title).get(role) ?? [])];
   };
   return conn
     .prepare(
       `SELECT id, ord, number, title, full_title, path, page_from, page_to, status, summary,
-              model, error, decoded_at, length(text) AS chars
+              extracted, model, error, decoded_at, length(text) AS chars
        FROM sections WHERE doc_id = ? ORDER BY ord`,
     )
     .all(docId)
-    .map((s) => ({
-      id: s.id,
-      number: s.number,
-      title: s.full_title || s.title,
-      path: s.path,
-      pageFrom: s.page_from,
-      pageTo: s.page_to,
-      pages: pageLabel(s.page_from, s.page_to, doc.page_offset),
-      chars: s.chars,
-      status: s.status,
-      summary: s.summary,
-      model: s.model,
-      error: s.error,
-      decodedAt: s.decoded_at,
-      products: { up: labels(s.id, "up"), down: labels(s.id, "down") },
-    }));
+    .map((s) => {
+      let extra = {};
+      try {
+        extra = JSON.parse(s.extracted || "{}") || {};
+      } catch {
+        // старый или битый разбор — без вспомогательного и отходов
+      }
+      const list = (v) => (Array.isArray(v) ? v.map(String) : []);
+      const made = [...names(s.id, "product"), ...names(s.id, "byproduct")];
+      const intermediates = names(s.id, "intermediate");
+      const raw = names(s.id, "raw");
+      return {
+        id: s.id,
+        number: s.number,
+        title: s.full_title || s.title,
+        path: s.path,
+        pageFrom: s.page_from,
+        pageTo: s.page_to,
+        pages: pageLabel(s.page_from, s.page_to, doc.page_offset),
+        chars: s.chars,
+        status: s.status,
+        summary: s.summary,
+        model: s.model,
+        error: s.error,
+        decodedAt: s.decoded_at,
+        // Что раздел знает о веществах. Связаны с продуктами (источник
+        // «вверх» для получаемых, «вниз» для сырья) первые четыре списка.
+        products: {
+          products: names(s.id, "product"),
+          byproducts: names(s.id, "byproduct"),
+          intermediates,
+          raw,
+          auxiliaries: list(extra.auxiliaries),
+          wastes: list(extra.wastes),
+          // Как раньше, по направлениям — для клиента, ещё не обновлённого.
+          up: [...made, ...intermediates],
+          down: [...intermediates, ...raw],
+        },
+      };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -564,9 +622,56 @@ function claimSection(worker = process.pid) {
   return { section: row, document: doc };
 }
 
-/** Раздел разобран: описание, продукты и связи от модели. */
+/** Названия без повторов (без учёта регистра), в порядке появления. */
+function uniqueNames(list) {
+  const seen = new Set();
+  return list.filter((n) => {
+    const k = String(n).toLowerCase();
+    return !seen.has(k) && seen.add(k);
+  });
+}
+
+/**
+ * Вещества раздела по спискам — как их запишет база: отход, который модель
+ * записала среди продуктов, и катализатор среди сырья (misfiled) переходят в
+ * свои списки.
+ */
+function assignRoles(result) {
+  const out = {
+    products: [],
+    byproducts: [],
+    intermediates: [],
+    raw: [],
+    auxiliaries: [...(result.auxiliaries || [])],
+    wastes: [...(result.wastes || [])],
+  };
+  for (const [list, role] of [
+    ["products", "product"],
+    ["byproducts", "byproduct"],
+    ["intermediates", "intermediate"],
+    ["raw", "raw"],
+  ]) {
+    for (const name of result[list] || []) out[misfiled(name, role) || list].push(name);
+  }
+  out.auxiliaries = uniqueNames(out.auxiliaries);
+  out.wastes = uniqueNames(out.wastes);
+  return out;
+}
+
+/**
+ * Раздел разобран: описание, продукты и связи от модели.
+ *
+ * Вспомогательное (катализаторы, растворители, пар) и отходы с продуктами не
+ * связываются, но у раздела их видно (в extracted).
+ */
 function finishSection(id, result, model) {
   const conn = getDb();
+  const roles = assignRoles(result);
+  const extracted = {
+    ...(result.extracted || {}),
+    auxiliaries: roles.auxiliaries,
+    wastes: roles.wastes,
+  };
   conn.transaction(() => {
     conn
       .prepare(
@@ -577,16 +682,16 @@ function finishSection(id, result, model) {
       .run(
         result.summary,
         JSON.stringify(result.io || []),
-        JSON.stringify(result.extracted || {}),
+        JSON.stringify(extracted),
         model || null,
         new Date().toISOString(),
         id,
       );
     conn.prepare("DELETE FROM section_products WHERE section_id = ? AND origin = 'model'").run(id);
-    linkSection(conn, id, result.products || [], "product", "model");
-    linkSection(conn, id, result.byproducts || [], "byproduct", "model");
-    linkSection(conn, id, result.intermediates || [], "intermediate", "model");
-    linkSection(conn, id, result.raw || [], "raw", "model");
+    linkSection(conn, id, roles.products, "product", "model");
+    linkSection(conn, id, roles.byproducts, "byproduct", "model");
+    linkSection(conn, id, roles.intermediates, "intermediate", "model");
+    linkSection(conn, id, roles.raw, "raw", "model");
   })();
 }
 
@@ -673,12 +778,15 @@ function sectionSource(r) {
   };
 }
 
+/** Роль продукта в разделе по её месту в порядке (rank в sectionRows). */
+const ROLE_BY_RANK = ["product", "byproduct", "intermediate", "raw"];
+
 /**
- * Разделы-источники продукта в направлении: «вверх» — где его производят
- * (целевой продукт первым, потом попутный), «вниз» — где он сырьё.
+ * Разделы, связанные с продуктом (его ключами) в направлении: «вверх» — где
+ * его производят (целевой продукт первым, потом попутный), «вниз» — где он
+ * сырьё. limit = 0 — все.
  */
-function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT } = {}) {
-  const keys = productKeys(productName);
+function sectionRows(keys, direction, limit = 0) {
   if (!keys.length) return [];
   const dir = direction === "up" ? "up" : "down";
   const marks = keys.map(() => "?").join(",");
@@ -700,10 +808,14 @@ function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT }
        WHERE sp.direction = ? AND sp.key IN (${marks}) ${notProduced}
        GROUP BY s.id
        ORDER BY rank, by_model DESC, d.id, s.ord
-       LIMIT ?`,
+       ${limit > 0 ? "LIMIT ?" : ""}`,
     )
-    .all(dir, ...keys, ...(dir === "down" ? keys : []), limit)
-    .map(sectionSource);
+    .all(dir, ...keys, ...(dir === "down" ? keys : []), ...(limit > 0 ? [limit] : []));
+}
+
+/** Разделы-источники продукта графа в направлении — для обобщения шага. */
+function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT } = {}) {
+  return sectionRows(productKeys(productName), direction, limit).map(sectionSource);
 }
 
 /**
@@ -813,17 +925,254 @@ function webSourcesFor(productName, direction) {
        ORDER BY found_at DESC, id ASC`,
     )
     .all(productKey(productName), direction === "up" ? "up" : "down")
-    .map((r) => ({
-      origin: "web",
-      title: r.title,
-      url: r.url,
-      access_hint: r.access_hint,
-      technology_description: r.technology_description,
-      inputs_outputs_hint: parseList(r.inputs_outputs_hint),
-      evidence_snippets: parseList(r.evidence_snippets),
-      savedAt: r.found_at,
-      model: r.model || undefined,
-    }));
+    .map(webSource);
+}
+
+function webSource(r) {
+  return {
+    origin: "web",
+    title: r.title,
+    url: r.url,
+    access_hint: r.access_hint,
+    technology_description: r.technology_description,
+    inputs_outputs_hint: parseList(r.inputs_outputs_hint),
+    evidence_snippets: parseList(r.evidence_snippets),
+    savedAt: r.found_at,
+    model: r.model || undefined,
+    /** Для какого продукта графа модель искала («ИПБ» у «Кумола»). */
+    product: r.product_label,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Продукты базы — список во вкладке «База источников»
+// ---------------------------------------------------------------------------
+
+/** Приставки-локанты не в счёт при сортировке: «2-Этилгексанол» — на «Э». */
+const LOCANT_PREFIX = /^(?:(?:\d+(?:,\d+)*|[α-ω]|н|n|трет|втор|изо|цис|транс|о|м|п)-)+/i;
+
+function sortKey(label) {
+  return label.toLowerCase().replace(/ё/g, "е").replace(LOCANT_PREFIX, "");
+}
+
+/**
+ * Подпись с заглавной, если модель написала со строчной («ацетальдегид»).
+ * После приставки — заглавная у имени, а приставка как есть: «н-Бутанол»,
+ * «2-Этилгексанол», «α-Метилстирол».
+ */
+function capitalized(label) {
+  const m = label.match(/^((?:(?:\d+(?:,\d+)*|[α-ω]|н|трет|втор)-)*)([а-яёa-z])(?=[а-яёa-z])/);
+  return m ? m[1] + m[2].toUpperCase() + label.slice(m[0].length) : label;
+}
+
+/**
+ * Какое написание лучше для подписи: с заглавной после приставки
+ * («2-Этилгексанол», «н-Бутан») — 2, строчное — 1, приставка с заглавной в
+ * начале фразы («Н-бутан») — 0.
+ */
+function casing(label) {
+  if (/^Н-[а-яё]/.test(label)) return 0;
+  return /^(?:(?:\d+(?:,\d+)*|[α-ω]|н|трет|втор)-)?[A-ZА-ЯЁ]/.test(label) ? 2 : 1;
+}
+
+/**
+ * Продукты базы — для списка «База источников → Продукты».
+ *
+ * Разделы пишут одно вещество по-разному («Пропилен» и «Пропен», «Кумол» и
+ * «Изопропилбензол», «оксида пропилена» в заголовке): названия с общим
+ * ключом (nameKeys) — один продукт. Подпись — название, которым модель
+ * называла его в большем числе разделов.
+ *
+ * Продукты, которые встречаются только промежуточными потоками («Контактный
+ * газ», «Реакционная масса»), в список не идут: это не товар и не сырьё, а
+ * поток внутри одного процесса, — их видно у разделов документа.
+ *
+ * Числа — те же, что отдаст productSources: вверх — разделы, где продукт
+ * получают; вниз — где он сырьё (без разделов, где он целевой продукт).
+ *
+ * @param graphNames продукты графа: у продукта базы отмечаем, каким узлам
+ *                   графа он отвечает (сверка — как у значков на узлах)
+ */
+function listProducts(graphNames = []) {
+  const conn = getDb();
+  const links = conn
+    .prepare("SELECT section_id, key, label, direction, role, origin FROM section_products")
+    .all();
+  const webRows = conn.prepare("SELECT product_label, direction FROM web_sources").all();
+  // Разделы, где модель назвала получаемое: догадка по заголовку там уже не
+  // нужна («Производство ацетатов» → «Метилацетат», «Бутилацетат»…).
+  const namedByModel = new Set(
+    links.filter((l) => l.origin === "model" && l.direction === "up").map((l) => l.section_id),
+  );
+
+  // Названия и ключи — вершины; связь «название — его ключ». Продукт —
+  // связная группа.
+  const parent = new Map();
+  const find = (x) => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root);
+    while (parent.get(x) !== root) {
+      const next = parent.get(x);
+      parent.set(x, root);
+      x = next;
+    }
+    return root;
+  };
+  const join = (a, b) => {
+    if (!parent.has(a)) parent.set(a, a);
+    if (!parent.has(b)) parent.set(b, b);
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  for (const l of links) join(`n:${l.label}`, `k:${l.key}`);
+  const webKeys = new Map();
+  for (const w of webRows) {
+    if (!webKeys.has(w.product_label)) webKeys.set(w.product_label, nameKeys(w.product_label));
+    for (const k of webKeys.get(w.product_label)) join(`n:${w.product_label}`, `k:${k}`);
+  }
+
+  const groups = new Map();
+  const groupOf = (label) => {
+    const root = find(`n:${label}`);
+    let g = groups.get(root);
+    if (!g) {
+      g = {
+        keys: new Set(),
+        labels: new Map(),
+        up: new Set(),
+        down: new Set(),
+        made: new Set(),
+        roles: new Set(),
+        web: { up: 0, down: 0 },
+      };
+      groups.set(root, g);
+    }
+    return g;
+  };
+  const labelStat = (g, label) => {
+    let c = g.labels.get(label);
+    if (!c) {
+      c = { model: new Set(), title: new Set(), product: 0, web: 0 };
+      g.labels.set(label, c);
+    }
+    return c;
+  };
+  for (const l of links) {
+    const g = groupOf(l.label);
+    g.keys.add(l.key);
+    g.roles.add(l.role);
+    g[l.direction].add(l.section_id);
+    if (l.direction === "up" && l.role === "product") g.made.add(l.section_id);
+    const c = labelStat(g, l.label);
+    c[l.origin === "model" ? "model" : "title"].add(l.section_id);
+    if (l.role === "product") c.product++;
+  }
+  for (const w of webRows) {
+    const keys = webKeys.get(w.product_label);
+    if (!keys.length) continue;
+    const g = groupOf(w.product_label);
+    for (const k of keys) g.keys.add(k);
+    g.web[w.direction === "up" ? "up" : "down"]++;
+    labelStat(g, w.product_label).web++;
+  }
+
+  // Какие продукты графа каким ключам отвечают.
+  const graphByKey = new Map();
+  for (const name of new Set(graphNames.map((n) => String(n || "").trim()).filter(Boolean))) {
+    for (const k of productKeys(name)) {
+      if (!graphByKey.has(k)) graphByKey.set(k, new Set());
+      graphByKey.get(k).add(name);
+    }
+  }
+
+  const products = [];
+  let intermediates = 0;
+  for (const g of groups.values()) {
+    const web = g.web.up + g.web.down;
+    if (!web && [...g.roles].every((r) => r === "intermediate")) {
+      intermediates++;
+      continue;
+    }
+    const named = [...g.labels.values()].some((c) => c.model.size || c.web);
+    // Только из заголовков, а модель в этих разделах назвала другое: это
+    // группа веществ («ацетатов»), а не продукт.
+    if (!named && [...g.up, ...g.down].every((id) => namedByModel.has(id))) continue;
+    // Подпись: у модели — в большем числе разделов, потом целевым продуктом,
+    // потом с заглавной и короче. Из заголовка («этилена») — только если
+    // других нет, и тогда именем из справочника.
+    const ranked = [...g.labels.entries()]
+      .filter(([, c]) => c.model.size || c.web)
+      .sort(
+        ([a, ca], [b, cb]) =>
+          cb.model.size - ca.model.size ||
+          cb.product - ca.product ||
+          cb.web - ca.web ||
+          casing(b) - casing(a) ||
+          a.length - b.length ||
+          a.localeCompare(b, "ru"),
+      )
+      .map(([label]) => label);
+    const label = capitalized(ranked[0] ?? titleLabel([...g.labels.keys()][0]));
+    const seen = new Set([label.toLowerCase()]);
+    const names = ranked.filter((n) => !seen.has(n.toLowerCase()) && seen.add(n.toLowerCase()));
+    const onGraph = new Set();
+    for (const k of g.keys) for (const n of graphByKey.get(k) ?? []) onGraph.add(n);
+    const keys = [...g.keys].sort();
+    products.push({
+      id: keys[0],
+      label,
+      names,
+      keys,
+      up: g.up.size,
+      down: [...g.down].filter((id) => !g.made.has(id)).length,
+      web: g.web,
+      onGraph: [...onGraph],
+    });
+  }
+  products.sort((a, b) => sortKey(a.label).localeCompare(sortKey(b.label), "ru"));
+  return { products, hidden: { intermediates } };
+}
+
+/** Раздел — строкой списка источников продукта (вкладка «База источников»). */
+function sectionItem(r) {
+  const doc = r.short_title || r.doc_title;
+  return {
+    sectionId: r.id,
+    docId: r.doc_id,
+    docTitle: doc,
+    title: r.full_title || r.title,
+    pages: pageLabel(r.page_from, r.page_to, r.page_offset),
+    page: r.page_from,
+    url: `local-sources/documents/${r.doc_id}/file?section=${r.id}#page=${r.page_from}`,
+    role: ROLE_BY_RANK[r.rank] ?? "raw",
+    byModel: Boolean(r.by_model),
+    status: r.status,
+    summary: r.summary || null,
+  };
+}
+
+/**
+ * Все источники продукта базы (его ключи — из listProducts): разделы вверх
+ * и вниз и сохранённые веб-источники.
+ */
+function productSources(keys) {
+  const want = new Set(keys);
+  const web = { up: [], down: [] };
+  const cache = new Map();
+  for (const r of getDb()
+    .prepare("SELECT * FROM web_sources ORDER BY found_at DESC, id ASC")
+    .all()) {
+    if (!cache.has(r.product_label)) cache.set(r.product_label, nameKeys(r.product_label));
+    if (cache.get(r.product_label).some((k) => want.has(k))) {
+      web[r.direction === "up" ? "up" : "down"].push(webSource(r));
+    }
+  }
+  return {
+    up: sectionRows(keys, "up").map(sectionItem),
+    down: sectionRows(keys, "down").map(sectionItem),
+    web,
+  };
 }
 
 /** Сводка базы — для страницы состояния и скрипта. */
@@ -857,12 +1206,15 @@ module.exports = {
   deleteDocument,
   listSections,
   claimSection,
+  assignRoles,
   finishSection,
   failSection,
   requeue,
   resetStale,
   sourcesFor,
   countsFor,
+  listProducts,
+  productSources,
   saveWebSources,
   webSourcesFor,
   productKeys,

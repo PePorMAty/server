@@ -21,6 +21,13 @@
 //   POST   /api/local-sources/for-product            — { product, direction } →
 //                                                       разделы документов и
 //                                                       сохранённые веб-источники
+//                                                       (для обобщения шага)
+//   POST   /api/local-sources/products               — { graph?: [...] } → продукты базы
+//                                                       (названия сведены, числа
+//                                                       вверх/вниз, какие узлы графа)
+//   POST   /api/local-sources/product-sources        — { keys } → все источники
+//                                                       продукта базы: разделы вверх
+//                                                       и вниз, веб-источники
 //
 // Продукт ищется, как при опознании: по всем написаниям из справочника.
 
@@ -248,6 +255,33 @@ router.post("/local-sources/for-product", (req, res) => {
     });
   } catch (e) {
     console.error("[local-sources] источники продукта:", e);
+    fail(res, 500, e.message);
+  }
+});
+
+/** Список строк из тела запроса: без пустых и повторов, не больше max. */
+function stringList(v, max) {
+  return Array.isArray(v)
+    ? [...new Set(v.map((x) => String(x ?? "").trim()).filter(Boolean))].slice(0, max)
+    : [];
+}
+
+router.post("/local-sources/products", (req, res) => {
+  try {
+    res.json({ success: true, ...store.listProducts(stringList(req.body?.graph, 2000)) });
+  } catch (e) {
+    console.error("[local-sources] продукты базы:", e);
+    fail(res, 500, e.message);
+  }
+});
+
+router.post("/local-sources/product-sources", (req, res) => {
+  const keys = stringList(req.body?.keys, 100);
+  if (!keys.length) return fail(res, 400, "keys is required");
+  try {
+    res.json({ success: true, ...store.productSources(keys) });
+  } catch (e) {
+    console.error("[local-sources] источники продукта базы:", e);
     fail(res, 500, e.message);
   }
 });

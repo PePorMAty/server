@@ -11,6 +11,7 @@
 //   node scripts/import-pdf.js --decode <номер> [--all]  — разобрать заново: упавшие (или все) разделы
 //   node scripts/import-pdf.js --delete <номер>          — удалить документ
 //   node scripts/import-pdf.js --find "Этилен"           — что база отдаст продукту вверх и вниз
+//   node scripts/import-pdf.js --products [запрос]       — продукты базы (как во вкладке «База источников»)
 //
 // Пишет в ту же базу, что и загрузка через интерфейс (data/local-sources/).
 // Сервер перезапускать не нужно: документы видны сразу, а неразобранные
@@ -70,6 +71,26 @@ const STRUCTURE = {
   pages: "кусками по 10 страниц",
 };
 
+/**
+ * Что раздел знает о веществах. Для продукта раздел — источник «вверх»
+ * (как его получают), если продукт тут получают, и «вниз» (что из него
+ * делают), если он тут сырьё.
+ */
+const ROLE_LINES = [
+  ["products", "получают"],
+  ["byproducts", "попутно"],
+  ["raw", "сырьё"],
+  ["intermediates", "промежуточные"],
+  ["auxiliaries", "вспомогательное"],
+  ["wastes", "отходы и выбросы"],
+];
+
+function printRoles(roles, indent) {
+  for (const [key, label] of ROLE_LINES) {
+    if (roles[key]?.length) console.log(`${indent}${label}: ${roles[key].join(", ")}`);
+  }
+}
+
 /** Разобрать очередь моделью здесь же, показывая ход. */
 async function decodeQueue() {
   // Разделы, брошенные прерванным прошлым запуском, — снова в очередь.
@@ -82,10 +103,11 @@ async function decodeQueue() {
     n++;
     const title = e.section.full_title || e.section.title;
     if (e.ok) {
-      const r = e.result;
-      console.log(
-        `[${n}/${pending}] ✓ ${title}\n        вверх: ${[...r.products, ...r.byproducts].join(", ") || "—"}\n        вниз (сырьё): ${r.raw.join(", ") || "—"}`,
-      );
+      // Промежуточные — только в --sections: в ходе разбора они шум.
+      const roles = store.assignRoles(e.result);
+      delete roles.intermediates;
+      console.log(`[${n}/${pending}] ✓ ${title}`);
+      printRoles(roles, "        ");
     } else {
       console.log(`[${n}/${pending}] ✗ ${title}: ${e.error}`);
     }
@@ -156,8 +178,7 @@ function sections(id) {
   const mark = { done: "✓", failed: "✗", pending: "…", working: "…" };
   for (const s of list) {
     console.log(`${mark[s.status] || "?"} ${s.title} (${s.pages})${s.error ? ` — ${s.error}` : ""}`);
-    if (s.products.up.length) console.log(`    вверх: ${s.products.up.join(", ")}`);
-    if (s.products.down.length) console.log(`    вниз:  ${s.products.down.join(", ")}`);
+    printRoles(s.products, "    ");
   }
 }
 
@@ -175,6 +196,24 @@ function find(product) {
   }
 }
 
+/** Продукты базы: ↑ — разделов «как получают», ↓ — «что из него делают». */
+function products(query) {
+  const q = query.trim().toLowerCase();
+  const { products: all, hidden } = store.listProducts();
+  const shown = q
+    ? all.filter((p) => [p.label, ...p.names].some((n) => n.toLowerCase().includes(q)))
+    : all;
+  for (const p of shown) {
+    const web = p.web.up + p.web.down;
+    console.log(
+      `${p.label}${p.names.length ? ` (${p.names.join(", ")})` : ""} — ↑${p.up} ↓${p.down}${web ? `, из интернета ${web}` : ""}`,
+    );
+  }
+  console.log(
+    `\nПродуктов: ${shown.length}${q ? ` из ${all.length}` : ""}; только промежуточных потоков, не показаны: ${hidden.intermediates}.`,
+  );
+}
+
 (async () => {
   try {
     if (!argv.length || flag("--help")) {
@@ -182,7 +221,7 @@ function find(product) {
         fs
           .readFileSync(__filename, "utf8")
           .split("\n")
-          .slice(2, 18)
+          .slice(2, 19)
           .map((l) => l.replace(/^\/\/ ?/, ""))
           .join("\n"),
       );
@@ -208,6 +247,8 @@ function find(product) {
       console.log(store.deleteDocument(id) ? `Документ №${id} удалён.` : `Документа №${option("--delete")} нет.`);
     } else if (flag("--find")) {
       find(argv.slice(argv.indexOf("--find") + 1).join(" "));
+    } else if (flag("--products")) {
+      products(argv.slice(argv.indexOf("--products") + 1).join(" "));
     } else {
       await importFiles(positional);
     }
