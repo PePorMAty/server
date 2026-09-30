@@ -127,10 +127,13 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       .json({ success: false, error: "sources[] is required" });
   }
 
-  // Отсечка по количеству релевантных блоков (как в /sources/aggregate)
+  // Отсечка по количеству блоков. Было 5 (как в /sources/aggregate); теперь
+  // к найденному моделью добавляются PDF из локальной базы, и в сумме
+  // источников бывает больше — берём до 10, локальные первыми. Каждый блок
+  // обрезан до maxBlockChars, так что в окно контекста модели это влезает.
   const { picked, blocks: rawBlocks } = pickTechnologyBlocksFromSources(
     sources,
-    5,
+    10,
   );
   const blocks = rawBlocks.map((b) => clip(b, maxBlockChars)).filter(Boolean);
 

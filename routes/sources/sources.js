@@ -11,6 +11,7 @@ const {
   filterItemsByAllowedDomains,
   searchSources,
 } = require("./utils");
+const { saveWebSources } = require("../local-sources/utils/store");
 
 // аккуратный heartbeat, который НЕ ломает JSON
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -150,6 +151,14 @@ router.post("/gpt/sources", async (req, res) => {
         }),
       );
     }
+
+    // Найденное — в общую базу (как в /gpt/step/sources).
+    saveWebSources(
+      productName,
+      direction,
+      items.slice(0, maxItems),
+      model || openaiResp?.ai?.model,
+    );
 
     const blocks_preview = items
       .slice(0, maxItems)

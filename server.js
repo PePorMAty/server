@@ -17,6 +17,7 @@ const transformationBetween = require("./routes/transformation-between/transform
 const techDescription = require("./routes/tech-description/tech-description");
 const shareRoutes = require("./routes/share/share");
 const industryRoutes = require("./routes/industry/industry");
+const localSourcesRoutes = require("./routes/local-sources/local-sources");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -98,6 +99,8 @@ app.use("/api/graphs", techDescription);
 app.use("/api/graphs", shareRoutes);
 // Слой промышленных данных (ГИСП) — свой префикс: это не про графы.
 app.use("/api", industryRoutes);
+// Локальная база источников: PDF заказчика и найденное моделью.
+app.use("/api", localSourcesRoutes);
 
 // Health check
 app.get("/api/health", async (req, res) => {

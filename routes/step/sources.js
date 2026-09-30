@@ -17,6 +17,7 @@ const {
   filterItemsByAllowedDomains,
   searchSources,
 } = require("../sources/utils");
+const { saveWebSources } = require("../local-sources/utils/store");
 
 /** Что ждали от модели — для текста ошибки. */
 const SOURCES_ANSWER = { acc: "список источников", gen: "списка источников" };
@@ -202,6 +203,10 @@ router.post("/gpt/step/sources", async (req, res) => {
     const exhausted =
       existingUrls.size > 0 &&
       picked.every((it) => existingUrls.has(String(it?.url || "").trim()));
+
+    // Найденное — в общую базу: продукт в любом другом графе получит эти
+    // источники без нового запроса к модели.
+    saveWebSources(productName, direction, picked, model || openaiResp?.ai?.model);
 
     return res.end(
       JSON.stringify({

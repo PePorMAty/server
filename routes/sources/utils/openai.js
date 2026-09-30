@@ -968,12 +968,19 @@ function normalizeAndFilterItems(items) {
  * графа (там у источника только название и ссылка), обобщение отказывало
  * «Need at least 1 technology_description block», хотя шестой и дальше
  * источники текст имели.
+ *
+ * PDF из локальной базы (origin: "local") идут первыми: их загрузил заказчик,
+ * и у них приоритет над найденным в сети. Порядок внутри групп — как пришёл.
  */
 function pickTechnologyBlocksFromSources(sources, max = 5) {
   const withText = Array.isArray(sources)
     ? sources.filter((s) => String(s?.technology_description || "").trim())
     : [];
-  const picked = withText.slice(0, max);
+  const ordered = [
+    ...withText.filter((s) => s?.origin === "local"),
+    ...withText.filter((s) => s?.origin !== "local"),
+  ];
+  const picked = ordered.slice(0, max);
   const blocks = picked.map((s) => String(s.technology_description).trim());
   return { picked, blocks };
 }
