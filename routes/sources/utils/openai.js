@@ -976,10 +976,11 @@ function pickTechnologyBlocksFromSources(sources, max = 5) {
   const withText = Array.isArray(sources)
     ? sources.filter((s) => String(s?.technology_description || "").trim())
     : [];
-  const ordered = [
-    ...withText.filter((s) => s?.origin === "local"),
-    ...withText.filter((s) => s?.origin !== "local"),
-  ];
+  // Источник из базы узнаём и по адресу: в графе, сохранённом облегчённым,
+  // пометки origin может не быть.
+  const isLocal = (s) =>
+    s?.origin === "local" || String(s?.url || "").startsWith("local-sources/");
+  const ordered = [...withText.filter(isLocal), ...withText.filter((s) => !isLocal(s))];
   const picked = ordered.slice(0, max);
   const blocks = picked.map((s) => String(s.technology_description).trim());
   return { picked, blocks };

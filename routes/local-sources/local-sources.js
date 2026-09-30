@@ -1,26 +1,36 @@
 // routes/local-sources/local-sources.js
 //
-// Локальная база источников — HTTP.
+// База источников на сервере — HTTP.
 //
-//   GET    /api/local-sources/documents          — список PDF в базе
-//   POST   /api/local-sources/documents          — загрузить PDF (тело — сам файл,
-//                                                   Content-Type: application/pdf,
-//                                                   имя — в заголовке X-File-Name)
-//   DELETE /api/local-sources/documents/:id      — удалить документ
-//   GET    /api/local-sources/documents/:id/file — открыть PDF (#page=N — страница)
-//   POST   /api/local-sources/lookup             — { products: [...] } → сколько
-//                                                   источников у каждого продукта
-//   POST   /api/local-sources/for-product        — { product, direction } →
-//                                                   источники продукта: PDF и
-//                                                   сохранённые веб-источники
+//   GET    /api/local-sources/documents              — документы и ход разбора
+//   POST   /api/local-sources/documents              — загрузить PDF (тело — сам файл,
+//                                                       Content-Type: application/pdf,
+//                                                       имя — в заголовке X-File-Name,
+//                                                       модель разбора — X-Provider, X-Model)
+//   DELETE /api/local-sources/documents/:id          — удалить документ
+//   GET    /api/local-sources/documents/:id/file     — открыть PDF (#page=N — страница)
+//   GET    /api/local-sources/documents/:id/sections — разделы документа и их продукты
+//   POST   /api/local-sources/documents/:id/decode   — { only: "failed" | "all",
+//                                                       provider?, model? } —
+//                                                       разобрать разделы заново
+//   POST   /api/local-sources/lookup                 — { products: [...] } → сколько
+//                                                       источников у каждого продукта
+//   POST   /api/local-sources/for-product            — { product, direction } →
+//                                                       разделы документов и
+//                                                       сохранённые веб-источники
 //
-// Поиск по продукту — как опознание: по всем написаниям из справочника.
+// Продукт ищется, как при опознании: по всем написаниям из справочника.
 
 const express = require("express");
 
 const store = require("./utils/store");
+const decode = require("./utils/decode");
 
 const router = express.Router();
+
+// Разбор разделов моделью идёт в фоне с запуска сервера: дочищает очередь,
+// оставшуюся от прошлого процесса.
+if (process.env.LOCAL_SOURCES_DECODE !== "off") decode.start();
 
 /** Предел размера PDF. Больше — обычно книга сканов, которую текстом не прочесть. */
 const MAX_PDF_BYTES = 100 * 1024 * 1024;
@@ -29,6 +39,12 @@ const MAX_PRODUCTS = 500;
 
 function fail(res, status, error) {
   return res.status(status).json({ success: false, error });
+}
+
+/** Модель разбора из заголовков: та, что выбрана в интерфейсе. */
+function modelFrom(req) {
+  const clean = (v) => String(v || "").trim().slice(0, 100) || null;
+  return { provider: clean(req.get("X-Provider")), model: clean(req.get("X-Model")) };
 }
 
 router.get("/local-sources/documents", (req, res) => {
@@ -76,7 +92,10 @@ router.post(
     fileName = fileName.replace(/[\\/]/g, "_").slice(0, 200);
 
     try {
-      const result = await store.addDocument(buf, { fileName, via: "ui" });
+      const result = await store.addDocument(buf, { fileName, via: "ui", ...modelFrom(req) });
+      // Разделы записаны — модель разбирает их в фоне, клиент смотрит ход
+      // по списку документов.
+      if (!result.duplicate) decode.kick();
       res.json({ success: true, ...result });
     } catch (e) {
       // Ошибки разбора PDF написаны для человека — отдаём как есть.
@@ -113,6 +132,40 @@ router.get("/local-sources/documents/:id/file", (req, res) => {
   });
 });
 
+router.get("/local-sources/documents/:id/sections", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return fail(res, 400, "Неверный номер документа.");
+  try {
+    const sections = store.listSections(id);
+    if (!sections) return fail(res, 404, "Такого документа нет.");
+    res.json({ success: true, sections });
+  } catch (e) {
+    console.error("[local-sources] разделы:", e);
+    fail(res, 500, e.message);
+  }
+});
+
+router.post("/local-sources/documents/:id/decode", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return fail(res, 400, "Неверный номер документа.");
+  if (!store.getDocument(id)) return fail(res, 404, "Такого документа нет.");
+  const only = req.body?.only === "all" ? "all" : "failed";
+  const clean = (v) => (v ? String(v).trim().slice(0, 100) : undefined);
+  try {
+    const queued = store.requeue(id, {
+      only,
+      provider: clean(req.body?.provider),
+      model: clean(req.body?.model),
+    });
+    decode.kick();
+    const { filePath, ...document } = store.getDocument(id);
+    res.json({ success: true, queued, document });
+  } catch (e) {
+    console.error("[local-sources] разбор заново:", e);
+    fail(res, 500, e.message);
+  }
+});
+
 router.post("/local-sources/lookup", (req, res) => {
   const products = Array.isArray(req.body?.products)
     ? [...new Set(req.body.products.map((p) => String(p || "").trim()).filter(Boolean))]
@@ -139,7 +192,7 @@ router.post("/local-sources/for-product", (req, res) => {
       success: true,
       product,
       direction,
-      local: store.localSourcesFor(product),
+      local: store.sourcesFor(product, direction),
       web: store.webSourcesFor(product, direction),
     });
   } catch (e) {
