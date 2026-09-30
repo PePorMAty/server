@@ -170,6 +170,12 @@ router.post("/gpt/step/sources", async (req, res) => {
           sources: existingUrls.size > 0 ? existingSources : [],
           exhausted: true,
           ai: openaiResp?.ai,
+          // Что модель ответила на самом деле: пустой список, источники без
+          // ссылок или вовсе текст — по «ничего не нашлось» не различить.
+          debug: {
+            raw_items: rawItems.length,
+            output_text_preview: (text || "").slice(0, 1200),
+          },
           took_ms: Date.now() - t0,
         }),
       );

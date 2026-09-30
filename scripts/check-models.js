@@ -227,11 +227,24 @@ const CARD_CHAIN = {
   ],
 };
 
-const STEP_TEXT = `## Пиролиз пропана
+// Шаг строится из Markdown обобщения, поэтому и проверка — на его шаблоне
+// (routes/step/utils/prompts.js, направление «вниз»). Свободный текст без
+// разделов «Что производят» / «Из чего производят» Qwen Plus и Max честно
+// разбирали по правилу «в выход — раскрываемый продукт» и возвращали шаг
+// «Пропан → Пропан»: отказ был в тесте, а не в модели.
+const STEP_TEXT = `# Раскрываемый продукт
+**Продукт:** Пропан
 
-Пропан подвергают термическому пиролизу в трубчатых печах при 800–850 °C в
-присутствии водяного пара. Продукты: этилен, пропилен, водородсодержащий газ,
-пироконденсат. Этилен и пропилен выделяют ректификацией.`;
+# Новый производственный шаг
+
+## Шаг
+- **Что производят:** Этилен, Пропилен
+- **Из чего производят:** Пропан
+- **Краткая формула шага:** Этилен и пропилен производят из пропана
+- **Описание:** Пропан подвергают термическому пиролизу в трубчатых печах при 800–850 °C в присутствии водяного пара. Из пирогаза ректификацией выделяют этилен и пропилен; побочно получают водородсодержащий газ и пироконденсат.
+
+# Альтернативы
+**Альтернативы: []**`;
 
 /** Задачи проверки: что отправить и как понять, что ответ годный. */
 const TASK_DEFS = {
@@ -245,12 +258,20 @@ const TASK_DEFS = {
         provider,
         model,
       }),
-    judge: (res) =>
-      res.success && Array.isArray(res.sources) && res.sources.length
-        ? { ok: true, detail: `${res.sources.length} ист.` }
-        : res.success
-          ? { ok: false, detail: "ни одного источника" }
-          : { ok: false, detail: errorText(res) },
+    judge: (res) => {
+      if (res.success && Array.isArray(res.sources) && res.sources.length) {
+        return { ok: true, detail: `${res.sources.length} ист.` };
+      }
+      if (!res.success) return { ok: false, detail: errorText(res) };
+      const raw = res.debug?.raw_items;
+      return {
+        ok: false,
+        detail:
+          raw > 0
+            ? `ни одного источника: модель вернула ${raw}, но без ссылки или описания`
+            : "ни одного источника: модель вернула пустой список",
+      };
+    },
   },
   card: {
     title: "карточка",
@@ -329,10 +350,16 @@ async function checkModel(model) {
     const fixes = res?.ai?.fixes ?? [];
     const think = res?.ai?.reasoningChars ?? 0;
     results.push({ model, task, secs, ...verdict, fixes, think });
+    // При отказе показываем, что модель ответила на самом деле: без этого
+    // «ни одного источника» не отличить от ответа по памяти или пустого текста.
+    const preview = !verdict.ok && res?.debug?.output_text_preview;
     console.log(
       `${verdict.ok ? "✓" : "✗"} ${model} · ${def.title}: ${verdict.detail} — ${secs} с` +
         (think ? `, размышления ${think} симв.` : "") +
-        (fixes.length ? `\n    поправки: ${fixes.join("; ")}` : ""),
+        (fixes.length ? `\n    поправки: ${fixes.join("; ")}` : "") +
+        (preview
+          ? `\n    ответ модели: ${String(preview).replace(/\s+/g, " ").slice(0, 400)}`
+          : ""),
     );
   }
 }
