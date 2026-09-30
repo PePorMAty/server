@@ -379,12 +379,15 @@ function saveWebSources(productName, direction, items, model) {
   }
 }
 
-/** Сохранённые веб-источники продукта в направлении, свежие первыми. */
+/**
+ * Сохранённые веб-источники продукта в направлении: свежие поиски первыми,
+ * внутри одного поиска — в том порядке, в каком их дала модель.
+ */
 function webSourcesFor(productName, direction) {
   return getDb()
     .prepare(
       `SELECT * FROM web_sources WHERE product_key = ? AND direction = ?
-       ORDER BY found_at DESC, id DESC`,
+       ORDER BY found_at DESC, id ASC`,
     )
     .all(productKey(productName), direction === "up" ? "up" : "down")
     .map((r) => ({
@@ -406,7 +409,6 @@ function webSourcesFor(productName, direction) {
  * опознание продуктов.
  */
 function countsFor(productName) {
-  const docs = new Set(matchingChunks(productName).map((r) => r.doc_id));
   const web = { up: 0, down: 0 };
   for (const r of getDb()
     .prepare(
@@ -415,7 +417,29 @@ function countsFor(productName) {
     .all(productKey(productName))) {
     web[r.direction] = r.n;
   }
-  return { local: docs.size, web };
+  return { local: matchingDocCount(productName), web };
+}
+
+/**
+ * В скольких документах упоминается продукт. Отдельным запросом, без текста
+ * фрагментов: клиент спрашивает это по всему графу после каждой загрузки PDF,
+ * и тянуть ради числа сотни фрагментов незачем.
+ */
+function matchingDocCount(productName) {
+  const match = productMatch(productName);
+  if (!match) return 0;
+  try {
+    return getDb()
+      .prepare(
+        `SELECT COUNT(DISTINCT c.doc_id) AS n
+         FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
+         WHERE chunks_fts MATCH ?`,
+      )
+      .get(match).n;
+  } catch (e) {
+    console.error(`[local-sources] поиск «${productName}»: ${e.message}`);
+    return 0;
+  }
 }
 
 /** Сводка базы — для страницы состояния и скрипта. */

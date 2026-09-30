@@ -33,7 +33,10 @@ function fail(res, status, error) {
 
 router.get("/local-sources/documents", (req, res) => {
   try {
-    res.json({ success: true, documents: store.listDocuments(), stats: store.stats() });
+    // Путь к базе на диске сервера наружу не отдаём: он нужен только скрипту.
+    const stats = store.stats();
+    delete stats.dir;
+    res.json({ success: true, documents: store.listDocuments(), stats });
   } catch (e) {
     console.error("[local-sources] список:", e);
     fail(res, 500, `База источников недоступна: ${e.message}`);
