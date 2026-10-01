@@ -14,7 +14,9 @@
 //
 // Без аргументов показывает состояние базы.
 
-const { lookupProduct, status } = require("../routes/industry/utils/store");
+const fs = require("fs");
+
+const { getDb, lookupProduct, status } = require("../routes/industry/utils/store");
 
 const MATCH_LABELS = {
   exact: "точное совпадение",
@@ -36,6 +38,30 @@ function showStatus() {
       `${s.producers} производителей` +
       (s.actualAt ? `, актуально на ${s.actualAt}` : ""),
   );
+
+  // Откуда база и что в ней — чтобы найти файл выгрузки для переимпорта и
+  // видеть, какие отрасли реестра уже загружены.
+  let size = "";
+  try {
+    size = ` (${(fs.statSync(s.path).size / 1048576).toFixed(0)} МБ)`;
+  } catch {
+    // размер не главное
+  }
+  console.log(`  база: ${s.path}${size}`);
+  if (s.source) {
+    console.log(
+      `  собрана из файла: ${s.source}` +
+        (s.importedAt ? `, импорт ${String(s.importedAt).slice(0, 10)}` : "") +
+        `\n  найти этот файл: find / -name "${s.source}" 2>/dev/null`,
+    );
+  }
+  const classes = getDb()
+    .prepare(
+      `SELECT substr(TRIM(okpd2), 1, 2) AS cls, COUNT(*) AS n
+       FROM products GROUP BY cls ORDER BY cls`,
+    )
+    .all();
+  console.log(`  классы ОКПД2: ${classes.map((c) => `${c.cls || "—"} (${c.n})`).join(", ")}`);
   return true;
 }
 
