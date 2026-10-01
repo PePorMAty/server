@@ -22,7 +22,7 @@ const crypto = require("crypto");
 const { stemName } = require("../../industry/utils/normalize");
 const { identify, spellingsOf } = require("../../industry/utils/synonyms");
 const { extractPdf } = require("./pdf");
-const { buildUnits, documentTitles } = require("./structure");
+const { buildUnits, documentTitles, productsFromTitle } = require("./structure");
 const { productKey } = require("./query");
 
 const DEFAULT_DIR = path.resolve(__dirname, "../../../data/local-sources");
@@ -44,7 +44,7 @@ const STALE_WORK_MS = 30 * 60 * 1000;
  * и катализаторов): сменилась — связи пересчитываются из сохранённых
  * названий, без модели.
  */
-const KEYS_VERSION = 3;
+const KEYS_VERSION = 4;
 
 /** Греческие буквы и цифры в названии не различают продукты для поиска. */
 const GREEK = new Set(["альф", "бет", "гамм", "дельт", "омег"]);
@@ -200,9 +200,23 @@ function filePath(sha256) {
 const ADJ_TAIL = /(ыми|ими|ого|его|ому|ему|ых|их|ый|ий|ой|ая|яя|ое|ее|ые|ие|ым|им|ую|юю|ей)$/;
 
 /**
+ * Короткие слова основа слов не трогает: «медь» и «меди», «соль» и «соли»,
+ * «сера» и «серы» остаются разными — и «Медь» не находила «Производство
+ * меди». Слову из четырёх букв с гласной или «ь» на конце даём ключ без
+ * последней буквы: «мед», «сол», «сер».
+ */
+function shortWordsCut(key) {
+  return key
+    .split(" ")
+    .map((w) => (w.length === 4 && /[аеиоуыэюяь]$/.test(w) ? w.slice(0, 3) : w))
+    .join(" ");
+}
+
+/**
  * Ключи названия: основы слов («оксида этилена» → «оксид этилен») и они же
  * без чисел и греческих букв («бутадиена-1,3» → «бутадиен») и без окончаний
- * прилагательных, плюс то же для главного имени из справочника.
+ * прилагательных, короткие слова — без окончания («меди» → «мед»), плюс то
+ * же для главного имени из справочника.
  */
 function nameKeys(name) {
   const keys = new Set();
@@ -219,6 +233,10 @@ function nameKeys(name) {
       })
       .join(" ");
     if (core && core !== k) keys.add(core);
+    for (const base of [k, core]) {
+      const short = base && shortWordsCut(base);
+      if (short && short !== base) keys.add(short);
+    }
   };
   add(name);
   const canon = identify(String(name || ""))?.canon;
@@ -754,12 +772,35 @@ function resetStale() {
 // Источники продукта
 // ---------------------------------------------------------------------------
 
+/** Роль продукта в разделе по её месту в порядке (rank в sectionRows). */
+const ROLE_BY_RANK = ["product", "byproduct", "intermediate", "raw"];
+
+/**
+ * Раздел о перспективных технологиях («Раздел 9. Перспективные технологии»
+ * в ИТС): процессы, ещё не освоенные промышленностью.
+ */
+const PROSPECTIVE = /перспективн/i;
+
+/**
+ * Пометка в тексте такого раздела для обобщения шага: по ней обобщение
+ * ставит его маршрут альтернативой, а не основным путём (см. правило в
+ * routes/step/utils/prompts.js). В обобщение уходит только текст источника,
+ * поэтому пометка — в нём, а не отдельным полем.
+ */
+const PROSPECTIVE_MARK = "[Перспективная технология — в промышленности ещё не освоена]";
+
+function isProspective(r) {
+  return PROSPECTIVE.test(`${r.path || ""} › ${r.full_title || r.title || ""}`);
+}
+
 /** Раздел — в виде источника, понятного остальному приложению (TechnologySource). */
 function sectionSource(r) {
   const doc = r.short_title || r.doc_title;
   const pages = pageLabel(r.page_from, r.page_to, r.page_offset);
   const excerpt =
     r.text.length > EXCERPT_CHARS ? `${r.text.slice(0, EXCERPT_CHARS)}…` : r.text;
+  const prospective = isProspective(r);
+  const text = r.summary || excerpt;
   return {
     origin: "local",
     docId: r.doc_id,
@@ -772,19 +813,24 @@ function sectionSource(r) {
     // без него клиент (он сравнивает адреса без #page) склеил бы их в один.
     url: `local-sources/documents/${r.doc_id}/file?section=${r.id}#page=${r.page_from}`,
     access_hint: `${doc}, ${pages}${r.status === "done" ? "" : " — модель раздел ещё не разобрала"}`,
-    technology_description: r.summary || excerpt,
+    technology_description: prospective ? `${PROSPECTIVE_MARK}\n${text}` : text,
     inputs_outputs_hint: parseList(r.io),
     evidence_snippets: [],
+    // Кем продукт приходится разделу: целевой, попутный, промежуточный, сырьё.
+    role: ROLE_BY_RANK[r.rank] ?? undefined,
+    ...(prospective ? { prospective: true } : {}),
   };
 }
-
-/** Роль продукта в разделе по её месту в порядке (rank в sectionRows). */
-const ROLE_BY_RANK = ["product", "byproduct", "intermediate", "raw"];
 
 /**
  * Разделы, связанные с продуктом (его ключами) в направлении: «вверх» — где
  * его производят (целевой продукт первым, потом попутный), «вниз» — где он
  * сырьё. limit = 0 — все.
+ *
+ * Среди равных по роли первым — раздел, чей заголовок называет сам продукт:
+ * у пропилена «Производство пропилена» раньше «Производства этилена», где
+ * пропилен получают вместе с этиленом. Перспективные технологии — в конце:
+ * промышленность их ещё не освоила. Этот же порядок у блоков обобщения шага.
  */
 function sectionRows(keys, direction, limit = 0) {
   if (!keys.length) return [];
@@ -796,7 +842,7 @@ function sectionRows(keys, direction, limit = 0) {
       ? `AND s.id NOT IN (SELECT section_id FROM section_products
                           WHERE direction = 'up' AND role = 'product' AND key IN (${marks}))`
       : "";
-  return getDb()
+  const rows = getDb()
     .prepare(
       `SELECT s.*, d.title AS doc_title, d.short_title, d.page_offset,
               MIN(CASE sp.role WHEN 'product' THEN 0 WHEN 'byproduct' THEN 1
@@ -807,10 +853,20 @@ function sectionRows(keys, direction, limit = 0) {
        JOIN documents d ON d.id = s.doc_id
        WHERE sp.direction = ? AND sp.key IN (${marks}) ${notProduced}
        GROUP BY s.id
-       ORDER BY rank, by_model DESC, d.id, s.ord
-       ${limit > 0 ? "LIMIT ?" : ""}`,
+       ORDER BY rank, by_model DESC, d.id, s.ord`,
     )
-    .all(dir, ...keys, ...(dir === "down" ? keys : []), ...(limit > 0 ? [limit] : []));
+    .all(dir, ...keys, ...(dir === "down" ? keys : []));
+  const want = new Set(keys);
+  const named = (r) =>
+    productsFromTitle(r.title).some((p) => nameKeys(p).some((k) => want.has(k)));
+  const ranked = rows
+    .map((r, i) => ({ r, i, prospective: isProspective(r), named: named(r) }))
+    .sort(
+      (a, b) =>
+        a.prospective - b.prospective || a.r.rank - b.r.rank || b.named - a.named || a.i - b.i,
+    )
+    .map((x) => x.r);
+  return limit > 0 ? ranked.slice(0, limit) : ranked;
 }
 
 /** Разделы-источники продукта графа в направлении — для обобщения шага. */
@@ -1149,6 +1205,7 @@ function sectionItem(r) {
     byModel: Boolean(r.by_model),
     status: r.status,
     summary: r.summary || null,
+    ...(isProspective(r) ? { prospective: true } : {}),
   };
 }
 
