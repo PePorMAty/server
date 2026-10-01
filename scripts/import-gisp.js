@@ -21,11 +21,17 @@
 //   --only-active       не брать записи, прекратившие действие: реестр хранит
 //                       и старые, а для счётчика производителей нужны те, кто
 //                       выпускает продукт сейчас. Заметно уменьшает базу
-//   --stats             прочитать файл целиком и сказать, сколько в нём строк
-//                       и сколько места займёт база. Ничего не записывает —
-//                       можно запускать на переполненном диске
+//   --stats             прочитать файл целиком и сказать, сколько в нём строк,
+//                       сколько места займёт база и хватит ли его. Ничего не
+//                       записывает — можно запускать на переполненном диске.
+//                       Отбор (--okpd2, --only-active) учитывается
 //   --dry-run           ничего не писать: показать, как разобрались колонки,
 //                       и первые строки
+//
+// Место на диске импорт бережёт сам: если свободного остаётся меньше
+// RESERVE_MB, он останавливается и убирает недописанную базу — на том же
+// диске пишут другие программы. Сжатие базы в конце пропускает, если на него
+// нет места с запасом.
 //
 // Поддерживаются XLSX, CSV, TSV, JSON (массив) и JSONL. Книга Excel читается
 // потоком, без временных файлов: распакованный лист весит в восемь раз больше
@@ -268,6 +274,50 @@ function cleanInn(raw) {
   return digits;
 }
 
+/**
+ * Код ОКПД2 из выгрузки.
+ *
+ * Два вида кодов в реестре не похожи на код. «из 26.51.53» — так в перечнях
+ * пишут «входит в группу 26.51.53» (не вся группа, а её часть): приставку
+ * убираем, остаётся код группы. «7.10.10» — класс 07 без ведущего нуля, как
+ * у ИНН. Без поправки отбор по классам (--okpd2) такие записи отбрасывал,
+ * а карточка показывала код, которого нет в классификаторе.
+ */
+function cleanOkpd2(raw) {
+  const code = String(raw ?? "")
+    .trim()
+    .replace(/(^|[\s,;])из\s*(?=\d)/gi, "$1")
+    .replace(/(^|[\s,;])(\d)\.(?=\d)/g, (_, before, digit) => `${before}0${digit}.`);
+  return code || null;
+}
+
+/* ─────────────────────────── место на диске ─────────────────────────── */
+
+const MB = 1048576;
+const mb = (n) => (n / MB).toFixed(0);
+
+// Сколько места импорт оставляет другим программам. На том же диске живут
+// база приложения в Docker и журналы pm2, им запись нужна постоянно. Импорт
+// на почти полном диске легко съел бы место до нуля, и первыми упали бы они,
+// а не он. Остановиться заранее дешевле.
+const RESERVE_MB = 100;
+
+/**
+ * Свободное место на разделе с папкой, в байтах, или null, если не узнать.
+ *
+ * Считаем то, что доступно обычным программам (bavail). Root может писать ещё
+ * и в резерв файловой системы, поэтому импорт от root сам упрётся позже. А вот
+ * база в Docker обычно работает не от root, и для неё диск кончится раньше.
+ */
+function freeBytes(dir) {
+  try {
+    const s = fs.statfsSync(dir);
+    return s.bavail * s.bsize;
+  } catch {
+    return null;
+  }
+}
+
 /* ───────────────────────────── чтение файла ───────────────────────────── */
 
 /** Прочитать JSON или JSONL целиком (такие выгрузки обычно заметно меньше). */
@@ -294,6 +344,55 @@ function readJsonRows(file) {
 
 /* ────────────────────────────── база ────────────────────────────── */
 
+const SCHEMA = `
+  CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+
+  CREATE TABLE products (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    name_norm   TEXT NOT NULL,
+    okpd2       TEXT,
+    tnved       TEXT,
+    producer    TEXT NOT NULL,
+    inn         TEXT,
+    region      TEXT,
+    reg_number  TEXT,
+    reg_date    TEXT,
+    valid_until TEXT,
+    ended_at    TEXT,
+    status      TEXT NOT NULL,
+    status_raw  TEXT,
+    url         TEXT
+  );
+
+  -- Поиск по точному названию идёт мимо полнотекстового индекса.
+  CREATE INDEX idx_products_name_norm ON products(name_norm);
+
+  -- В индексе лежат усечённые слова: иначе «бутаны» из графа не находили
+  -- «бутан технический» из реестра.
+  -- content='' — индекс без копии текста: из него нужен только rowid,
+  -- сами строки берём из products. На выгрузке в сотни тысяч записей это
+  -- заметная разница в размере файла.
+  CREATE VIRTUAL TABLE products_fts
+    USING fts5(name_stem, content='', tokenize='unicode61 remove_diacritics 2');
+`;
+
+const INSERT_SQL = `
+  INSERT INTO products
+    (name, name_norm, okpd2, tnved, producer, inn, region,
+     reg_number, reg_date, valid_until, ended_at, status, status_raw, url)
+  VALUES (@name, @name_norm, @okpd2, @tnved, @producer, @inn,
+          @region, @reg_number, @reg_date, @valid_until, @ended_at,
+          @status, @status_raw, @url)`;
+
+// Усечённые слова нужны только полнотекстовому индексу. Раньше они лежали
+// ещё и колонкой в products, откуда индекс собирался одним запросом в
+// конце — это примерно десятая часть текста базы, хранимая впустую.
+// Пишем прямо в индекс: тогда колонку не приходится ни заводить, ни потом
+// выбрасывать (а выбросить её без сжатия базы всё равно не вышло бы, а
+// сжатие требует места вдвое больше самой базы).
+const FTS_INSERT_SQL = "INSERT INTO products_fts(rowid, name_stem) VALUES (?, ?)";
+
 function createDb(out) {
   const Database = require("better-sqlite3");
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -304,40 +403,28 @@ function createDb(out) {
   // ради скорости — при сбое файл просто собирается заново.
   db.pragma("journal_mode = OFF");
   db.pragma("synchronous = OFF");
+  db.exec(SCHEMA);
+  return db;
+}
 
-  db.exec(`
-    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+/**
+ * Пробная база в памяти — для оценки размера в --stats.
+ *
+ * Сколько весит база на байт текста, сильно зависит от названий: артикулы и
+ * размеры одежды раздувают полнотекстовый индекс иначе, чем названия веществ.
+ * Постоянный множитель, снятый с одних выгрузок, на синтетическом реестре в
+ * миллион строк ошибся на четверть в меньшую сторону, а при запасе в сотню
+ * мегабайт такая ошибка как раз и переполняет диск. Поэтому каждую
+ * SAMPLE_EVERY-ю строку кладём в настоящую базу той же схемы, только в
+ * памяти, и меряем её. На диск не пишется ни байта.
+ */
+const SAMPLE_EVERY = 20;
+const SAMPLE_MIN_ROWS = 2000;
 
-    CREATE TABLE products (
-      id          INTEGER PRIMARY KEY,
-      name        TEXT NOT NULL,
-      name_norm   TEXT NOT NULL,
-      okpd2       TEXT,
-      tnved       TEXT,
-      producer    TEXT NOT NULL,
-      inn         TEXT,
-      region      TEXT,
-      reg_number  TEXT,
-      reg_date    TEXT,
-      valid_until TEXT,
-      ended_at    TEXT,
-      status      TEXT NOT NULL,
-      status_raw  TEXT,
-      url         TEXT
-    );
-
-    -- Поиск по точному названию идёт мимо полнотекстового индекса.
-    CREATE INDEX idx_products_name_norm ON products(name_norm);
-
-    -- В индексе лежат усечённые слова: иначе «бутаны» из графа не находили
-    -- «бутан технический» из реестра.
-    -- content='' — индекс без копии текста: из него нужен только rowid,
-    -- сами строки берём из products. На выгрузке в сотни тысяч записей это
-    -- заметная разница в размере файла.
-    CREATE VIRTUAL TABLE products_fts
-      USING fts5(name_stem, content='', tokenize='unicode61 remove_diacritics 2');
-  `);
-
+function createSampleDb() {
+  const Database = require("better-sqlite3");
+  const db = new Database(":memory:");
+  db.exec(SCHEMA);
   return db;
 }
 
@@ -447,12 +534,23 @@ async function main() {
 
   const finish = (mapping, rowsSeen, db, stats) => {
     if (args.stats) {
-      // Размер базы примерно в полтора раза больше объёма текста в ней:
-      // остальное — служебные байты строк, индекс точных названий и
-      // полнотекстовый индекс. Множитель снят с готовых баз — 1,41 и 1,40 на
-      // двух разных. Оценка нужна, чтобы решить вопрос «влезет ли», не записав
-      // на диск ни байта.
-      const mb = (n) => (n / 1048576).toFixed(0);
+      // Размер базы — объём текста в ней, умноженный на вес служебных байтов
+      // строк и обоих индексов. Множитель меряем на пробной базе из этой же
+      // выгрузки (createSampleDb). На маленьком файле проба мала и ничего не
+      // скажет — тогда берём 1,41, снятый с прежних готовых баз; его же
+      // оставляем нижней границей.
+      let factor = 1.41;
+      let measured = false;
+      if (sample) {
+        sample.exec("COMMIT");
+        if (tally.sampleRows >= SAMPLE_MIN_ROWS) {
+          const pages = sample.pragma("page_count", { simple: true });
+          const pageSize = sample.pragma("page_size", { simple: true });
+          factor = Math.max(factor, (pages * pageSize) / tally.sampleBytes);
+          measured = true;
+        }
+        sample.close();
+      }
       const archived = tally.rows - tally.active;
 
       console.log("\nЧто в файле:");
@@ -503,7 +601,7 @@ async function main() {
         console.log(
           `  ${cls.padEnd(3)} ${(CLASS_NAMES[cls] ?? "").padEnd(24)}` +
             ` ${String(acc.rows).padStart(8)} строк` +
-            `  ~${(acc.bytes * 1.41 / 1048576).toFixed(0).padStart(4)} МБ`,
+            `  ~${mb(acc.bytes * factor).padStart(4)} МБ`,
         );
       }
       // Нужный класс может оказаться за чертой — и тогда по этой таблице
@@ -512,28 +610,63 @@ async function main() {
       const rest = all.slice(SHOWN);
       if (rest.length) {
         const restRows = rest.reduce((n, [, a]) => n + a.rows, 0);
-        const restMb = rest.reduce((n, [, a]) => n + a.bytes, 0) * 1.41 / 1048576;
+        const restBytes = rest.reduce((n, [, a]) => n + a.bytes, 0);
         console.log(
           `  и ещё ${rest.length} классов помельче:` +
-            ` ${restRows} строк, ~${restMb.toFixed(0)} МБ суммарно` +
+            ` ${restRows} строк, ~${mb(restBytes * factor)} МБ суммарно` +
             `\n  (${rest.map(([c]) => c).join(", ")})`,
         );
       }
-      console.log(
-        "\n  Размер СВОЕЙ выборки видно так — отбор работает и со --stats:\n" +
-          "    --stats --okpd2 19,20,21,22",
-      );
+      if (stats.okpd2Fixed) {
+        console.log(
+          `\n  Коды ОКПД2 поправлены у ${stats.okpd2Fixed} строк:` +
+            " «из 26.51.53» → 26.51.53, «7.10.10» → 07.10.10.",
+        );
+      }
+      if (!args.okpd2) {
+        console.log(
+          "\n  Размер СВОЕЙ выборки видно так — отбор работает и со --stats:\n" +
+            "    --stats --okpd2 19,20,21,22",
+        );
+      }
 
-      console.log("\nСколько займёт база:");
-      console.log(`  со всеми записями:    ~${mb(tally.bytes * 1.41)} МБ`);
-      if (archived) {
-        const activeShare = tally.rows ? tally.active / tally.rows : 1;
-        console.log(`  только действующие:   ~${mb(tally.bytes * 1.41 * activeShare)} МБ   (ключ --only-active)`);
+      const need = tally.bytes * factor;
+      const activeShare = tally.rows ? tally.active / tally.rows : 1;
+      console.log(
+        measured
+          ? `\nСколько займёт база (замер на пробной базе из каждой ${SAMPLE_EVERY}-й строки):`
+          : "\nСколько займёт база:",
+      );
+      console.log(`  со всеми записями:    ~${mb(need)} МБ`);
+      if (archived && !args.onlyActive) {
+        console.log(`  только действующие:   ~${mb(need * activeShare)} МБ   (ключ --only-active)`);
+      }
+
+      // Хватит ли места. Старая база, пока собирается новая, лежит на месте,
+      // но её место и так уже не входит в «свободно» — считать её не нужно.
+      const free = freeBytes(path.dirname(path.resolve(args.out)));
+      if (free !== null) {
+        const left = free - need;
+        console.log(`\nСвободно на диске под базой: ${mb(free)} МБ.`);
+        if (left >= RESERVE_MB * MB) {
+          console.log(`  Хватит: после импорта останется ~${mb(left)} МБ.`);
+        } else {
+          const leftActive = free - need * activeShare;
+          console.log(
+            `  НЕ ХВАТИТ: осталось бы ~${mb(Math.max(left, 0))} МБ, а импорт оставляет другим\n` +
+              `  программам (Docker, журналы) не меньше ${RESERVE_MB} МБ и остановится сам.\n` +
+              (archived && !args.onlyActive && leftActive >= RESERVE_MB * MB
+                ? `  С ключом --only-active хватит: останется ~${mb(leftActive)} МБ.\n`
+                : "") +
+              "  Ещё можно взять меньше классов в --okpd2 или освободить место —\n" +
+              "  посмотреть, чем занят диск:\n" +
+              "    du -xh / --max-depth=2 2>/dev/null | sort -h | tail -15",
+          );
+        }
       }
       console.log(
-        "\nВ конце импорт пробует сжать базу — на это нужно столько же места\n" +
-          "сверху. Места не хватит — импорт не упадёт, база просто останется\n" +
-          "несжатой.",
+        "\nСжатие базы в конце импорта выигрывает проценты, а места на время\n" +
+          "требует ещё двух её размеров. Если столько нет, импорт его пропустит.",
       );
       return;
     }
@@ -560,16 +693,28 @@ async function main() {
       );
     }
 
-    // Сжатие переписывает базу целиком во временный файл, то есть на время
-    // требует места вдвое больше её размера. Если места нет — не беда: база уже
-    // собрана и работает, просто занимает больше, чем могла бы.
-    try {
-      db.exec("VACUUM");
-    } catch (e) {
-      if (e.code === "SQLITE_FULL" || /disk|space|ENOSPC/i.test(e.message)) {
-        console.log("  (не хватило места на сжатие — база готова, но не уплотнена)");
-      } else {
-        throw e;
+    // Сжатие переписывает базу целиком: на время нужны ещё копия и журнал,
+    // то есть два её размера сверху. У только что собранной базы выигрыш —
+    // проценты (на миллионе строк — 3%). Пробовать «на авось» и падать по
+    // нехватке места нельзя: пока сжатие идёт, диск забит до нуля, и все
+    // остальные программы на нём ловят ошибки записи. Нет места с запасом —
+    // не сжимаем: база собрана и работает, просто чуть больше, чем могла бы.
+    const built = fs.statSync(outPath).size;
+    const free = freeBytes(path.dirname(outPath));
+    if (free !== null && free < built * 2 + RESERVE_MB * MB) {
+      console.log(
+        `  (сжатие пропущено: на него нужно ещё ~${mb(built * 2)} МБ, свободно ${mb(free)} МБ —` +
+          " база готова)",
+      );
+    } else {
+      try {
+        db.exec("VACUUM");
+      } catch (e) {
+        if (e.code === "SQLITE_FULL" || /disk|space|ENOSPC/i.test(e.message)) {
+          console.log("  (не хватило места на сжатие — база готова, но не уплотнена)");
+        } else {
+          throw e;
+        }
       }
     }
 
@@ -598,6 +743,9 @@ async function main() {
           : "") +
         (stats.skippedOkpd2
           ? `\n  пропущено чужих классов ОКПД2: ${stats.skippedOkpd2}`
+          : "") +
+        (stats.okpd2Fixed
+          ? `\n  поправлено кодов ОКПД2 («из …», класс без нуля): ${stats.okpd2Fixed}`
           : ""),
     );
   };
@@ -606,7 +754,24 @@ async function main() {
   let db = null;
   let insert = null;
   let ftsInsert = null;
-  const stats = { skipped: 0, skippedArchived: 0, skippedOkpd2: 0, written: 0 };
+  const stats = {
+    skipped: 0, skippedArchived: 0, skippedOkpd2: 0, okpd2Fixed: 0, written: 0,
+  };
+  // Пробная база для оценки размера (только в --stats).
+  let sample = null;
+  let sampleInsert = null;
+  let sampleFts = null;
+
+  // Место кончается посреди импорта: проверяем его по ходу и встаём, пока
+  // другим программам на диске ещё есть куда писать (RESERVE_MB).
+  const guardSpace = () => {
+    const free = freeBytes(path.dirname(outPath));
+    if (free !== null && free < RESERVE_MB * MB) {
+      const e = new Error(`на диске осталось ${mb(free)} МБ`);
+      e.code = "LOW_SPACE";
+      throw e;
+    }
+  };
   const writing = !args.dryRun && !args.stats;
 
   // Импорт долгий, и его вполне могут прервать с клавиатуры. Недописанная база
@@ -637,6 +802,7 @@ async function main() {
   const tally = {
     rows: 0, active: 0, bytes: 0, names: new Set(), empty: {},
     byClass: new Map(), // класс ОКПД2 → { строк, байт }
+    sampleRows: 0, sampleBytes: 0, // пробная база
   };
   const preview = [];
 
@@ -707,25 +873,21 @@ async function main() {
       );
     }
 
+    if (args.stats) {
+      // Одна транзакция на всё — как у настоящего импорта: от этого зависит,
+      // как полнотекстовый индекс раскладывается по страницам.
+      sample = createSampleDb();
+      sampleInsert = sample.prepare(INSERT_SQL);
+      sampleFts = sample.prepare(FTS_INSERT_SQL);
+      sample.exec("BEGIN");
+    }
+
     if (writing) {
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      guardSpace();
       db = createDb(outPath);
-      insert = db.prepare(
-        `INSERT INTO products
-           (name, name_norm, okpd2, tnved, producer, inn, region,
-            reg_number, reg_date, valid_until, ended_at, status, status_raw, url)
-         VALUES (@name, @name_norm, @okpd2, @tnved, @producer, @inn,
-                 @region, @reg_number, @reg_date, @valid_until, @ended_at,
-                 @status, @status_raw, @url)`,
-      );
-      // Усечённые слова нужны только полнотекстовому индексу. Раньше они лежали
-      // ещё и колонкой в products, откуда индекс собирался одним запросом в
-      // конце — это примерно десятая часть текста базы, хранимая впустую.
-      // Пишем прямо в индекс: тогда колонку не приходится ни заводить, ни потом
-      // выбрасывать (а выбросить её без сжатия базы всё равно не вышло бы, а
-      // сжатие требует места вдвое больше самой базы).
-      ftsInsert = db.prepare(
-        "INSERT INTO products_fts(rowid, name_stem) VALUES (?, ?)",
-      );
+      insert = db.prepare(INSERT_SQL);
+      ftsInsert = db.prepare(FTS_INSERT_SQL);
       db.exec("BEGIN");
       // Выгрузка на 150 МБ читается с полминуты, и до первой сотни тысяч строк
       // экран молчал — со стороны это неотличимо от зависшей программы.
@@ -754,10 +916,13 @@ async function main() {
       return true;
     }
 
+    const okpd2 = cleanOkpd2(get("okpd2"));
+    if (okpd2 !== get("okpd2")) stats.okpd2Fixed += 1;
+
     const record = {
       name,
       name_norm: normalizeName(name),
-      okpd2: get("okpd2"),
+      okpd2,
       tnved: get("tnved"),
       producer,
       inn: cleanInn(get("inn")),
@@ -801,11 +966,17 @@ async function main() {
       const acc = tally.byClass.get(cls) ?? { rows: 0, bytes: 0 };
       acc.rows += 1;
       tally.byClass.set(cls, acc);
+      let bytes = 0;
       for (const v of Object.values(record)) {
-        if (!v) continue;
-        const n = Buffer.byteLength(String(v), "utf8");
-        tally.bytes += n;
-        acc.bytes += n;
+        if (v) bytes += Buffer.byteLength(String(v), "utf8");
+      }
+      tally.bytes += bytes;
+      acc.bytes += bytes;
+      if (tally.rows % SAMPLE_EVERY === 0) {
+        const { lastInsertRowid } = sampleInsert.run(record);
+        sampleFts.run(lastInsertRowid, stemName(name));
+        tally.sampleRows += 1;
+        tally.sampleBytes += bytes;
       }
       // Считаем пустоту по КОЛОНКАМ файла, а не по полям записи.
       //
@@ -830,6 +1001,9 @@ async function main() {
       const { lastInsertRowid } = insert.run(record);
       ftsInsert.run(lastInsertRowid, stemName(name));
       stats.written += 1;
+      // Пять тысяч строк — несколько мегабайт базы: между проверками запас
+      // не проесть.
+      if (stats.written % 5000 === 0) guardSpace();
       if (stats.written % 25000 === 0) {
         console.log(`  записано строк: ${stats.written}`);
       }
@@ -872,7 +1046,7 @@ main().catch((e) => {
   // Место на диске кончается тихо и в самом неожиданном месте, а сообщение
   // системы («no space left on device») не подсказывает ни сколько нужно, ни
   // где смотреть. Объясняем.
-  if (e.code === "ENOSPC" || e.code === "SQLITE_FULL") {
+  if (e.code === "ENOSPC" || e.code === "SQLITE_FULL" || e.code === "LOW_SPACE") {
     // Недописанная база бесполезна, а место занимает — ровно то, которого и
     // не хватило. Убираем сразу, иначе следующая попытка стартует в худших
     // условиях, чем эта.
@@ -881,9 +1055,9 @@ main().catch((e) => {
       for (const suffix of ["", "-journal", "-wal", "-shm"]) {
         const f = outPath + suffix;
         if (fs.existsSync(f)) {
-          const mb = (fs.statSync(f).size / 1048576).toFixed(0);
+          const size = mb(fs.statSync(f).size);
           fs.unlinkSync(f);
-          if (!suffix) removed = ` Недописанная база удалена (освободилось ${mb} МБ).`;
+          if (!suffix) removed = `\nНедописанная база удалена (освободилось ${size} МБ).`;
         }
       }
     } catch {
@@ -891,18 +1065,23 @@ main().catch((e) => {
     }
 
     console.error(
-      `На диске кончилось место.${removed}\n` +
-        "Прежняя база не тронута: новая собиралась рядом, под временным именем.\n" +
-        "Из-за этого на время сборки нужны обе — если не хватило именно поэтому,\n" +
-        "уберите старую базу сами и запустите снова.\n\n" +
-        "Посмотрите, сколько нужно на самом деле, — это ничего не пишет:\n" +
-        "  node scripts/import-gisp.js ВЫГРУЗКА.xlsx --stats\n\n" +
-        "Там же видно, из каких классов ОКПД2 состоит реестр. Если графу нужна\n" +
-        "одна отрасль, остальные можно не брать:\n" +
-        "  --okpd2 19,20,21,22   (нефтепродукты, химия, фармацевтика, пластмассы)\n\n" +
+      (e.code === "LOW_SPACE"
+        ? `\nИмпорт остановлен: ${e.message}, а меньше ${RESERVE_MB} МБ оставлять нельзя —\n` +
+          `на этом же диске пишут другие программы (база в Docker, журналы).`
+        : "\nНа диске кончилось место.") +
+        `${removed}\n` +
+        "Прежняя база не тронута: новая собиралась рядом, под временным именем,\n" +
+        "так что на время сборки на диске лежат обе.\n\n" +
+        "Хватит ли места, видно заранее — это ничего не пишет на диск. Запустите\n" +
+        "с теми же ключами и добавьте --stats:\n" +
+        "  node scripts/import-gisp.js ВЫГРУЗКА.xlsx --okpd2 … --stats\n\n" +
+        "Как уменьшить базу:\n" +
+        "  --only-active         без прекращённых записей\n" +
+        "  --okpd2 19,20,21,22   меньше классов ОКПД2 (в --stats видно, сколько\n" +
+        "                        весит каждый)\n\n" +
         "Сколько свободно и чем занято:\n" +
         "  df -h .\n" +
-        "  du -xh / --max-depth=1 2>/dev/null | sort -h | tail -12\n\n" +
+        "  du -xh / --max-depth=2 2>/dev/null | sort -h | tail -15\n\n" +
         "Базу можно положить на другой раздел: --out /путь/gisp.sqlite\n" +
         "и указать его серверу переменной GISP_DB_PATH.",
     );
