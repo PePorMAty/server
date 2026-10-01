@@ -229,6 +229,31 @@ function okpd2ByName(spellings, maxExtra = 1) {
   return out;
 }
 
+/**
+ * Позиции ОКПД2, уточняющие код: 20.14.52.111 «Капролактам» и её соседи под
+ * 20.14.52.110 «Соединения гетероциклические…».
+ *
+ * Код читается по цифрам, и ноли в хвосте последней группы значат «не
+ * уточнено»: отбросив их, получаем начало кодов всех уточнений. У кода из
+ * трёх групп (20.14.52) уточнения — всё, что под ним через точку. Нули в
+ * средних группах не трогаем: 20.14.50 не начало для 20.14.51.
+ */
+function okpd2Below(code) {
+  if (okpd2 === null) okpd2 = loadOkpd2();
+  const clean = firstCode(code);
+  if (!clean) return [];
+  const groups = clean.split(".");
+  const head =
+    groups.length === 4
+      ? `${groups.slice(0, 3).join(".")}.${groups[3].replace(/0+$/, "")}`
+      : `${clean}.`;
+  const out = [];
+  for (const [c, name] of okpd2) {
+    if (c !== clean && c.startsWith(head)) out.push({ code: c, name });
+  }
+  return out;
+}
+
 /** Только название — тем, кому подробности не нужны. */
 function okpd2Name(code) {
   return lookupOkpd2(code)?.name ?? null;
@@ -274,6 +299,7 @@ function classifiersStatus() {
 }
 
 module.exports = {
+  okpd2Below,
   okpd2ByName,
   okpd2Name,
   okpd2NameExact,

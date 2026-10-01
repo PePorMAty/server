@@ -26,6 +26,7 @@ const {
 const { regionByInn } = require("./regions");
 const { shortenCompany } = require("./company");
 const {
+  okpd2Below,
   okpd2ByName,
   okpd2Name,
   okpd2NameExact,
@@ -1966,6 +1967,28 @@ function codeIsSubstance(code, spellings) {
 }
 
 /**
+ * Уточнить код реестра по классификатору: позиция под ним, названная ровно
+ * нашим веществом, или null.
+ *
+ * Заявители часто ставят код категории, а не своей позиции. У «Капролактама»
+ * записи стоят под 20.14.52.110 «Соединения гетероциклические, не включенные
+ * в другие группировки», а под ней в классификаторе есть 20.14.52.111
+ * «Капролактам» — по ссылке из карточки человек видел общую категорию и
+ * уточнение строчкой ниже.
+ *
+ * Берём только позицию, названную РОВНО веществом, и только если она одна.
+ * «Бензол» под 20.14.12.130 «Бензолы» уточнять нечем: под ней каменноугольный,
+ * сланцевый и нефтяной, и выбирать за человека нельзя. Совпадение по части
+ * слов не годится вовсе: «Азот» нашёл бы «Закись азота» — родительный падеж
+ * усекается в ту же основу.
+ */
+function refineOkpd2(code, spellings) {
+  if (!code || !spellings.length || codeIsSubstance(code, spellings)) return null;
+  const hits = okpd2Below(code).filter((c) => codeIsSubstance(c.code, spellings));
+  return hits.length === 1 ? hits[0].code : null;
+}
+
+/**
  * Свернуть строки реестра в сводку по продукту.
  *
  * spellings — известные написания продукта; по ним решается, какой из кодов
@@ -2036,7 +2059,9 @@ function summarize(rows, spellings = []) {
     if (ae !== be) return ae ? -1 : 1;
     return String(a[0]).localeCompare(String(b[0]));
   });
-  const okpd2 = ranked[0]?.[0] ?? null;
+  const registryOkpd2 = ranked[0]?.[0] ?? null;
+  const refined = refineOkpd2(registryOkpd2, spellings);
+  const okpd2 = refined ?? registryOkpd2;
   const rankedTnved = byCount(tnvedCounts);
   const tnved = rankedTnved[0]?.[0] ?? null;
 
@@ -2050,7 +2075,12 @@ function summarize(rows, spellings = []) {
     /** Название самой позиции, а не группы над ней. */
     okpd2NameExact: okpd2NameExact(okpd2),
     okpd2Retired: okpd2Retired(okpd2),
-    /** У скольких записей из найденных именно этот код. */
+    /**
+     * Код записей реестра, когда классификатор уточнил его до позиции
+     * вещества (okpd2 — уже уточнённый). null — код взят из реестра как есть.
+     */
+    okpd2Registry: refined ? registryOkpd2 : null,
+    /** У скольких записей из найденных код реестра (okpd2Registry или okpd2). */
     okpd2Share: ranked[0]?.[1] ?? 0,
     /** Сколько ещё разных кодов у остальных записей. */
     okpd2Others: Math.max(0, ranked.length - 1),
