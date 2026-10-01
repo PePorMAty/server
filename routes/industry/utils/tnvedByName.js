@@ -77,16 +77,19 @@ let index = null;
 function buildIndex() {
   const byCanon = new Map();
   const byKey = new Map();
-  const add = (map, k, pos) => {
+  // По коду — позиция и то, назвала ли она вещество целиком (whole) или
+  // только в перечне; целиком побеждает.
+  const add = (map, k, pos, whole) => {
     if (!map.has(k)) map.set(k, new Map());
-    map.get(k).set(pos.code, pos);
+    const prev = map.get(k).get(pos.code);
+    map.get(k).set(pos.code, { pos, whole: whole || Boolean(prev?.whole) });
   };
   for (const pos of tnvedSubstancePositions()) {
     for (const v of pos.variants) {
-      const canon = canonOf(v);
-      if (canon) add(byCanon, canon, pos);
-      const key = strictKey(v);
-      if (key) add(byKey, key, pos);
+      const canon = canonOf(v.text);
+      if (canon) add(byCanon, canon, pos, v.whole);
+      const key = strictKey(v.text);
+      if (key) add(byKey, key, pos, v.whole);
     }
   }
   return { byCanon, byKey };
@@ -95,26 +98,31 @@ function buildIndex() {
 /**
  * Позиция ТН ВЭД вещества по названию продукта графа, или null.
  *
- * Нашлось несколько позиций — отдаём ту, что глубже в иерархии (длиннее
- * код): «бутен (бутилен) и его изомеры» точнее товарной позиции над ним. Если
- * и так не одна — не выбираем за человека: null.
+ * Нашлось несколько позиций — сперва те, что названы веществом целиком:
+ * «водород» у 2804 10 000, а не часть перечня «…водород и его соединения,
+ * обогащенные дейтерием». Среди равных — та, что глубже в иерархии (длиннее
+ * код). Если и так не одна — не выбираем за человека: null.
  *
  * @returns {{ code: string, name: string } | null}
  */
 function tnvedByName(rawName) {
   if (index === null) index = buildIndex();
   const found = new Map();
-  const canon = identify(rawName)?.canon;
-  for (const pos of index.byCanon.get(canon)?.values() ?? []) found.set(pos.code, pos);
-  for (const spelling of spellingsOf(rawName)) {
-    const key = strictKey(spelling);
-    for (const pos of index.byKey.get(key)?.values() ?? []) found.set(pos.code, pos);
-  }
+  const take = (hits) => {
+    for (const h of hits?.values() ?? []) {
+      const prev = found.get(h.pos.code);
+      found.set(h.pos.code, { pos: h.pos, whole: h.whole || Boolean(prev?.whole) });
+    }
+  };
+  take(index.byCanon.get(identify(rawName)?.canon));
+  for (const spelling of spellingsOf(rawName)) take(index.byKey.get(strictKey(spelling)));
   if (!found.size) return null;
-  const deepest = Math.max(...[...found.keys()].map((c) => c.length));
-  const best = [...found.values()].filter((p) => p.code.length === deepest);
+  const all = [...found.values()];
+  const pool = all.some((f) => f.whole) ? all.filter((f) => f.whole) : all;
+  const deepest = Math.max(...pool.map((f) => f.pos.code.length));
+  const best = pool.filter((f) => f.pos.code.length === deepest);
   if (best.length !== 1) return null;
-  return { code: formatTnved(best[0].code), name: best[0].name };
+  return { code: formatTnved(best[0].pos.code), name: best[0].pos.name };
 }
 
 /** Сбросить указатели — после перечитывания справочника (для проверок). */

@@ -298,29 +298,88 @@ function formatTnved(code) {
 }
 
 /**
- * Варианты названия позиции ТН ВЭД: целиком, до скобки и каждое имя в
- * скобке, части «A и B» порознь. «6-гексанлактам (ε-капролактам)» — это и
- * «6-гексанлактам», и «ε-капролактам»; «бута-1,3-диен и изопрен» — оба
- * вещества; «гидрохинон (хинол) и его соли» — гидрохинон.
- *
- * Часть, начатая скобкой, — не название, а хвост сложного имени: в «соль
- * метилфосфоновой кислоты и (аминоиминометил)мочевины» «мочевины» — не
- * мочевина. «его соли», «их соли» — тоже не вещества.
+ * Разбить текст по разделителю, но только вне скобок: в
+ * «2-этил-2-(гидроксиметил)пропан-1,3-диол» и «(1 : 1)» делить нечего.
  */
-function tnvedNameVariants(name) {
-  const out = new Set([name]);
-  const paren = /^(.*?)\s*\((.*)\)\s*$/.exec(name);
-  if (paren) {
-    out.add(paren[1]);
-    for (const p of paren[2].split(/[;,]\s*/)) out.add(p);
-  }
-  for (const v of [...out]) {
-    for (const p of v.split(/\s+и\s+/)) {
-      if (/^\s*\(|^\s*(его|ее|её|их)\s/i.test(p)) continue;
-      out.add(p.replace(/\s*\([^)]*\)\s*/g, " "));
+function splitOutsideParens(text, sep) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    else if (depth === 0) {
+      const m = sep.exec(text.slice(i));
+      if (m && m.index === 0 && m[0].length) {
+        out.push(text.slice(start, i));
+        i += m[0].length - 1;
+        start = i + 1;
+      }
     }
   }
-  return [...out].map((s) => s.replace(/\s+/g, " ").trim()).filter((s) => s.length > 2);
+  out.push(text.slice(start));
+  return out.map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * Скобка в конце названия, отделённая пробелом, — второе имя: «6-гексанлактам
+ * (ε-капролактам)». Скобка впритык — часть химического имени, а не второе
+ * имя: «2-этил-2-(гидроксиметил)пропан-1,3-диол». null — второго имени нет.
+ */
+function trailingParen(text) {
+  if (!text.endsWith(")")) return null;
+  let depth = 0;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] === ")") depth++;
+    else if (text[i] === "(" && --depth === 0) {
+      if (i === 0 || !/\s/.test(text[i - 1])) return null;
+      return { head: text.slice(0, i).trim(), inner: text.slice(i + 1, -1).trim() };
+    }
+  }
+  return null;
+}
+
+/**
+ * Варианты названия позиции ТН ВЭД: целиком, части перечня («A, B и C»,
+ * «A; B») порознь, у каждой — имя до скобки и имена в скобке.
+ * «6-гексанлактам (ε-капролактам)» — это и «6-гексанлактам», и
+ * «ε-капролактам»; «бута-1,3-диен и изопрен» — оба вещества; «гидрохинон
+ * (хинол) и его соли» — гидрохинон и хинол.
+ *
+ * Делим только вне скобок и только по «, » с пробелом: запятая между цифрами
+ * — часть имени («пропан-1,2-диол»). Часть, начатая скобкой, — хвост
+ * сложного имени: в «соль метилфосфоновой кислоты и
+ * (аминоиминометил)мочевины» «мочевины» — не мочевина. «его соли», «их соли»
+ * — тоже не вещества.
+ *
+ * whole — имя и есть вся позиция (или её второе имя в скобке). Часть перечня
+ * слабее: из описательной фразы «водород и его соединения, обогащенные
+ * дейтерием» деление выдёргивает «водород», а это не водород. Своя позиция у
+ * вещества побеждает часть перечня (tnvedByName.js).
+ *
+ * @returns {{ text: string, whole: boolean }[]}
+ */
+function tnvedNameVariants(name) {
+  const out = new Map();
+  const add = (text, whole) => {
+    if (text.length > 2) out.set(text, out.get(text) === true || whole);
+  };
+  const addWithParen = (text, whole) => {
+    const t = text.replace(/\s+/g, " ").trim();
+    if (!t) return;
+    add(t, whole);
+    const p = trailingParen(t);
+    if (!p) return;
+    add(p.head, whole);
+    for (const alt of splitOutsideParens(p.inner, /^[;,]\s+/)) add(alt, whole);
+  };
+  addWithParen(name, true);
+  for (const part of splitOutsideParens(name, /^(\s+и\s+|[;,]\s+)/)) {
+    if (/^\(|^(его|ее|её|их)\s/i.test(part)) continue;
+    addWithParen(part, false);
+  }
+  return [...out].map(([text, whole]) => ({ text, whole }));
 }
 
 /**
