@@ -799,6 +799,10 @@ async function main() {
   };
   process.on("SIGINT", () => cleanup("Ctrl+C"));
   process.on("SIGTERM", () => cleanup("SIGTERM"));
+  // Окно PuTTY закрылось или оборвалась связь — без обработчика процесс
+  // просто умирает, и недописанная база в сотни мегабайт остаётся лежать на
+  // почти полном диске.
+  process.on("SIGHUP", () => cleanup("оборвалась связь с терминалом"));
   const tally = {
     rows: 0, active: 0, bytes: 0, names: new Set(), empty: {},
     byClass: new Map(), // класс ОКПД2 → { строк, байт }
