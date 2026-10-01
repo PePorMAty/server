@@ -34,6 +34,7 @@ const {
   tnvedName,
 } = require("./classifiers");
 const { identify, spellingsOf } = require("./synonyms");
+const { tnvedByName } = require("./tnvedByName");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
 
@@ -331,6 +332,13 @@ function lookupProduct(rawName, opts) {
    * будто мы просто не нашли — и ей переставали верить.
    */
   const category = okpd2ByName(spellings)[0] ?? null;
+  /**
+   * Код ТН ВЭД по названию — тоже классификатор, а не реестр: у записей ГИСП
+   * код бывает не всегда, а у ненайденного продукта его нет вовсе. Карточка
+   * показывает его, когда кода из реестра нет, с пометкой «по
+   * классификатору». Идентификатором не служит (tnvedByName.js).
+   */
+  const tnvedCategory = tnvedByName(rawName);
 
   const exactStmt = conn.prepare(
     `SELECT * FROM products WHERE name_norm = ? LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
@@ -588,6 +596,7 @@ function lookupProduct(rawName, opts) {
       canon: known?.canon ?? null,
       cas: known?.cas ?? null,
       category,
+      tnvedCategory,
     };
   } else if (!loose && !confirmed.length) {
     // Записи нашлись, но ни одна не про этот продукт. Разбор сохраняем: без
@@ -598,6 +607,7 @@ function lookupProduct(rawName, opts) {
       canon: known?.canon ?? null,
       cas: known?.cas ?? null,
       category,
+      tnvedCategory,
       weak: {
         match,
         entryCount: kept.length,
@@ -624,6 +634,7 @@ function lookupProduct(rawName, opts) {
       canon: known?.canon ?? null,
       cas: known?.cas ?? null,
       category,
+      tnvedCategory,
       weak: {
         match,
         entryCount: kept.length,
@@ -652,6 +663,7 @@ function lookupProduct(rawName, opts) {
       // Сводку считаем по ПРОШЕДШИМ отбор записям, а не по всему найденному:
       // иначе производители, регионы и ОКПД2 приехали бы из отброшенных.
       ...summarize(confirmed, spellings),
+      tnvedCategory,
       found: true,
       match,
       sharedWords: picked.shared,

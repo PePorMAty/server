@@ -291,6 +291,65 @@ function tnvedName(code) {
   return null;
 }
 
+/** Код ТН ВЭД цифрами — как его пишут: «2933710000» → «2933 71 000 0». */
+function formatTnved(code) {
+  const d = String(code ?? "").replace(/\D+/g, "");
+  return [d.slice(0, 4), d.slice(4, 6), d.slice(6, 9), d.slice(9)].filter(Boolean).join(" ");
+}
+
+/**
+ * Варианты названия позиции ТН ВЭД: целиком, до скобки и каждое имя в
+ * скобке, части «A и B» порознь. «6-гексанлактам (ε-капролактам)» — это и
+ * «6-гексанлактам», и «ε-капролактам»; «бута-1,3-диен и изопрен» — оба
+ * вещества; «гидрохинон (хинол) и его соли» — гидрохинон.
+ *
+ * Часть, начатая скобкой, — не название, а хвост сложного имени: в «соль
+ * метилфосфоновой кислоты и (аминоиминометил)мочевины» «мочевины» — не
+ * мочевина. «его соли», «их соли» — тоже не вещества.
+ */
+function tnvedNameVariants(name) {
+  const out = new Set([name]);
+  const paren = /^(.*?)\s*\((.*)\)\s*$/.exec(name);
+  if (paren) {
+    out.add(paren[1]);
+    for (const p of paren[2].split(/[;,]\s*/)) out.add(p);
+  }
+  for (const v of [...out]) {
+    for (const p of v.split(/\s+и\s+/)) {
+      if (/^\s*\(|^\s*(его|ее|её|их)\s/i.test(p)) continue;
+      out.add(p.replace(/\s*\([^)]*\)\s*/g, " "));
+    }
+  }
+  return [...out].map((s) => s.replace(/\s+/g, " ").trim()).filter((s) => s.length > 2);
+}
+
+/**
+ * Позиции ТН ВЭД групп 28–29 — неорганической и органической химии — для
+ * поиска КОДА ПО НАЗВАНИЮ вещества (tnvedByName.js).
+ *
+ * Только эти группы: там названия — сами вещества («бензол», «6-гексанлактам
+ * (ε-капролактам)»), а в остальных — товарные категории («смеси…»,
+ * «препараты…»), и бензол нашёлся бы ещё и в 2707 «продукты перегонки
+ * каменноугольной смолы». «Прочие» не берём: это остаток группы, а не
+ * вещество.
+ */
+let tnvedSubstances = null;
+
+function tnvedSubstancePositions() {
+  if (tnvedSubstances) return tnvedSubstances;
+  if (tnved === null) tnved = loadTnved();
+  const out = [];
+  for (const [code, e] of tnved) {
+    if (!/^ГРУППА 2[89]\b/.test(e.group)) continue;
+    // «прочие» — остаток группы, где бы ни стояло: «бутанолы прочие» — не
+    // н-бутанол, у него своя позиция.
+    if (/(^|\s)проч/i.test(e.name)) continue;
+    out.push({ code, display: formatTnved(code), name: e.name, variants: tnvedNameVariants(e.name) });
+  }
+  tnvedSubstances = out;
+  return out;
+}
+
 /** Что удалось прочитать — для диагностики и страницы состояния. */
 function classifiersStatus() {
   if (okpd2 === null) okpd2 = loadOkpd2();
@@ -304,6 +363,8 @@ module.exports = {
   okpd2Name,
   okpd2NameExact,
   okpd2Retired,
+  formatTnved,
   tnvedName,
+  tnvedSubstancePositions,
   classifiersStatus,
 };
