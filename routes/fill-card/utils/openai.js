@@ -8,35 +8,14 @@ const {
   extractOutputText,
   safeJsonParse,
 } = require("../../sources/utils");
+const { labelsFor } = require("./card");
 
 function buildFillCardSchema(nodeType, selectedFields) {
-  // все поля для данного типа
-  const allFields =
-    nodeType === "transformation"
-      ? {
-          technology_name: { type: "string" },
-          technology_short_description: { type: "string" },
-          equipment: { type: "string" },
-          conditions: { type: "string" },
-          constraints_or_key_property: { type: "string" },
-          additional_materials_or_catalysts: { type: "string" },
-          energy: { type: "string" },
-          enterprise_and_plant: { type: "string" },
-        }
-      : {
-          product_name: { type: "string" },
-          product_type: { type: "string" },
-          purity: { type: "string" },
-          main_impurities: { type: "string" },
-          allowed_impurities: { type: "string" },
-          conversion_yield: { type: "string" },
-          typical_scale: { type: "string" },
-          storage: { type: "string" },
-          carbon_footprint: { type: "string" },
-          producers: { type: "string" },
-          applications: { type: "string" },
-          price: { type: "string" },
-        };
+  // все поля для данного типа — по тому же списку, что подписи (card.js):
+  // поле, добавленное туда, без этого строгая схема бы не пропустила
+  const allFields = Object.fromEntries(
+    Object.keys(labelsFor(nodeType)).map((key) => [key, { type: "string" }]),
+  );
 
   // если selectedFields передан — оставляем только запрошенные поля
   // + добавляем кастомные (которых нет в allFields)

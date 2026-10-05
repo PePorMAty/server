@@ -24,10 +24,16 @@ const FIELD_LABELS = {
     allowed_impurities: "Допустимые примеси",
     conversion_yield: "Коэффициент конверсии",
     typical_scale: "Типичный масштаб производства",
+    production_volume_rf: "Объём производства в РФ (т/г)",
+    import_volume_rf: "Объём импорта в РФ (т/г)",
+    export_volume_rf: "Объём экспорта из РФ (т/г)",
+    production_methods_share: "Распределение по способам производства",
     storage: "Условия хранения",
     carbon_footprint: "Углеродный след",
     producers: "Производители",
     applications: "Основные применения",
+    derivatives_usage_share:
+      "Распределение по объёмам использования в производных продуктах",
     price: "Цена",
   },
   transformation: {
@@ -35,12 +41,34 @@ const FIELD_LABELS = {
     technology_short_description: "Краткое описание технологии",
     equipment: "Оборудование",
     conditions: "Условия",
+    material_balance: "Материальный баланс (на тонну продукта)",
+    by_products: "Побочные продукты",
     constraints_or_key_property: "Ограничения или ключевое свойство технологии",
     additional_materials_or_catalysts:
       "Дополнительные вещества, материалы, расходники или катализаторы",
     energy: "Энергетика",
+    ecology: "Экология",
     enterprise_and_plant: "Предприятие и завод",
   },
+};
+
+/**
+ * Что именно ждём в полях, где одной подписи мало: единицы, год, доли.
+ * Те же пояснения — в интерфейсе (FillCardField.hint).
+ */
+const FIELD_HINTS = {
+  production_volume_rf:
+    "в тоннах в год, с годом, к которому относятся цифры, и источником, если он известен",
+  import_volume_rf: "в тоннах в год, с годом и источником, если известны",
+  export_volume_rf: "в тоннах в год, с годом и источником, если известны",
+  production_methods_share:
+    "способы получения продукта и их доли в выпуске (в процентах) в РФ и в мире",
+  derivatives_usage_share:
+    "производные продукты, на которые расходуется продукт, и их доли в потреблении (в процентах)",
+  material_balance:
+    "расход каждого вида сырья и вспомогательных веществ и выход продуктов на 1 тонну целевого продукта",
+  by_products: "что образуется помимо целевого продукта, сколько и куда направляется",
+  ecology: "выбросы, сбросы и отходы процесса, их опасность и способы обезвреживания",
 };
 
 function labelsFor(nodeType) {
@@ -48,6 +76,8 @@ function labelsFor(nodeType) {
     ? FIELD_LABELS.transformation
     : FIELD_LABELS.product;
 }
+/** Подписи всех полей сразу — для пояснений к полям в промпте. */
+labelsFor.all = { ...FIELD_LABELS.product, ...FIELD_LABELS.transformation };
 
 /** Поля карточки: выбранные в интерфейсе или все поля этого типа узла. */
 function cardKeys(nodeType, selectedFields) {
@@ -108,9 +138,11 @@ function formatInstruction(nodeType, keys) {
  */
 function cardFromText(text, nodeType, keys) {
   const labels = labelsFor(nodeType);
+  // «Объём» модель пишет и как «Объем» — подписи сравниваем без «ё».
+  const fold = (t) => String(t).toLowerCase().replace(/ё/g, "е");
   const byLabel = new Map();
   for (const k of keys) {
-    byLabel.set(String(labels[k] ?? "").toLowerCase(), k);
+    byLabel.set(fold(labels[k] ?? ""), k);
     byLabel.set(k, k);
   }
 
@@ -129,8 +161,7 @@ function cardFromText(text, nodeType, keys) {
     const line = raw.replace(/^\s*(?:[-*•]\s+|#+\s*)/, "");
     const m = /^\**\s*([^:*]{2,90}?)\s*\**\s*:\s*\**\s*(.*)$/.exec(line);
     const key = m
-      ? byLabel.get(m[1].trim().toLowerCase()) ??
-        byLabel.get(labelToKey(m[1].trim()))
+      ? byLabel.get(fold(m[1].trim())) ?? byLabel.get(labelToKey(m[1].trim()))
       : undefined;
     if (key) {
       flush();
@@ -314,6 +345,8 @@ function buildCardContext(nodeObj, chainObj) {
 
 module.exports = {
   FIELD_LABELS,
+  FIELD_HINTS,
+  labelsFor,
   cardKeys,
   labelToKey,
   formatInstruction,
