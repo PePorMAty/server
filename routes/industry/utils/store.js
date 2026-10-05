@@ -48,6 +48,24 @@ function dbPath() {
 const MAX_ENTRIES_PER_PRODUCT = 200;
 
 /**
+ * Определение перед продуктом в названии изделия — прилагательное в
+ * именительном падеже, по окончанию. «-ие» — только после к, г, х, ж, ш, щ, ч
+ * («акустические», «технические»): на «-ие» кончаются и существительные —
+ * «изделие», «покрытие». Больше трёх определений подряд — уже описание
+ * другого изделия, а не продукт с признаками.
+ */
+const LEADING_ADJECTIVE = /(?:ый|ий|ой|ая|яя|ое|ее|ые|[кгхжшщч]ие)$/;
+const MAX_LEADING_ADJECTIVES = 3;
+
+/**
+ * Неизвестное справочнику название нашлось среди материалов, но меньше чем
+ * в стольких записях, — проверяем и изделия; изделия берём, если их хотя бы
+ * вдвое больше (см. lookupProduct).
+ */
+const FEW_MATERIAL_RECORDS = 20;
+const ARTICLES_OVER_MATERIALS = 2;
+
+/**
  * Классы ОКПД2, где выпускают вещества и материалы: сельское хозяйство (01 —
  * зерно, семена масличных, свёкла, хлопок-сырец, лён), лес (02 — круглый лес и
  * балансы для целлюлозы, живица и природные смолы), добыча (05–08), пищевые
@@ -486,10 +504,17 @@ function lookupProduct(rawName, opts) {
        LIMIT ${MAX_ENTRIES_PER_PRODUCT}`,
     );
 
-    /** Решение отбора по записи — с поправкой на строгий проход. */
+    /**
+     * Решение отбора по записи — с поправкой на строгий проход: у изделия
+     * продукт назван с первого слова или после одних определений
+     * («Комбинированный нетканый материал»). Существительное впереди —
+     * «Трубопровод обвязки (пар)», «Полотно нетканое: изделия впитывающие» —
+     * называет другое изделие, а продукт в нём — материал или начинка.
+     */
     const judge = (c) => {
       const v = verdict(c);
-      if (strict && v.ok && (c?.at !== 0 || v.formulation)) {
+      const leads = c?.at === 0 || Boolean(c?.adjectivesBefore);
+      if (strict && v.ok && (!leads || v.formulation)) {
         return { ok: false, why: "изделие, а продукт в нём не первым словом" };
       }
       return v;
@@ -711,16 +736,28 @@ function lookupProduct(rawName, opts) {
   // стоит после ранжирования, и запрос перебирает все совпадения слова, пока
   // не наберёт двухсот своих: на миллионе записей это 100 мс там, где без
   // отбора хватает 30.
-  const found = (o) => o.confirmed.length > 0 && !o.loose;
+  const found = (o) => o?.confirmed.length > 0 && !o.loose;
   let outcome;
   if (known) {
     outcome = searchPass({ scope: "materials" });
   } else {
     const materials = searchPass({ scope: "materials", strictOnly: true });
-    const articles = found(materials)
-      ? null
-      : searchPass({ scope: "articles", strict: true, strictOnly: true });
-    if (found(materials)) outcome = materials;
+    // Среди материалов нашлось немного — спросим и изделия: «Шестерни»
+    // находили среди металлов семь поковок «шестерни», и сорок пять самих
+    // шестерён (машиностроение) за ними не искались вовсе. Изделия берём,
+    // только если их заметно больше, — иначе «Контейнеры» менялись бы с
+    // пластиковых (полимерная цепочка) на металлические.
+    const fewMaterials =
+      found(materials) && materials.confirmed.length < FEW_MATERIAL_RECORDS;
+    const articles =
+      found(materials) && !fewMaterials
+        ? null
+        : searchPass({ scope: "articles", strict: true, strictOnly: true });
+    const articlesWin =
+      fewMaterials &&
+      found(articles) &&
+      articles.confirmed.length >= ARTICLES_OVER_MATERIALS * materials.confirmed.length;
+    if (found(materials) && !articlesWin) outcome = materials;
     else if (found(articles)) outcome = articles;
     // Не подтвердилось нигде — разбор того, за что зацепились: сперва среди
     // веществ, потом среди изделий, потом мягкие ступени. Строгость прохода
@@ -1830,6 +1867,13 @@ function keepBestOverlap(rows, rawName, required = null) {
         rowList
           .slice(0, atRaw)
           .some((w) => SUPPLY_FORM.has(w) && !queryStems.has(w)),
+      // Перед продуктом одни определения: «Комбинированный нетканый
+      // материал», «Звуковая (акустическая) панель». Для строгого прохода по
+      // изделиям это то же, что продукт с первого слова (см. judge).
+      adjectivesBefore:
+        atRaw > 0 &&
+        atRaw <= MAX_LEADING_ADJECTIVES &&
+        rowPairs.slice(0, atRaw).every((p) => LEADING_ADJECTIVE.test(p.word)),
       // Перед веществом — продукт, который его содержит. См. PRODUCT_BEFORE.
       productBefore:
         (atRaw > 0 &&
@@ -1878,6 +1922,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       otherElement: s.otherElement,
       onlyClass: s.onlyClass,
       supplyForm: s.supplyForm,
+      adjectivesBefore: s.adjectivesBefore,
       productBefore: s.productBefore,
       madeOf: s.madeOf,
       medicine: s.medicine,
