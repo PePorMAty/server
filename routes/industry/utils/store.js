@@ -31,6 +31,7 @@ const {
   okpd2Name,
   okpd2NameExact,
   okpd2Retired,
+  formatTnved,
   tnvedName,
 } = require("./classifiers");
 const { identify, spellingsOf } = require("./synonyms");
@@ -244,6 +245,15 @@ function status() {
 }
 
 /** Строка реестра → вид, в котором её ждёт интерфейс. */
+/**
+ * Код ТН ВЭД записи — одним видом, по группам. В выгрузке один код пишут и
+ * «3920102500», и «3920 10 250 0»; бывает и несколько кодов в поле через
+ * запятую — берём первый, как у ОКПД2.
+ */
+function tnvedOf(raw) {
+  return formatTnved(String(raw ?? "").split(/[;,]/)[0]);
+}
+
 function toEntry(row) {
   return {
     // Показываем сокращённое название, полное отдаём рядом: в таблице
@@ -265,8 +275,11 @@ function toEntry(row) {
     okpd2Name: okpd2Name(row.okpd2),
     // Код мог быть снят с классификатора уже после регистрации записи.
     okpd2Retired: okpd2Retired(row.okpd2),
-    tnved: row.tnved || null,
+    // Одним видом — по группам: в выгрузке один код пишут и «3920102500»,
+    // и «3920 10 250 0».
+    tnved: tnvedOf(row.tnved) || null,
     tnvedName: tnvedName(row.tnved)?.name ?? null,
+    tnvedPath: tnvedName(row.tnved)?.path ?? null,
     status: row.status,
     statusLabel: row.status_raw || (row.status === "active" ? "Действует" : "В архиве"),
     regNumber: row.reg_number || null,
@@ -2155,7 +2168,11 @@ function summarize(rows, spellings = []) {
   for (const row of rows) {
     if (row.status === "active") anyActive = true;
     if (row.okpd2) okpd2Counts.set(row.okpd2, (okpd2Counts.get(row.okpd2) ?? 0) + 1);
-    if (row.tnved) tnvedCounts.set(row.tnved, (tnvedCounts.get(row.tnved) ?? 0) + 1);
+    // ТН ВЭД в выгрузке пишут по-разному: «3920 10 250 0» и «3920102500» —
+    // один код. Считаем по цифрам, показываем одним видом, по группам; иначе
+    // один код стоял в списке дважды и с разным числом записей.
+    const tnvedCode = tnvedOf(row.tnved);
+    if (tnvedCode) tnvedCounts.set(tnvedCode, (tnvedCounts.get(tnvedCode) ?? 0) + 1);
     // Считаем по тому же региону, что показываем: в выгрузке адреса нет, и
     // регион выводится из ИНН — иначе счётчик регионов всегда был бы нулём.
     const region = row.region || regionByInn(row.inn);
@@ -2243,6 +2260,11 @@ function summarize(rows, spellings = []) {
     })),
     tnved,
     tnvedName: tnvedName(tnved)?.name ?? null,
+    /**
+     * Цепочка названий ТН ВЭД сверху вниз. У позиции имя бывает «прочие» или
+     * «толщиной не более 1 мм»: что это, видно только по уровням над ней.
+     */
+    tnvedPath: tnvedName(tnved)?.path ?? null,
     tnvedOthers: Math.max(0, rankedTnved.length - 1),
     // У позиции ТН ВЭД имя без родителей бывает пустым звуком («прочие») —
     // полная цепочка рядом, для подсказки.

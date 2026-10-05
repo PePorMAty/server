@@ -286,7 +286,9 @@ function describeTnved(raw) {
   if (!/^\d{4,10}$/.test(digits)) return null;
   const hit = tnvedName(digits);
   return {
-    code: digits,
+    // Тем же видом, что коды записей реестра (по группам): иначе вписанный
+    // код не сравнился бы с кодом реестра.
+    code: formatTnved(digits),
     formatted: formatTnved(digits),
     name: hit?.name ?? null,
     path: hit?.path ?? null,
