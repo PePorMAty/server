@@ -28,6 +28,32 @@ const {
 } = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
+/** Сколько уже найденных ссылок перечислять модели — дальше промпт пухнет зря. */
+const KNOWN_LIMIT = 40;
+
+/**
+ * Уже найденное — модели, чтобы искала другое.
+ *
+ * Повторный поиск уходил тем же промптом, что и первый: модель не знала, что
+ * уже найдено, и возвращала те же страницы. Сервер честно отвечал «источники
+ * закончились», а со стороны казалось, что кнопка поиска не работает. PDF из
+ * базы в перечень не идут: их адреса внутренние, в сети их не найти.
+ */
+function knownSourcesBlock(existingSources) {
+  const known = existingSources
+    .map((s) => ({
+      url: String(s?.url || "").trim(),
+      title: String(s?.title || "").trim(),
+    }))
+    .filter((s) => /^https?:\/\//i.test(s.url))
+    .slice(0, KNOWN_LIMIT);
+  if (!known.length) return "";
+  return (
+    "\n\nЭти источники уже найдены — не предлагай их повторно, найди другие:\n" +
+    known.map((s) => `- ${s.title ? `${s.title} — ` : ""}${s.url}`).join("\n")
+  );
+}
+
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
   let aborted = false;
 
@@ -113,7 +139,8 @@ router.post("/gpt/step/sources", async (req, res) => {
       direction === "up"
         ? buildStepSourcesPromptUp(productName, maxItems)
         : buildStepSourcesPromptDown(productName, maxItems);
-    const prompt = customSystemPrompt || defaultPrompt;
+    const prompt =
+      (customSystemPrompt || defaultPrompt) + knownSourcesBlock(existingSources);
 
     // Пустой результат поиск повторяет сам (searchSources): модели порой
     // отвечают, не поискав, а со второго раза находят.
@@ -199,10 +226,12 @@ router.post("/gpt/step/sources", async (req, res) => {
 
     // «Исчерпано»: источники у продукта уже были, но новый поиск не дал
     // ничего сверх известных URL — сигналим, чтобы UI показал «закончились».
-    const picked = items.slice(0, maxItems);
-    const exhausted =
-      existingUrls.size > 0 &&
-      picked.every((it) => existingUrls.has(String(it?.url || "").trim()));
+    // Новое ставим вперёд известного: модель, даже получив перечень, порой
+    // повторяет пару ссылок, и они вытесняли бы новые за пределы maxItems.
+    const isKnown = (it) => existingUrls.has(String(it?.url || "").trim());
+    const fresh = items.filter((it) => !isKnown(it));
+    const picked = (fresh.length ? fresh : items).slice(0, maxItems);
+    const exhausted = existingUrls.size > 0 && fresh.length === 0;
 
     // Найденное — в общую базу: продукт в любом другом графе получит эти
     // источники без нового запроса к модели.
