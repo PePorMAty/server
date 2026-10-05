@@ -2229,9 +2229,27 @@ function summarize(rows, spellings = []) {
     okpd2Share: ranked[0]?.[1] ?? 0,
     /** Сколько ещё разных кодов у остальных записей. */
     okpd2Others: Math.max(0, ranked.length - 1),
+    /**
+     * Все коды записей — в том же порядке, что и выбор: первый и есть
+     * okpd2Registry (или okpd2, если не уточнялся). Карточка раскрывает по ним
+     * «у остальных записей ещё кодов: n» и даёт выбрать код вручную.
+     */
+    okpd2Codes: ranked.map(([code, count]) => ({
+      code,
+      name: okpd2Name(code),
+      exact: okpd2NameExact(code),
+      count,
+      ...(okpd2Retired(code) ? { retired: true } : {}),
+    })),
     tnved,
     tnvedName: tnvedName(tnved)?.name ?? null,
     tnvedOthers: Math.max(0, rankedTnved.length - 1),
+    // У позиции ТН ВЭД имя без родителей бывает пустым звуком («прочие») —
+    // полная цепочка рядом, для подсказки.
+    tnvedCodes: rankedTnved.map(([code, count]) => {
+      const hit = tnvedName(code);
+      return { code, name: hit?.name ?? null, path: hit?.path ?? null, count };
+    }),
     producers,
   };
 }

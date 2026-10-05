@@ -6,6 +6,7 @@
 //   GET  /industry/status   — подключена ли база и что в ней
 //   POST /industry/lookup   — найти продукты в реестре (пачкой)
 //   POST /industry/identify — опознать продукты по справочнику синонимов
+//   POST /industry/codes    — название кода ОКПД2 / ТН ВЭД, вписанного вручную
 //
 // Модель здесь не участвует: реестр — это авторитетные данные (ИНН, номера
 // записей), и придуманный номер отличить от настоящего невозможно. Ищем по
@@ -16,6 +17,7 @@ const express = require("express");
 
 const { lookupProduct, status } = require("./utils/store");
 const { identify, synonymsStatus } = require("./utils/synonyms");
+const { describeOkpd2, describeTnved } = require("./utils/classifiers");
 
 const router = express.Router();
 
@@ -99,6 +101,25 @@ router.post("/industry/identify", (req, res) => {
   } catch (e) {
     console.error("Industry identify error:", e);
     res.status(500).json({ success: false, error: "Failed to identify products" });
+  }
+});
+
+/**
+ * Код, который человек вписал в карточку продукта сам: проверить формат и
+ * назвать по классификатору. Реестр не нужен — работает и без базы ГИСП.
+ * Неверный формат — null у этого кода; пустое поле не спрашивают.
+ */
+router.post("/industry/codes", (req, res) => {
+  try {
+    const { okpd2, tnved } = req.body ?? {};
+    res.json({
+      success: true,
+      okpd2: okpd2 == null || okpd2 === "" ? undefined : describeOkpd2(okpd2),
+      tnved: tnved == null || tnved === "" ? undefined : describeTnved(tnved),
+    });
+  } catch (e) {
+    console.error("Industry codes error:", e);
+    res.status(500).json({ success: false, error: "Failed to read classifiers" });
   }
 });
 

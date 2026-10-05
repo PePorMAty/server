@@ -254,6 +254,47 @@ function okpd2Below(code) {
   return out;
 }
 
+/**
+ * Код, вписанный человеком в карточку, — с названием из классификатора.
+ *
+ * Формат проверяем строго: «20.14.52.111», допускаются и короткие уровни
+ * («20.14», «20.14.5», «20.14.52»). Нет такого кода — known: false, но
+ * название ближайшей группы над ним всё равно отдаём: человеку виднее, а
+ * группа подскажет, туда ли он смотрит.
+ */
+function describeOkpd2(raw) {
+  const code = String(raw ?? "").trim();
+  if (!/^\d{2}(\.\d{1,2}(\.\d{1,2}(\.\d{1,3})?)?)?$/.test(code)) return null;
+  const hit = lookupOkpd2(code);
+  return {
+    code,
+    name: hit?.name ?? null,
+    exact: Boolean(hit?.exact),
+    known: Boolean(hit?.exact),
+    retired: okpd2Retired(code),
+  };
+}
+
+/**
+ * То же для ТН ВЭД: 4–10 цифр, пробелы между группами допустимы. Наш файл
+ * номенклатуры не держит каждую десятизначную позицию — название берётся по
+ * ближайшему уровню (exact: false), и код считается известным, если такой
+ * уровень есть.
+ */
+function describeTnved(raw) {
+  const digits = String(raw ?? "").replace(/\s+/g, "");
+  if (!/^\d{4,10}$/.test(digits)) return null;
+  const hit = tnvedName(digits);
+  return {
+    code: digits,
+    formatted: formatTnved(digits),
+    name: hit?.name ?? null,
+    path: hit?.path ?? null,
+    exact: Boolean(hit?.exact),
+    known: Boolean(hit),
+  };
+}
+
 /** Только название — тем, кому подробности не нужны. */
 function okpd2Name(code) {
   return lookupOkpd2(code)?.name ?? null;
@@ -417,6 +458,8 @@ function classifiersStatus() {
 }
 
 module.exports = {
+  describeOkpd2,
+  describeTnved,
   okpd2Below,
   okpd2ByName,
   okpd2Name,
