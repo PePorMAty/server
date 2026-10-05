@@ -1220,8 +1220,30 @@ function mergeOutcomes(primary, extra) {
   if (!added.length) return primary;
   const addedCoverage = added.map((row) => extra.picked.coverage?.[extra.kept.indexOf(row)]);
   const kept = [...primary.kept, ...added];
+  // Разбор (explain) — тоже вместе: по нему снимок видит подтверждённые
+  // записи, и без этого добавленные в нём не появлялись. В разборе нет id —
+  // сверяем по названию и производителю, столько раз, сколько записей
+  // добавлено; отказ основного прохода по той же записи уступает
+  // подтверждению, как в combineTrials.
+  const pair = (r) => `${r.name}\u0000${r.producer}`;
+  const left = new Map();
+  for (const row of added) left.set(pair(row), (left.get(pair(row)) ?? 0) + 1);
+  const takes = (e) => {
+    const n = left.get(pair(e)) ?? 0;
+    if (!e.confirmed || !n) return false;
+    left.set(pair(e), n - 1);
+    return true;
+  };
+  const explain =
+    primary.explain && extra.explain
+      ? [
+          ...primary.explain.filter((e) => e.confirmed || !left.has(pair(e))),
+          ...extra.explain.filter(takes),
+        ]
+      : primary.explain;
   return {
     ...primary,
+    explain,
     kept,
     confirmed: [...primary.confirmed, ...added],
     picked: {
