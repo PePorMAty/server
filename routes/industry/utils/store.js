@@ -758,6 +758,11 @@ function lookupProduct(rawName, opts) {
       found(articles) &&
       articles.confirmed.length >= ARTICLES_OVER_MATERIALS * materials.confirmed.length;
     if (found(materials) && !articlesWin) outcome = materials;
+    // Изделия победили, а подтверждённое среди материалов не теряем: у
+    // «Шестерён» семь «Шестерня солнечная (сталь 20Х2Н4А)» заявлены под кодом
+    // поковок, но это те же шестерни. ОКПД2 — по большинству, то есть по
+    // изделиям.
+    else if (articlesWin) outcome = mergeOutcomes(articles, materials);
     else if (found(articles)) outcome = articles;
     // Не подтвердилось нигде — разбор того, за что зацепились: сперва среди
     // веществ, потом среди изделий, потом мягкие ступени. Строгость прохода
@@ -1201,6 +1206,32 @@ function combineTrials(trials) {
     for (const s of t.shared ?? []) shared.add(s);
   }
   return { rows, coverage, shared: [...shared] };
+}
+
+/**
+ * Два прохода поиска одним: к записям основного — подтверждённые записи
+ * второго, без повторов. Разбор (coverage) — тот же, что у каждой записи в
+ * своём проходе.
+ */
+function mergeOutcomes(primary, extra) {
+  const key = (row) => row.id ?? `${row.name}\u0000${row.producer}`;
+  const seen = new Set(primary.kept.map(key));
+  const added = extra.confirmed.filter((row) => !seen.has(key(row)));
+  if (!added.length) return primary;
+  const addedCoverage = added.map((row) => extra.picked.coverage?.[extra.kept.indexOf(row)]);
+  const kept = [...primary.kept, ...added];
+  return {
+    ...primary,
+    kept,
+    confirmed: [...primary.confirmed, ...added],
+    picked: {
+      ...primary.picked,
+      rows: kept,
+      coverage: [...(primary.picked.coverage ?? []), ...addedCoverage],
+      shared: [...new Set([...(primary.picked.shared ?? []), ...(extra.picked.shared ?? [])])],
+    },
+    onlyFormulation: primary.onlyFormulation && extra.onlyFormulation,
+  };
 }
 
 /**
