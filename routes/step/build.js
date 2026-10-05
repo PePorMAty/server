@@ -17,6 +17,8 @@ const {
 } = require("../sources/utils");
 
 /** Что ждали от модели — для текста ошибки. */
+const { withoutProspective } = require("../local-sources/utils/prospective");
+
 const STEP_ANSWER = { acc: "шаг", gen: "шага" };
 
 /**
@@ -324,9 +326,8 @@ router.post("/gpt/step/build", async (req, res) => {
         .map((s) => String(s || "").trim())
         .filter(Boolean)
     : [];
-  const existingSources = Array.isArray(req.body?.existingSources)
-    ? req.body.existingSources
-    : [];
+  // Без разделов о перспективных технологиях (см. prospective.js).
+  const existingSources = withoutProspective(req.body?.existingSources);
   const customSystemPrompt = req.body?.customSystemPrompt
     ? String(req.body.customSystemPrompt).trim()
     : null;

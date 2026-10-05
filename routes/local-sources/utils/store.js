@@ -24,6 +24,7 @@ const { identify, spellingsOf } = require("../../industry/utils/synonyms");
 const { extractPdf } = require("./pdf");
 const { buildUnits, documentTitles, productsFromTitle } = require("./structure");
 const { productKey } = require("./query");
+const { isProspectiveSection } = require("./prospective");
 
 const DEFAULT_DIR = path.resolve(__dirname, "../../../data/local-sources");
 
@@ -159,6 +160,31 @@ function migrate(conn) {
       conn
         .prepare("INSERT OR REPLACE INTO meta (name, value) VALUES ('keys_version', ?)")
         .run(String(KEYS_VERSION));
+    })();
+  }
+
+  // Разделы о перспективных технологиях больше не источник (prospective.js):
+  // записанные раньше удаляем один раз, новые writeSections не записывает.
+  const swept = conn.prepare("SELECT value FROM meta WHERE name = 'prospective_removed'").get();
+  if (!swept) {
+    conn.transaction(() => {
+      const ids = conn
+        .prepare("SELECT id, path, title, full_title FROM sections")
+        .all()
+        .filter((r) => isProspectiveSection(r.path, r.full_title || r.title))
+        .map((r) => r.id);
+      const dropLinks = conn.prepare("DELETE FROM section_products WHERE section_id = ?");
+      const dropSection = conn.prepare("DELETE FROM sections WHERE id = ?");
+      for (const id of ids) {
+        dropLinks.run(id);
+        dropSection.run(id);
+      }
+      conn
+        .prepare("INSERT OR REPLACE INTO meta (name, value) VALUES ('prospective_removed', ?)")
+        .run(String(ids.length));
+      if (ids.length) {
+        console.log(`[local-sources] удалены разделы о перспективных технологиях: ${ids.length}`);
+      }
     })();
   }
 }
@@ -348,6 +374,9 @@ function writeSections(conn, docId, units) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
   );
   for (const u of units) {
+    // Перспективные технологии — не источник (prospective.js): не записываем
+    // и, значит, не разбираем.
+    if (isProspectiveSection(u.path, u.fullTitle || u.title)) continue;
     const id = insert.run(
       docId,
       u.ord,
@@ -691,7 +720,7 @@ function finishSection(id, result, model) {
     wastes: roles.wastes,
   };
   conn.transaction(() => {
-    conn
+    const updated = conn
       .prepare(
         `UPDATE sections SET status = 'done', summary = ?, io = ?, extracted = ?, model = ?,
            error = NULL, decoded_at = ?, claimed_by = NULL
@@ -705,6 +734,9 @@ function finishSection(id, result, model) {
         new Date().toISOString(),
         id,
       );
+    // Раздел удалили, пока модель его разбирала (документ удалён, раздел о
+    // перспективных технологиях вычищен) — связывать не с чем.
+    if (!updated.changes) return;
     conn.prepare("DELETE FROM section_products WHERE section_id = ? AND origin = 'model'").run(id);
     linkSection(conn, id, roles.products, "product", "model");
     linkSection(conn, id, roles.byproducts, "byproduct", "model");
@@ -775,31 +807,12 @@ function resetStale() {
 /** Роль продукта в разделе по её месту в порядке (rank в sectionRows). */
 const ROLE_BY_RANK = ["product", "byproduct", "intermediate", "raw"];
 
-/**
- * Раздел о перспективных технологиях («Раздел 9. Перспективные технологии»
- * в ИТС): процессы, ещё не освоенные промышленностью.
- */
-const PROSPECTIVE = /перспективн/i;
-
-/**
- * Пометка в тексте такого раздела для обобщения шага: по ней обобщение
- * ставит его маршрут альтернативой, а не основным путём (см. правило в
- * routes/step/utils/prompts.js). В обобщение уходит только текст источника,
- * поэтому пометка — в нём, а не отдельным полем.
- */
-const PROSPECTIVE_MARK = "[Перспективная технология — в промышленности ещё не освоена]";
-
-function isProspective(r) {
-  return PROSPECTIVE.test(`${r.path || ""} › ${r.full_title || r.title || ""}`);
-}
-
 /** Раздел — в виде источника, понятного остальному приложению (TechnologySource). */
 function sectionSource(r) {
   const doc = r.short_title || r.doc_title;
   const pages = pageLabel(r.page_from, r.page_to, r.page_offset);
   const excerpt =
     r.text.length > EXCERPT_CHARS ? `${r.text.slice(0, EXCERPT_CHARS)}…` : r.text;
-  const prospective = isProspective(r);
   const text = r.summary || excerpt;
   return {
     origin: "local",
@@ -813,12 +826,11 @@ function sectionSource(r) {
     // без него клиент (он сравнивает адреса без #page) склеил бы их в один.
     url: `local-sources/documents/${r.doc_id}/file?section=${r.id}#page=${r.page_from}`,
     access_hint: `${doc}, ${pages}${r.status === "done" ? "" : " — модель раздел ещё не разобрала"}`,
-    technology_description: prospective ? `${PROSPECTIVE_MARK}\n${text}` : text,
+    technology_description: text,
     inputs_outputs_hint: parseList(r.io),
     evidence_snippets: [],
     // Кем продукт приходится разделу: целевой, попутный, промежуточный, сырьё.
     role: ROLE_BY_RANK[r.rank] ?? undefined,
-    ...(prospective ? { prospective: true } : {}),
   };
 }
 
@@ -829,8 +841,8 @@ function sectionSource(r) {
  *
  * Среди равных по роли первым — раздел, чей заголовок называет сам продукт:
  * у пропилена «Производство пропилена» раньше «Производства этилена», где
- * пропилен получают вместе с этиленом. Перспективные технологии — в конце:
- * промышленность их ещё не освоила. Этот же порядок у блоков обобщения шага.
+ * пропилен получают вместе с этиленом. Этот же порядок у блоков обобщения
+ * шага.
  */
 function sectionRows(keys, direction, limit = 0) {
   if (!keys.length) return [];
@@ -860,11 +872,8 @@ function sectionRows(keys, direction, limit = 0) {
   const named = (r) =>
     productsFromTitle(r.title).some((p) => nameKeys(p).some((k) => want.has(k)));
   const ranked = rows
-    .map((r, i) => ({ r, i, prospective: isProspective(r), named: named(r) }))
-    .sort(
-      (a, b) =>
-        a.prospective - b.prospective || a.r.rank - b.r.rank || b.named - a.named || a.i - b.i,
-    )
+    .map((r, i) => ({ r, i, named: named(r) }))
+    .sort((a, b) => a.r.rank - b.r.rank || b.named - a.named || a.i - b.i)
     .map((x) => x.r);
   return limit > 0 ? ranked.slice(0, limit) : ranked;
 }
@@ -1205,7 +1214,6 @@ function sectionItem(r) {
     byModel: Boolean(r.by_model),
     status: r.status,
     summary: r.summary || null,
-    ...(isProspective(r) ? { prospective: true } : {}),
   };
 }
 

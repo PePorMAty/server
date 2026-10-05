@@ -14,6 +14,8 @@
 //   — buildCardContext: граф для модели без лишнего — раньше уходил весь
 //     граф как есть, с источниками и описаниями каждого узла.
 
+const { withoutProspective } = require("../../local-sources/utils/prospective");
+
 /** Подписи полей — те же, что в интерфейсе (src/prompts/fillCardPrompts.ts). */
 const FIELD_LABELS = {
   product: {
@@ -285,11 +287,12 @@ function compactSelected(node) {
   for (const [key, limit] of Object.entries(text)) {
     if (typeof d[key] === "string" && d[key].trim()) out[key] = clip(d[key], limit);
   }
-  const sources = [
+  // Без разделов о перспективных технологиях (см. prospective.js).
+  const sources = withoutProspective([
     ...(Array.isArray(d.sourcesDown) ? d.sourcesDown : []),
     ...(Array.isArray(d.sourcesUp) ? d.sourcesUp : []),
     ...(Array.isArray(d.sources) ? d.sources : []),
-  ]
+  ])
     .filter((s) => s && (s.title || s.technology_description))
     .slice(0, 5)
     .map((s) => ({

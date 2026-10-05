@@ -17,6 +17,7 @@ const {
 } = require("../sources/utils");
 
 const { buildStepAggregatePrompts } = require("./utils/prompts");
+const { withoutProspective } = require("../local-sources/utils/prospective");
 
 // ---------- heartbeat ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -92,7 +93,9 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   // ---------- валидация ДО стрима ----------
   const productName = String(req.body?.productName || "").trim();
   const direction = req.body?.direction === "up" ? "up" : "down";
-  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  // Разделы о перспективных технологиях — не источник; в пулах графов,
+  // собранных раньше, они ещё встречаются (см. prospective.js).
+  const sources = withoutProspective(req.body?.sources);
   const existingChain = req.body?.existingChain ?? "";
   // Родословная раскрываемого продукта (предки по цепочке + он сам) — чтобы
   // обобщение НЕ выбирало следующим продуктом предка (это замкнуло бы петлю).
