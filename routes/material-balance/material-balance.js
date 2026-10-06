@@ -1,7 +1,8 @@
 // routes/material-balance/material-balance.js
 //
-// Материальный баланс одного преобразования: исходный продукт → целевой.
-// Подробности — MATERIAL-BALANCE.md.
+// Материальный баланс одного преобразования: сырьё → продукт, в одном из
+// двух направлений — «вниз» (сколько продукта из 1 т сырья) или «вверх»
+// (сколько сырья на 1 т продукта). Подробности — MATERIAL-BALANCE.md.
 //
 //   GET  /api/graphs/material-balance/prompt    промпт по умолчанию (правится на клиенте)
 //   POST /api/graphs/material-balance/lookup    готовые расчёты пары в базе
@@ -27,6 +28,7 @@ const {
   MATERIAL_BALANCE_USER_TEMPLATE,
   PLACEHOLDERS,
   BASIS_KG,
+  DIRECTIONS,
   buildRefs,
   buildVars,
   fillPrompt,
@@ -39,6 +41,9 @@ const MAX_KNOWN_DATA = 4000;
 const MAX_PROMPT = 60000;
 
 const text = (v, max = 2000) => String(v ?? "").trim().slice(0, max);
+
+/** Направление из запроса; не передано — «вниз», как считали всегда. */
+const directionOf = (v) => (DIRECTIONS.includes(v) ? v : "down");
 
 /** Узел из тела запроса: id и название обязательны, описание — нет. */
 function node(raw) {
@@ -58,9 +63,12 @@ function readInput(body) {
   const basis = node(body?.basis);
   const target = node(body?.target);
   if (!transformation) return { error: "Не передано преобразование (transformation.name)" };
-  if (!basis) return { error: "Не передан исходный продукт (basis.name)" };
-  if (!target) return { error: "Не передан целевой продукт (target.name)" };
-  if (basis.id === target.id) return { error: "Исходный и целевой продукт совпадают" };
+  if (!basis) return { error: "Не передано сырьё (basis.name)" };
+  if (!target) return { error: "Не передан продукт (target.name)" };
+  if (basis.id === target.id) return { error: "Сырьё и продукт совпадают" };
+  if (body?.direction !== undefined && !DIRECTIONS.includes(body.direction)) {
+    return { error: `Направление расчёта — ${DIRECTIONS.join(" или ")}` };
+  }
   const list = (v) => (Array.isArray(v) ? v.map(node).filter(Boolean).slice(0, 30) : []);
   const system = text(body?.system, MAX_PROMPT);
   const template = text(body?.template, MAX_PROMPT);
@@ -69,6 +77,7 @@ function readInput(body) {
       transformation,
       basis,
       target,
+      direction: directionOf(body?.direction),
       inputs: list(body?.inputs),
       outputs: list(body?.outputs),
       knownData: text(body?.knownData, MAX_KNOWN_DATA),
@@ -128,6 +137,7 @@ async function calculate(input) {
     transformation: input.transformation.name,
     basis: input.basis.name,
     target: input.target.name,
+    direction: input.direction,
     answer,
     parsed,
     refs,
@@ -153,6 +163,7 @@ function signatureOf(input) {
         input.transformation.name,
         input.basis.name,
         input.target.name,
+        input.direction,
         names(input.inputs),
         names(input.outputs),
         input.knownData,
@@ -184,8 +195,12 @@ router.post("/material-balance/lookup", (req, res) => {
       .status(400)
       .json({ success: false, error: "Нужны transformation, basis и target" });
   }
+  const direction = directionOf(req.body?.direction);
   try {
-    res.json({ success: true, ...store.lookup({ transformation, basis, target }) });
+    res.json({
+      success: true,
+      ...store.lookup({ transformation, basis, target, direction }),
+    });
   } catch (e) {
     console.error("[material-balance] lookup:", e);
     res.status(500).json({ success: false, error: e.message });
@@ -204,6 +219,7 @@ router.post("/material-balance", (req, res) => {
         transformation: input.transformation.name,
         basis: input.basis.name,
         target: input.target.name,
+        direction: input.direction,
       });
       if (exact) {
         return res.json({ success: true, fromCache: true, result: store.get(exact.id) });

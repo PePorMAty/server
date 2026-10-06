@@ -3,10 +3,14 @@
 // Готовые расчёты материального баланса: SQLite рядом с остальными данными
 // сервера (data/material-balance.sqlite, путь — MATERIAL_BALANCE_DB).
 //
-// Расчёт ищется по ключу «исходный продукт + целевой продукт + технология».
+// Расчёт ищется по ключу «сырьё + продукт + технология + направление».
 // Продукты — по справочнику, как сохранённые веб-источники (productKey): расчёт
 // для «ИПБ» найдётся и у «Кумола». Технология — по основам слов названия.
-// Когда у преобразований появятся свои идентификаторы, ключом станут они.
+// Направление — «вниз» (базис — сырьё) или «вверх» (базис — продукт): это
+// разные вопросы к модели, и готовый ответ на один другому не подходит.
+// Колонки basis_* и target_* — сырьё и продукт пары: так они назывались,
+// когда базисом всегда было сырьё. Когда у преобразований появятся свои
+// идентификаторы, ключом станут они.
 
 const fs = require("fs");
 const path = require("path");
@@ -50,6 +54,7 @@ function getDb() {
       basis_label   TEXT NOT NULL,
       target_label  TEXT NOT NULL,
       tech_label    TEXT NOT NULL,
+      direction     TEXT NOT NULL DEFAULT 'down',
       status        TEXT NOT NULL,
       answer        TEXT NOT NULL,
       parsed        TEXT NOT NULL,
@@ -63,6 +68,11 @@ function getDb() {
     );
     CREATE INDEX IF NOT EXISTS balances_pair ON balances (basis_key, target_key);
   `);
+  // База до направлений: все её расчёты — «вниз», на 1 т сырья.
+  const columns = db.prepare("PRAGMA table_info(balances)").all();
+  if (!columns.some((c) => c.name === "direction")) {
+    db.exec("ALTER TABLE balances ADD COLUMN direction TEXT NOT NULL DEFAULT 'down'");
+  }
   return db;
 }
 
@@ -102,17 +112,18 @@ function save(rec) {
   const info = getDb()
     .prepare(
       `INSERT INTO balances (basis_key, target_key, tech_key, basis_label, target_label,
-         tech_label, status, answer, parsed, refs, known_data, custom_prompt, provider,
-         model, took_ms, created_at)
+         tech_label, direction, status, answer, parsed, refs, known_data, custom_prompt,
+         provider, model, took_ms, created_at)
        VALUES (@basis_key, @target_key, @tech_key, @basis_label, @target_label, @tech_label,
-         @status, @answer, @parsed, @refs, @known_data, @custom_prompt, @provider, @model,
-         @took_ms, @created_at)`,
+         @direction, @status, @answer, @parsed, @refs, @known_data, @custom_prompt, @provider,
+         @model, @took_ms, @created_at)`,
     )
     .run({
       ...keys,
       basis_label: String(rec.basis),
       target_label: String(rec.target),
       tech_label: String(rec.transformation),
+      direction: rec.direction === "up" ? "up" : "down",
       status: rec.parsed.status,
       answer: rec.answer,
       parsed: JSON.stringify(rec.parsed),
@@ -137,6 +148,7 @@ function summary(row) {
     transformation: row.tech_label,
     basis: row.basis_label,
     target: row.target_label,
+    direction: row.direction === "up" ? "up" : "down",
     status: row.status,
     statusLabel: parsed.statusLabel || "",
   };
@@ -162,22 +174,23 @@ function get(id) {
 }
 
 /**
- * Готовые расчёты пары продуктов.
+ * Готовые расчёты пары продуктов в одном направлении.
  *
  * exact — та же технология и обычный запрос (без своих данных и правки
  * промпта): его берём сразу. similar — та же пара по другой технологии или
  * со своими условиями, по одному на технологию, свежие первыми: их только
  * предлагаем.
  */
-function lookup({ basis, target, transformation }) {
+function lookup({ basis, target, transformation, direction = "down" }) {
   const keys = keysOf({ basis, target, transformation });
   const rows = getDb()
     .prepare(
       `SELECT * FROM balances
-       WHERE basis_key = ? AND target_key = ? AND status IN (${REUSABLE.map(() => "?").join(", ")})
+       WHERE basis_key = ? AND target_key = ? AND direction = ?
+         AND status IN (${REUSABLE.map(() => "?").join(", ")})
        ORDER BY created_at DESC, id DESC`,
     )
-    .all(keys.basis_key, keys.target_key, ...REUSABLE);
+    .all(keys.basis_key, keys.target_key, direction === "up" ? "up" : "down", ...REUSABLE);
   const plain = (r) => !r.known_data && !r.custom_prompt;
   const exact = rows.find((r) => r.tech_key === keys.tech_key && plain(r)) ?? null;
   // Похожее — по одному на технологию: старые расчёты той же технологии, что
