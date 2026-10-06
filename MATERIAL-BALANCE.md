@@ -30,7 +30,8 @@
 | `GET /api/graphs/material-balance/prompt` | Промпт по умолчанию: `system`, `template`, `placeholders`, `basisKg` |
 | `POST /api/graphs/material-balance/lookup` | Готовые расчёты пары в базе: `exact` и `similar` |
 | `POST /api/graphs/material-balance` | Запустить расчёт или сразу отдать готовый |
-| `GET /api/graphs/material-balance/jobs/:id` | Ход расчёта: `running` / `done` (с `result`) / `failed` (с `error`) |
+| `GET /api/graphs/material-balance/jobs/:id` | Ход расчёта: `running` / `done` (с `result`) / `failed` (с `error`) / `cancelled` |
+| `POST /api/graphs/material-balance/jobs/:id/cancel` | Отменить расчёт: запрос к модели обрывается, в базу ничего не пишется |
 | `GET /api/graphs/material-balance/:id` | Расчёт из базы по номеру |
 
 ### Запуск
@@ -61,6 +62,16 @@
 щелчок «Рассчитать» к модели второй раз не идёт. Задачи живут в памяти
 процесса: после перезапуска сервера недосчитанное пропадает (`jobs/:id` → 404
 с объяснением), а досчитанное уже лежит в базе.
+
+### Отмена
+
+«Отменить расчёт» на клиенте — `POST jobs/:id/cancel`. Задача получает статус
+`cancelled`, а запрос к модели обрывается (`AbortController` → `signal` в
+`callOpenAIResponsesRaw`, у OpenAI и у DashScope одинаково): сервер больше не
+ждёт ответа, и в базу ничего не пишется, даже если ответ успел прийти.
+Закончившуюся задачу отмена не трогает. Задача общая для одинаковых
+запросов, поэтому отмена останавливает её и для второй вкладки — там опрос
+получит `cancelled`. Тот же запрос после отмены — новая задача.
 
 ### Что берётся из базы
 

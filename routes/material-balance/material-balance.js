@@ -7,6 +7,7 @@
 //   POST /api/graphs/material-balance/lookup    готовые расчёты пары в базе
 //   POST /api/graphs/material-balance           запустить расчёт (или взять готовый)
 //   GET  /api/graphs/material-balance/jobs/:id  ход расчёта
+//   POST /api/graphs/material-balance/jobs/:id/cancel  отменить расчёт
 //   GET  /api/graphs/material-balance/:id       расчёт из базы
 //
 // Модель с веб-поиском считает минуты, поэтому расчёт идёт в фоне, а клиент
@@ -81,8 +82,11 @@ function readInput(body) {
   };
 }
 
-/** Один запрос к модели и разбор ответа; результат — запись базы. */
-async function calculate(input) {
+/**
+ * Один запрос к модели и разбор ответа; результат — запись базы. signal
+ * обрывает запрос: отменённый расчёт в базу не пишется.
+ */
+async function calculate(input, { signal } = {}) {
   const t0 = Date.now();
   const refs = buildRefs(input);
   const vars = buildVars(input, refs);
@@ -105,7 +109,9 @@ async function calculate(input) {
     timeoutMs: 25 * 60 * 1000,
     provider: input.provider,
     model: input.model,
+    signal,
   });
+  if (signal?.aborted) throw new Error("Расчёт отменён");
 
   if (resp?.status && resp.status !== "completed") {
     const why = resp?.incomplete_details?.reason;
@@ -209,7 +215,7 @@ router.post("/material-balance", (req, res) => {
         return res.json({ success: true, fromCache: true, result: store.get(exact.id) });
       }
     }
-    const job = jobs.start(signatureOf(input), () => calculate(input));
+    const job = jobs.start(signatureOf(input), ({ signal }) => calculate(input, { signal }));
     res.json({ success: true, jobId: job.id, startedAt: new Date(job.startedAt).toISOString() });
   } catch (e) {
     console.error("[material-balance] start:", e);
@@ -226,6 +232,17 @@ router.get("/material-balance/jobs/:id", (req, res) => {
         "Расчёт не найден: сервер перезапускался. Если модель успела ответить, " +
         "результат уже в базе — запустите расчёт ещё раз.",
     });
+  }
+  res.json({ success: true, job: jobs.view(job) });
+});
+
+// «Отменить расчёт»: запрос к модели обрывается, ответ в базу не пишется.
+// Такой же запрос, запущенный ещё откуда-то, — та же задача (signatureOf),
+// поэтому отмена останавливает и его: там опрос получит «cancelled».
+router.post("/material-balance/jobs/:id/cancel", (req, res) => {
+  const job = jobs.cancel(req.params.id);
+  if (!job) {
+    return res.status(404).json({ success: false, error: "Расчёт не найден: возможно, сервер перезапускался" });
   }
   res.json({ success: true, job: jobs.view(job) });
 });

@@ -22,12 +22,15 @@ function sweep(now = Date.now()) {
 /**
  * Запустить задачу. Такая же (signature) уже считается — вернуть её: второй
  * щелчок «Рассчитать» или вторая вкладка не стоят второго запроса к модели.
+ *
+ * run получает { signal }: отмена задачи (cancel) обрывает им запрос к модели.
  */
 function start(signature, run) {
   sweep();
   for (const job of jobs.values()) {
     if (job.status === "running" && job.signature === signature) return job;
   }
+  const controller = new AbortController();
   const job = {
     id: crypto.randomBytes(9).toString("base64url"),
     signature,
@@ -36,17 +39,21 @@ function start(signature, run) {
     finishedAt: null,
     result: null,
     error: null,
+    controller,
   };
   jobs.set(job.id, job);
   Promise.resolve()
-    .then(run)
+    .then(() => run({ signal: controller.signal }))
     .then(
       (result) => {
+        // Отменённой задаче ответ уже не нужен.
+        if (job.status !== "running") return;
         job.status = "done";
         job.result = result;
         job.finishedAt = Date.now();
       },
       (err) => {
+        if (job.status !== "running") return;
         job.status = "failed";
         job.error = err?.message || String(err);
         job.finishedAt = Date.now();
@@ -58,6 +65,22 @@ function start(signature, run) {
 
 function get(id) {
   return jobs.get(String(id)) ?? null;
+}
+
+/**
+ * Отменить задачу: запрос к модели обрывается, ответ в базу не пишется.
+ * Закончившуюся задачу не трогает. Нет такой — null.
+ */
+function cancel(id) {
+  const job = get(id);
+  if (!job) return null;
+  if (job.status === "running") {
+    job.status = "cancelled";
+    job.finishedAt = Date.now();
+    job.controller.abort();
+    console.log(`[material-balance] расчёт ${job.id} отменён`);
+  }
+  return job;
 }
 
 /** Что отдать клиенту. */
@@ -72,4 +95,4 @@ function view(job) {
   };
 }
 
-module.exports = { start, get, view };
+module.exports = { start, get, cancel, view };

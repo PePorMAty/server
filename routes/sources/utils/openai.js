@@ -236,6 +236,7 @@ function describeApiError(err, model, { timeoutMs, searchRequired } = {}) {
   const who = model ? `Модель «${model}»` : "Модель";
   const text = apiErrorText(err);
 
+  if (isAborted(err)) return "Запрос к модели отменён.";
   if (
     err instanceof OpenAI.APIConnectionTimeoutError ||
     /timed? ?out/i.test(text)
@@ -278,6 +279,26 @@ function describeApiError(err, model, { timeoutMs, searchRequired } = {}) {
   return `${who}: ${text}`;
 }
 
+/** Запрос оборвали мы сами (signal): отменили расчёт. */
+function isAborted(err) {
+  return err instanceof OpenAI.APIUserAbortError || err?.name === "AbortError";
+}
+
+/** Пауза, которую обрывает отмена запроса. */
+function pause(ms, signal) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
 /** Отказ, который стоит повторить: перегрузка, сбой сервиса, обрыв связи. */
 function isTransient(err) {
   if (err instanceof OpenAI.APIConnectionTimeoutError) return false;
@@ -293,8 +314,9 @@ function isTransient(err) {
  * сам дважды, и медленная модель держала запрос втрое дольше таймаута.
  *
  * Возвращает { resp, fixes, ms } — fixes перечисляют применённые поправки.
+ * signal обрывает запрос и повторы: расчёт отменили.
  */
-async function createChat(client, params, { timeoutMs, name, searchRequired }) {
+async function createChat(client, params, { timeoutMs, name, searchRequired, signal }) {
   const t0 = Date.now();
   const fixes = [];
   let current = params;
@@ -305,9 +327,11 @@ async function createChat(client, params, { timeoutMs, name, searchRequired }) {
       const resp = await client.chat.completions.create(current, {
         timeout: timeoutMs,
         maxRetries: 0,
+        ...(signal ? { signal } : {}),
       });
       return { resp, fixes, ms: Date.now() - t0 };
     } catch (err) {
+      if (signal?.aborted || isAborted(err)) throw err;
       const fix = paramFix(err, current, { searchRequired });
       if (fix) {
         fixes.push(fix.note);
@@ -322,7 +346,7 @@ async function createChat(client, params, { timeoutMs, name, searchRequired }) {
         console.warn(
           `[${name}] model=${current.model}: ${apiErrorText(err)} — повторяю через 3 с`,
         );
-        await new Promise((r) => setTimeout(r, 3000));
+        await pause(3000, signal);
         continue;
       }
       err.fixes = fixes;
@@ -858,11 +882,18 @@ async function callOpenAIResponses({
   }
 }
 
+/**
+ * Запрос к модели как есть: payload в формате Responses API.
+ *
+ * signal (AbortSignal) обрывает запрос — так фоновый расчёт отменяют, не
+ * дожидаясь ответа модели.
+ */
 async function callOpenAIResponsesRaw({
   payload,
   timeoutMs = 10 * 60 * 1000,
   provider,
   model,
+  signal,
 }) {
   const { client, defaultModel, name } = getClient(provider);
   const isQwen = name === "qwen";
@@ -889,11 +920,16 @@ async function callOpenAIResponsesRaw({
       const { resp, fixes, ms } = await createChat(client, chatParams, {
         timeoutMs,
         name,
+        signal,
       });
       const out = chatToResponsesFormat(resp, { model: effectiveModel, fixes, ms });
       logDone(name, effectiveModel, { fixes, ms }, out);
       return out;
     } catch (err) {
+      if (signal?.aborted || isAborted(err)) {
+        console.log(`[${name}] callOpenAIResponsesRaw: запрос отменён`);
+        throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
+      }
       extractApiError(err);
       console.error(`[${name}] callOpenAIResponsesRaw error:`, apiErrorText(err));
       throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
@@ -913,9 +949,14 @@ async function callOpenAIResponsesRaw({
   try {
     const response = await client.responses.create(effectivePayload, {
       timeout: timeoutMs,
+      ...(signal ? { signal } : {}),
     });
     return response;
   } catch (err) {
+    if (signal?.aborted || isAborted(err)) {
+      console.log(`[${name}] callOpenAIResponsesRaw: запрос отменён`);
+      throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
+    }
     const msg = extractApiError(err);
     console.error(`[${name}] callOpenAIResponsesRaw error:`, msg);
     throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
