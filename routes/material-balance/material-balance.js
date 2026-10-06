@@ -102,9 +102,9 @@ async function calculate(input, { signal } = {}) {
       tool_choice: "auto",
       reasoning: { effort: "medium" },
       truncation: "auto",
-      // Ответ большой: таблицы, расчёт по переходам, блоки источников. У
-      // рассуждающих моделей лимит делится с рассуждением.
-      max_output_tokens: 16000,
+      // Ответ большой: таблицы, расчёт по переходам, пять блоков источников.
+      // У рассуждающих моделей лимит делится с рассуждением.
+      max_output_tokens: 20000,
     },
     timeoutMs: 25 * 60 * 1000,
     provider: input.provider,
