@@ -18,6 +18,7 @@ const techDescription = require("./routes/tech-description/tech-description");
 const shareRoutes = require("./routes/share/share");
 const industryRoutes = require("./routes/industry/industry");
 const localSourcesRoutes = require("./routes/local-sources/local-sources");
+const materialBalanceRoutes = require("./routes/material-balance/material-balance");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -97,6 +98,8 @@ app.use("/api/graphs", stepBuild);
 app.use("/api/graphs", transformationBetween);
 app.use("/api/graphs", techDescription);
 app.use("/api/graphs", shareRoutes);
+// Материальный баланс преобразования: расчёт моделью в фоне и база готовых.
+app.use("/api/graphs", materialBalanceRoutes);
 // Слой промышленных данных (ГИСП) — свой префикс: это не про графы.
 app.use("/api", industryRoutes);
 // Локальная база источников: PDF заказчика и найденное моделью.
