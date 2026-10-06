@@ -3,14 +3,14 @@
 // Готовые расчёты материального баланса: SQLite рядом с остальными данными
 // сервера (data/material-balance.sqlite, путь — MATERIAL_BALANCE_DB).
 //
-// Расчёт ищется по ключу «сырьё + продукт + технология + направление».
-// Продукты — по справочнику, как сохранённые веб-источники (productKey): расчёт
-// для «ИПБ» найдётся и у «Кумола». Технология — по основам слов названия.
-// Направление — «вниз» (базис — сырьё) или «вверх» (базис — продукт): это
-// разные вопросы к модели, и готовый ответ на один другому не подходит.
-// Колонки basis_* и target_* — сырьё и продукт пары: так они назывались,
-// когда базисом всегда было сырьё. Когда у преобразований появятся свои
-// идентификаторы, ключом станут они.
+// Расчёт ищется по ключу «сырьё + продукт + технология». Продукты — по
+// справочнику, как сохранённые веб-источники (productKey): расчёт для «ИПБ»
+// найдётся и у «Кумола». Технология — по основам слов названия. Когда у
+// преобразований появятся свои идентификаторы, ключом станут они.
+//
+// Колонка direction осталась от недолгой версии с расчётами «вверх» (на 1 т
+// продукта): такие строки, если успели появиться, в ответы не идут — их
+// числа посчитаны на другой базис.
 
 const fs = require("fs");
 const path = require("path");
@@ -68,7 +68,7 @@ function getDb() {
     );
     CREATE INDEX IF NOT EXISTS balances_pair ON balances (basis_key, target_key);
   `);
-  // База до направлений: все её расчёты — «вниз», на 1 т сырья.
+  // База до направлений: все её расчёты — на 1 т сырья.
   const columns = db.prepare("PRAGMA table_info(balances)").all();
   if (!columns.some((c) => c.name === "direction")) {
     db.exec("ALTER TABLE balances ADD COLUMN direction TEXT NOT NULL DEFAULT 'down'");
@@ -123,7 +123,7 @@ function save(rec) {
       basis_label: String(rec.basis),
       target_label: String(rec.target),
       tech_label: String(rec.transformation),
-      direction: rec.direction === "up" ? "up" : "down",
+      direction: "down",
       status: rec.parsed.status,
       answer: rec.answer,
       parsed: JSON.stringify(rec.parsed),
@@ -148,7 +148,6 @@ function summary(row) {
     transformation: row.tech_label,
     basis: row.basis_label,
     target: row.target_label,
-    direction: row.direction === "up" ? "up" : "down",
     status: row.status,
     statusLabel: parsed.statusLabel || "",
   };
@@ -174,23 +173,23 @@ function get(id) {
 }
 
 /**
- * Готовые расчёты пары продуктов в одном направлении.
+ * Готовые расчёты пары продуктов.
  *
  * exact — та же технология и обычный запрос (без своих данных и правки
  * промпта): его берём сразу. similar — та же пара по другой технологии или
  * со своими условиями, по одному на технологию, свежие первыми: их только
  * предлагаем.
  */
-function lookup({ basis, target, transformation, direction = "down" }) {
+function lookup({ basis, target, transformation }) {
   const keys = keysOf({ basis, target, transformation });
   const rows = getDb()
     .prepare(
       `SELECT * FROM balances
-       WHERE basis_key = ? AND target_key = ? AND direction = ?
+       WHERE basis_key = ? AND target_key = ? AND direction = 'down'
          AND status IN (${REUSABLE.map(() => "?").join(", ")})
        ORDER BY created_at DESC, id DESC`,
     )
-    .all(keys.basis_key, keys.target_key, direction === "up" ? "up" : "down", ...REUSABLE);
+    .all(keys.basis_key, keys.target_key, ...REUSABLE);
   const plain = (r) => !r.known_data && !r.custom_prompt;
   const exact = rows.find((r) => r.tech_key === keys.tech_key && plain(r)) ?? null;
   // Похожее — по одному на технологию: старые расчёты той же технологии, что
