@@ -884,6 +884,70 @@ function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT }
 }
 
 /**
+ * Разделы о преобразовании — для материального баланса: где получают его
+ * продукты («вверх», целевой или попутный продукт раздела) и где его сырьё —
+ * сырьё («вниз»). Раздел, где есть и продукты, и сырьё, — первым; среди
+ * равных — с большим числом совпадений, потом по роли продукта.
+ *
+ * Берём только разделы хотя бы с одним продуктом: раздел, где сырьё есть, а
+ * нужных продуктов нет, — о другом преобразовании того же сырья.
+ *
+ * @returns [{ id, docId, docTitle, title, path, pageFrom, pageTo, pages,
+ *             summary, text, targets: [названия], inputs: [названия], roles }]
+ */
+function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3 } = {}) {
+  const found = new Map();
+  const entry = (r) => {
+    let e = found.get(r.id);
+    if (!e) {
+      e = { r, targets: new Set(), inputs: new Set(), rank: r.rank };
+      found.set(r.id, e);
+    }
+    return e;
+  };
+  for (const name of targets) {
+    for (const r of sectionRows(productKeys(name), "up")) {
+      const e = entry(r);
+      e.targets.add(name);
+      e.rank = Math.min(e.rank, r.rank);
+    }
+  }
+  for (const name of inputs) {
+    for (const r of sectionRows(productKeys(name), "down")) {
+      if (found.has(r.id)) found.get(r.id).inputs.add(name);
+    }
+  }
+  const ranked = [...found.values()]
+    .filter((e) => e.targets.size > 0)
+    .sort(
+      (a, b) =>
+        (b.inputs.size > 0) - (a.inputs.size > 0) ||
+        b.targets.size + b.inputs.size - (a.targets.size + a.inputs.size) ||
+        a.rank - b.rank ||
+        a.r.doc_id - b.r.doc_id ||
+        a.r.ord - b.r.ord,
+    );
+  const roles = getDb().prepare(
+    "SELECT label, role FROM section_products WHERE section_id = ? GROUP BY label, role ORDER BY MIN(rowid)",
+  );
+  return ranked.slice(0, limit).map(({ r, targets: t, inputs: i }) => ({
+    id: r.id,
+    docId: r.doc_id,
+    docTitle: r.short_title || r.doc_title,
+    title: r.full_title || r.title,
+    path: r.path || "",
+    pageFrom: r.page_from,
+    pageTo: r.page_to,
+    pages: pageLabel(r.page_from, r.page_to, r.page_offset),
+    summary: r.summary || "",
+    text: r.text,
+    targets: [...t],
+    inputs: [...i],
+    roles: roles.all(r.id),
+  }));
+}
+
+/**
  * Сколько источников у продукта: разделов документов (всего и по
  * направлениям) и сохранённых веб-источников. Для всего графа разом — как
  * опознание продуктов.
@@ -1277,6 +1341,7 @@ module.exports = {
   requeue,
   resetStale,
   sourcesFor,
+  sectionsForTransformation,
   countsFor,
   listProducts,
   productSources,

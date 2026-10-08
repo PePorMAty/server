@@ -20,6 +20,7 @@
 // продукта): такие строки, если успели появиться, в ответы не идут — их
 // числа посчитаны на другой базис.
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
@@ -90,8 +91,98 @@ function getDb() {
   add("targets_label", "TEXT NOT NULL DEFAULT '[]'");
   add("title", "TEXT NOT NULL DEFAULT ''");
   add("basis_amount", "TEXT");
+  // Разделы базы источников (ИТС), отданные модели: появились новые — готовый
+  // расчёт уже не тот.
+  add("local_key", "TEXT NOT NULL DEFAULT ''");
   fillPairColumns(db);
+  // Копии веб-источников, загруженные сервером (sources.js): оригинал и
+  // текст — файлами рядом с базой, здесь — что и откуда.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS web_documents (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      url           TEXT NOT NULL,
+      final_url     TEXT NOT NULL,
+      kind          TEXT NOT NULL,
+      content_type  TEXT,
+      title         TEXT NOT NULL DEFAULT '',
+      sha256        TEXT NOT NULL,
+      bytes         INTEGER NOT NULL,
+      chars         INTEGER NOT NULL,
+      fetched_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS web_documents_url ON web_documents (url);
+  `);
   return db;
+}
+
+/** Каталог копий веб-источников. */
+function sourcesDir() {
+  return path.join(path.dirname(dbPath()), "material-balance-sources");
+}
+
+/**
+ * Сохранить загруженный источник: оригинал (<sha>.pdf / .html) и текст
+ * (<sha>.txt). Возвращает запись.
+ */
+function saveWebDocument({ url, finalUrl, kind, contentType, title, body, text }) {
+  const dir = sourcesDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const sha = crypto.createHash("sha256").update(body).digest("hex");
+  const ext = kind === "pdf" ? "pdf" : "html";
+  fs.writeFileSync(path.join(dir, `${sha}.${ext}`), body);
+  fs.writeFileSync(path.join(dir, `${sha}.txt`), text);
+  const info = getDb()
+    .prepare(
+      `INSERT INTO web_documents (url, final_url, kind, content_type, title, sha256, bytes, chars, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      String(url),
+      String(finalUrl || url),
+      kind,
+      contentType || null,
+      String(title || "").slice(0, 500),
+      sha,
+      body.length,
+      text.length,
+      new Date().toISOString(),
+    );
+  return webDocument(Number(info.lastInsertRowid));
+}
+
+function webDocument(id) {
+  return getDb().prepare("SELECT * FROM web_documents WHERE id = ?").get(Number(id)) ?? null;
+}
+
+/** Свежая копия того же адреса — не старше days дней. */
+function recentWebDocument(url, days) {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  return (
+    getDb()
+      .prepare(
+        "SELECT * FROM web_documents WHERE url = ? AND fetched_at >= ? ORDER BY id DESC LIMIT 1",
+      )
+      .get(String(url), since) ?? null
+  );
+}
+
+/** Пути к файлам копии. */
+function webDocumentFiles(doc) {
+  const dir = sourcesDir();
+  return {
+    original: path.join(dir, `${doc.sha256}.${doc.kind === "pdf" ? "pdf" : "html"}`),
+    text: path.join(dir, `${doc.sha256}.txt`),
+  };
+}
+
+function webDocumentText(id) {
+  const doc = webDocument(id);
+  if (!doc) return "";
+  try {
+    return fs.readFileSync(webDocumentFiles(doc).text, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -186,12 +277,12 @@ function save(rec) {
     .prepare(
       `INSERT INTO balances (basis_key, target_key, tech_key, basis_label, target_label,
          tech_label, direction, kind, inputs_key, targets_key, inputs_label, targets_label,
-         title, basis_amount, status, answer, parsed, refs, known_data, custom_prompt,
+         title, basis_amount, local_key, status, answer, parsed, refs, known_data, custom_prompt,
          provider, model, took_ms, created_at)
        VALUES (@basis_key, @target_key, @tech_key, @basis_label, @target_label, @tech_label,
          @direction, @kind, @inputs_key, @targets_key, @inputs_label, @targets_label,
-         @title, @basis_amount, @status, @answer, @parsed, @refs, @known_data, @custom_prompt,
-         @provider, @model, @took_ms, @created_at)`,
+         @title, @basis_amount, @local_key, @status, @answer, @parsed, @refs, @known_data,
+         @custom_prompt, @provider, @model, @took_ms, @created_at)`,
     )
     .run({
       ...keys,
@@ -205,6 +296,7 @@ function save(rec) {
       targets_label: JSON.stringify(targets),
       title: titleOf(rec.transformation, targets),
       basis_amount: JSON.stringify(rec.basisAmount),
+      local_key: String(rec.localKey || ""),
       status: rec.parsed.status,
       answer: rec.answer,
       parsed: JSON.stringify(rec.parsed),
@@ -290,7 +382,7 @@ const REUSABLE_SQL = `direction = 'down' AND status IN (${REUSABLE.map(() => "?"
  * другим сырьём, со своими условиями или прежние расчёты пар. По одному на
  * вариант, свежие первыми; их только предлагаем.
  */
-function lookup({ transformation, inputs, targets }) {
+function lookup({ transformation, inputs, targets, localKey = "" }) {
   const tech = techKey(transformation);
   const ins = new Set(inputs.map((n) => productKey(n)));
   const want = [...new Set(targets.map((n) => productKey(n)))];
@@ -311,12 +403,13 @@ function lookup({ transformation, inputs, targets }) {
         r.tech_key === tech &&
         r.inputs_key === keys.inputs_key &&
         r.targets_key === keys.targets_key &&
+        r.local_key === localKey &&
         plain(r),
     ) ?? null;
   // Похожее — по одному на вариант: старые расчёты того же варианта, что и
   // точное совпадение, — его же прошлые версии.
   const kindOf = (r) =>
-    [r.kind, r.tech_key, r.inputs_key, r.targets_key, plain(r) ? "" : r.id].join("\u0000");
+    [r.kind, r.tech_key, r.inputs_key, r.targets_key, r.local_key, plain(r) ? "" : r.id].join("\u0000");
   const seen = new Set(exact ? [kindOf(exact)] : []);
   const similar = [];
   for (const r of candidates) {
@@ -362,4 +455,18 @@ function close() {
   db = null;
 }
 
-module.exports = { save, get, lookup, lookupPair, techKey, titleOf, close, REUSABLE };
+module.exports = {
+  save,
+  get,
+  lookup,
+  lookupPair,
+  techKey,
+  titleOf,
+  saveWebDocument,
+  webDocument,
+  recentWebDocument,
+  webDocumentFiles,
+  webDocumentText,
+  close,
+  REUSABLE,
+};

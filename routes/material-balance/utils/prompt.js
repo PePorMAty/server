@@ -268,8 +268,12 @@ function buildRefs({ transformation, inputs, outputs, targets, basis }) {
 const isInput = (r) => r.role === "basis" || r.role === "input";
 const isTarget = (r) => r.role === "target";
 
-/** Значения плейсхолдеров по запросу клиента. */
-function buildVars(input, refs) {
+/**
+ * Значения плейсхолдеров по запросу клиента. checks — строки
+ * SERVER_SOURCE_CHECKS: документы базы источников (они уже сохранены) и, во
+ * втором запросе, итоги загрузки веб-источников.
+ */
+function buildVars(input, refs, { checks = [] } = {}) {
   const nodes = new Map([...input.inputs, ...input.outputs].map((n) => [n.id, n]));
   const ref = (r) => `${r.ref} ${quoted(r.name)}`;
   const t1 = refs.find((r) => r.role === "transformation");
@@ -315,9 +319,11 @@ function buildVars(input, refs) {
     "<<<GRAPH_CONTEXT>>>": context,
     "<<<BASIS>>>": basis,
     "<<<KNOWN_DATA>>>": String(input.knownData || "").trim() || "Нет.",
-    // Источники сервер пока не скачивает: первый и единственный запрос —
-    // с пустым списком, как в примечании заказчика к промпту.
-    "<<<SERVER_SOURCE_CHECKS>>>": "[] — серверная загрузка источников не выполнялась.",
+    // Первый запрос — пустой список, как в примечании заказчика к промпту;
+    // документы базы источников в нём — уже сохранённые (saved).
+    "<<<SERVER_SOURCE_CHECKS>>>": checks.length
+      ? `${checks.join("\n")}\nВеб-источники сервер ещё не загружал: проверит их после ответа.`
+      : "[] — серверная загрузка источников не выполнялась.",
   };
 }
 

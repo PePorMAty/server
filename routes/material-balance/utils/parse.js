@@ -331,12 +331,15 @@ function parseSources(body) {
   for (const part of parts) {
     const [head, ...rest] = part.split(/\r?\n/);
     const block = rest.join("\n").trim();
-    const id = head.match(/\[?\s*(S\s*\d+)\s*\]?/i)?.[1]?.replace(/\s+/g, "").toUpperCase();
+    const id = head.match(/\[?\s*([SL]\s*\d+)\s*\]?/i)?.[1]?.replace(/\s+/g, "").toUpperCase();
     const line = (label) => {
       const m = block.match(new RegExp(`^\\s*(?:[-*]\\s*)?(?:\\*\\*)?${label}(?:\\*\\*)?\\s*:\\s*(.+)$`, "im"));
       return m ? stripMd(m[1]) : "";
     };
-    const url = cleanUrl(line("URL").replace(/^.*?(https?:\/\/\S+).*$/i, "$1"));
+    const rawUrl = line("URL");
+    // Документ базы источников сервера — local://documents/<id>/sections/<id>.
+    const local = /local:\/\/documents\/\d+\/sections\/\d+(?:#page=\d+)?/i.exec(rawUrl)?.[0];
+    const url = local || cleanUrl(rawUrl.replace(/^.*?(https?:\/\/\S+).*$/i, "$1"));
     const title = line("Название");
     if (!url && !title) continue;
     out.push({
@@ -346,6 +349,8 @@ function parseSources(body) {
       org: line("Организация и год"),
       type: line("Тип"),
       usedFor: line("Использован для"),
+      accessHint: line("access_hint"),
+      readCheck: line("Проверка чтения"),
       block,
     });
   }

@@ -23,7 +23,9 @@ function sweep(now = Date.now()) {
  * Запустить задачу. Такая же (signature) уже считается — вернуть её: второй
  * щелчок «Рассчитать» или вторая вкладка не стоят второго запроса к модели.
  *
- * run получает { signal }: отмена задачи (cancel) обрывает им запрос к модели.
+ * run получает { signal, setStage }: отмена задачи (cancel) обрывает им
+ * запрос к модели, setStage(text) пишет, что сейчас идёт («Сервер
+ * загружает источники: 2 из 5») — клиент показывает это в ходе расчёта.
  */
 function start(signature, run) {
   sweep();
@@ -39,11 +41,15 @@ function start(signature, run) {
     finishedAt: null,
     result: null,
     error: null,
+    stage: null,
     controller,
+  };
+  const setStage = (text) => {
+    if (job.status === "running") job.stage = text ? String(text) : null;
   };
   jobs.set(job.id, job);
   Promise.resolve()
-    .then(() => run({ signal: controller.signal }))
+    .then(() => run({ signal: controller.signal, setStage }))
     .then(
       (result) => {
         // Отменённой задаче ответ уже не нужен.
@@ -90,6 +96,7 @@ function view(job) {
     status: job.status,
     startedAt: new Date(job.startedAt).toISOString(),
     elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt,
+    ...(job.status === "running" && job.stage ? { stage: job.stage } : {}),
     ...(job.status === "done" ? { result: job.result } : {}),
     ...(job.status === "failed" ? { error: job.error } : {}),
   };

@@ -10,11 +10,16 @@
 //   POST /api/graphs/material-balance           запустить расчёт (или взять готовый)
 //   GET  /api/graphs/material-balance/jobs/:id  ход расчёта
 //   POST /api/graphs/material-balance/jobs/:id/cancel  отменить расчёт
+//   GET  /api/graphs/material-balance/sources/:id/text|file  копия веб-источника
 //   GET  /api/graphs/material-balance/:id       расчёт из базы
 //
 // Модель с веб-поиском считает минуты, поэтому расчёт идёт в фоне, а клиент
 // спрашивает, готово ли. Ответ сохраняется в базу и тогда, когда клиент
 // ушёл: следующий такой же запрос получит его сразу.
+//
+// Разделы ИТС и других документов базы источников уходят модели первыми
+// (utils/local.js); веб-источники ответа сервер загружает и проверяет сам и
+// при неудаче просит модель их заменить (utils/sources.js).
 
 const crypto = require("crypto");
 const express = require("express");
@@ -37,6 +42,8 @@ const {
 } = require("./utils/prompt");
 const { productKey } = require("../local-sources/utils/query");
 const { parseAnswer, cleanAnswer } = require("./utils/parse");
+const { findLocalSources, localBlock, localChecks, localKey } = require("./utils/local");
+const { checkSources, checkLines, applyChecks } = require("./utils/sources");
 const store = require("./utils/store");
 const jobs = require("./utils/jobs");
 
@@ -170,22 +177,16 @@ function matchRefs(refs, input) {
   return out;
 }
 
-/**
- * Один запрос к модели и разбор ответа; результат — запись базы. signal
- * обрывает запрос: отменённый расчёт в базу не пишется.
- */
-async function calculate(input, { signal } = {}) {
-  const t0 = Date.now();
-  const refs = buildRefs(input);
-  const vars = buildVars(input, refs);
-  const system = fillPrompt(input.system || MATERIAL_BALANCE_SYSTEM, vars);
-  const user = fillPrompt(input.template || MATERIAL_BALANCE_USER_TEMPLATE, vars);
+/** Второй запрос к модели: не больше одного; MB_SOURCE_RETRY=0 — без него. */
+const RETRY = process.env.MB_SOURCE_RETRY !== "0";
 
+/** Один запрос к модели — ответ без обёрток. messages — переписка. */
+async function ask(input, system, messages, { signal }) {
   const resp = await callOpenAIResponsesRaw({
     payload: {
       model: "gpt-5-mini",
       instructions: system,
-      input: user,
+      input: messages.length === 1 ? messages[0].content : messages,
       tools: [{ type: "web_search", search_context_size: "medium" }],
       tool_choice: "auto",
       reasoning: { effort: "medium" },
@@ -200,7 +201,6 @@ async function calculate(input, { signal } = {}) {
     signal,
   });
   if (signal?.aborted) throw new Error("Расчёт отменён");
-
   if (resp?.status && resp.status !== "completed") {
     const why = resp?.incomplete_details?.reason;
     throw new Error(
@@ -211,11 +211,106 @@ async function calculate(input, { signal } = {}) {
   }
   const answer = cleanAnswer(extractOutputText(resp));
   if (!answer) throw new Error("Модель вернула пустой ответ");
+  return { answer, resp };
+}
 
-  const parsed = parseAnswer(answer, refs);
-  if (parsed.status === "unknown") {
-    const excerpt = answer.replace(/\s+/g, " ").slice(0, 300);
-    throw new Error(`Ответ модели не по шаблону: не найден статус расчёта. Начало ответа: «${excerpt}»`);
+/** Ответ без статуса — не по шаблону. */
+function notTemplate(answer) {
+  const excerpt = answer.replace(/\s+/g, " ").slice(0, 300);
+  return new Error(`Ответ модели не по шаблону: не найден статус расчёта. Начало ответа: «${excerpt}»`);
+}
+
+/** Источники проверяем, только когда модель что-то посчитала. */
+const checkable = (parsed) => !["invalid_selection", "invalid_basis"].includes(parsed.status);
+
+const plural = (n, one, few, many) => {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+
+/**
+ * Расчёт целиком; результат — запись базы. signal обрывает запросы:
+ * отменённый расчёт в базу не пишется.
+ *
+ * 1. Модель считает: документы базы источников (ИТС) — в запросе первыми.
+ * 2. Сервер загружает веб-источники ответа, проверяет в их тексте числа,
+ *    сохраняет копии (sources.js).
+ * 3. Какие-то не загрузились — второй запрос: тот же разговор и итоги
+ *    проверки (SERVER_SOURCE_CHECKS); модель заменяет их и пересчитывает.
+ *    Новые источники снова проверяются. Второй запрос не удался — остаётся
+ *    первый ответ с отметками проверки.
+ */
+async function calculate(input, { signal, setStage = () => {} } = {}) {
+  const t0 = Date.now();
+  const refs = buildRefs(input);
+  const local = input.local || [];
+  const vars = buildVars(input, refs, { checks: localChecks(local) });
+  const system = fillPrompt(input.system || MATERIAL_BALANCE_SYSTEM, vars);
+  const block = localBlock(local);
+  const user = `${fillPrompt(input.template || MATERIAL_BALANCE_USER_TEMPLATE, vars)}${block ? `\n\n${block}` : ""}`;
+
+  setStage(
+    local.length
+      ? `Модель считает: ${local.length} ${plural(local.length, "раздел", "раздела", "разделов")} из базы источников и поиск в интернете`
+      : "Модель ищет источники в интернете и считает",
+  );
+  const first = await ask(input, system, [{ role: "user", content: user }], { signal });
+  let answer = first.answer;
+  let resp = first.resp;
+  let parsed = parseAnswer(answer, refs);
+  if (parsed.status === "unknown") throw notTemplate(answer);
+
+  if (checkable(parsed) && parsed.sources.length) {
+    const progress = (label) => (done, total) =>
+      total && setStage(`${label}: ${done} из ${total}`);
+    let checks = await checkSources(parsed.sources, {
+      signal,
+      onProgress: progress("Сервер загружает и проверяет источники"),
+    });
+    let rounds = 1;
+    const failed = checks.filter((c) => c.status === "failed");
+    if (failed.length && RETRY) {
+      setStage(
+        `${failed.length} ${plural(failed.length, "источник не загрузился", "источника не загрузились", "источников не загрузились")} — модель ищет замену и пересчитывает`,
+      );
+      const followUp = [
+        "# Результаты серверной проверки источников",
+        ...localChecks(local),
+        ...checkLines(checks),
+        "",
+        "Сервер загрузил источники из твоего ответа. Источники со status: failed сервер получить не смог: по правилам исключи их из используемых, найди замену и пересчитай зависимые результаты либо отметь их как неподтверждённые. Для источников со status: saved укажи server_status: saved и server_document_id. Верни ответ заново, целиком, по тому же шаблону.",
+      ].join("\n");
+      try {
+        const second = await ask(
+          input,
+          system,
+          [
+            { role: "user", content: user },
+            { role: "assistant", content: answer },
+            { role: "user", content: followUp },
+          ],
+          { signal },
+        );
+        const parsed2 = parseAnswer(second.answer, refs);
+        if (parsed2.status !== "unknown") {
+          const previous = new Map(checks.map((c) => [c.url, c]));
+          checks = await checkSources(parsed2.sources, {
+            signal,
+            previous,
+            onProgress: progress("Сервер проверяет новые источники"),
+          });
+          answer = second.answer;
+          resp = second.resp;
+          parsed = parsed2;
+          rounds = 2;
+        }
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        console.warn("[material-balance] второй запрос не удался:", e.message);
+      }
+    }
+    applyChecks(parsed, checks, rounds);
   }
 
   const id = store.save({
@@ -223,6 +318,7 @@ async function calculate(input, { signal } = {}) {
     inputs: inputNames(input),
     targets: targetNames(input),
     basisAmount: { amount: input.basis.amount, unit: input.basis.unit, kg: input.basis.kg },
+    localKey: localKey(local),
     answer,
     parsed,
     refs,
@@ -254,6 +350,7 @@ function signatureOf(input) {
         [...input.targets].sort(),
         input.basis.id,
         input.basis.kg,
+        localKey(input.local || []),
         input.knownData,
         input.system,
         input.template,
@@ -302,7 +399,15 @@ router.post("/material-balance/lookup", (req, res) => {
         .status(400)
         .json({ success: false, error: "Нужны transformation, inputs и targets" });
     }
-    res.json({ success: true, ...store.lookup({ transformation, inputs, targets }) });
+    // Готовое — только если считалось с теми же разделами базы источников.
+    const local = findLocalSources({
+      inputs: inputs.map((name) => ({ name })),
+      targets: targets.map((name) => ({ name })),
+    });
+    res.json({
+      success: true,
+      ...store.lookup({ transformation, inputs, targets, localKey: localKey(local) }),
+    });
   } catch (e) {
     console.error("[material-balance] lookup:", e);
     res.status(500).json({ success: false, error: e.message });
@@ -318,11 +423,18 @@ router.post("/material-balance", (req, res) => {
     // промпта — просьба посчитать именно так, и готовое тут не подходит.
     // Готовый мог быть сделан на другом графе: nodeIds — какие узлы этого
     // запроса стоят за его обозначениями.
+    // Разделы базы источников о преобразовании — в запрос первыми. Готовый
+    // расчёт годится, только если считался с теми же разделами.
+    input.local = findLocalSources({
+      inputs: input.inputs,
+      targets: input.outputs.filter((n) => input.targets.includes(n.id)),
+    });
     if (!input.force && !input.knownData && !input.system && !input.template) {
       const { exact } = store.lookup({
         transformation: input.transformation.name,
         inputs: inputNames(input),
         targets: targetNames(input),
+        localKey: localKey(input.local),
       });
       if (exact) {
         const result = store.get(exact.id);
@@ -334,7 +446,9 @@ router.post("/material-balance", (req, res) => {
         });
       }
     }
-    const job = jobs.start(signatureOf(input), ({ signal }) => calculate(input, { signal }));
+    const job = jobs.start(signatureOf(input), ({ signal, setStage }) =>
+      calculate(input, { signal, setStage }),
+    );
     res.json({ success: true, jobId: job.id, startedAt: new Date(job.startedAt).toISOString() });
   } catch (e) {
     console.error("[material-balance] start:", e);
@@ -364,6 +478,31 @@ router.post("/material-balance/jobs/:id/cancel", (req, res) => {
     return res.status(404).json({ success: false, error: "Расчёт не найден: возможно, сервер перезапускался" });
   }
   res.json({ success: true, job: jobs.view(job) });
+});
+
+// Копии веб-источников, загруженные сервером при проверке: текст — всегда
+// простым текстом; оригинал PDF — как есть, HTML — файлом для скачивания,
+// чтобы чужая страница не выполнялась на адресе сервера.
+router.get("/material-balance/sources/:id/:what", (req, res) => {
+  if (!["text", "file"].includes(req.params.what)) {
+    return res.status(404).json({ success: false, error: "Нет такого вида копии: text или file" });
+  }
+  const doc = store.webDocument(Number(req.params.id));
+  if (!doc) return res.status(404).json({ success: false, error: "Копия источника не найдена" });
+  const files = store.webDocumentFiles(doc);
+  if (req.params.what === "text") {
+    res.type("text/plain; charset=utf-8");
+    return res.sendFile(files.text, (err) => err && !res.headersSent && res.status(404).end());
+  }
+  res.setHeader("Content-Security-Policy", "sandbox");
+  if (doc.kind === "pdf") {
+    res.type("application/pdf");
+    res.setHeader("Content-Disposition", "inline");
+  } else {
+    res.type("application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="source-${doc.id}.html"`);
+  }
+  res.sendFile(files.original, (err) => err && !res.headersSent && res.status(404).end());
 });
 
 router.get("/material-balance/:id", (req, res) => {
