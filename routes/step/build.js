@@ -525,8 +525,15 @@ router.post("/gpt/step/build", async (req, res) => {
     }
 
     // ---------- проверка достаточности источников ----------
-    const newProductObjs = [...step.inputProducts, ...step.outputProducts]
-      .filter((p) => !p.isExisting)
+    // Проверяем только дочерние продукты — те, от которых цепочка пойдёт
+    // дальше: у шага «вниз» это выходы, у шага «вверх» — входы. Второе сырьё
+    // шага «вниз» (А + В → Б) и попутный продукт шага «вверх» стоят на стороне
+    // якоря: следующего передела в этом направлении от них не ждут, и
+    // «нужны свежие источники» на них было бы ложной тревогой.
+    const children =
+      direction === "up" ? step.inputProducts : step.outputProducts;
+    const newProductObjs = children
+      .filter((p) => !p.isExisting && normalize(p.name) !== anchorNormName)
       .map((p) => ({ name: p.name, description: p.description || "" }));
     const newProducts = newProductObjs.map((p) => p.name);
 

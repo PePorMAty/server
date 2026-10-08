@@ -16,7 +16,10 @@ const {
   pickTechnologyBlocksFromSources,
 } = require("../sources/utils");
 
-const { buildStepAggregatePrompts } = require("./utils/prompts");
+const {
+  buildStepAggregatePrompts,
+  stepAggregateDefaults,
+} = require("./utils/prompts");
 const { withoutProspective } = require("../local-sources/utils/prospective");
 
 // ---------- heartbeat ----------
@@ -86,6 +89,13 @@ function parseNeedsSources(text) {
   }
   return null;
 }
+
+// Промпт обобщения по умолчанию — окно «Редактировать промпт обобщения»
+// показывает его, а не свою копию: копия на клиенте отставала от сервера.
+router.get("/gpt/step/aggregate/prompt", (req, res) => {
+  const direction = req.query?.direction === "up" ? "up" : "down";
+  res.json({ success: true, direction, ...stepAggregateDefaults(direction) });
+});
 
 router.post("/gpt/step/aggregate", async (req, res) => {
   const t0 = Date.now();
@@ -159,23 +169,18 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   };
 
   try {
-    const { SYSTEM, USER_PROMPT, lineageText } = buildStepAggregatePrompts({
-      productName,
-      existingChain,
-      blocks,
-      ancestorProducts,
-      direction,
-    });
-
-    // SYSTEM уже направление-аware (UP — зеркало DOWN, см. buildStepAggregatePrompts),
-    // поэтому костыль-префикс для up больше не нужен.
-    const effectiveSystem = customSystemPrompt || SYSTEM;
-    // Подставляем родословную и в кастомный пользовательский промпт (он идёт мимо
-    // builder); в дефолтном USER_PROMPT плейсхолдер уже заменён — здесь no-op.
-    const effectiveUser = (customUserPrompt || USER_PROMPT).replace(
-      "<<<LINEAGE>>>",
-      () => lineageText,
-    );
+    // Промпт по направлению (UP — зеркало DOWN). Правленый в окне построения
+    // текст заполняется теми же данными, что и шаблон по умолчанию.
+    const { SYSTEM: effectiveSystem, USER_PROMPT: effectiveUser } =
+      buildStepAggregatePrompts({
+        productName,
+        existingChain,
+        blocks,
+        ancestorProducts,
+        direction,
+        customSystem: customSystemPrompt,
+        customUser: customUserPrompt,
+      });
 
     const payload = {
       model: "gpt-5-mini",
