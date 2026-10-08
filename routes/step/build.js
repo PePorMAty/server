@@ -190,6 +190,32 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
 - Если точного или семантического совпадения нет — дай короткое рыночно-понятное название.
 `;
 
+const EMPTY_LIST_WORDS =
+  /^(?:—|–|-|нет|нет данных|не найден[оаы]?|не указан[оаы]?|отсутству\w*)\.?$/i;
+
+/**
+ * Обобщение не нашло продуктов шага: у шага «вниз» пусто «Что производят», у
+ * шага «вверх» — «Из чего производят». Промпты обобщения так и пишут («[]»),
+ * когда в источниках нет нужной связи. Схема шага требует непустых списков, и
+ * модель построения придумала бы продукты сама — поэтому такой шаг не строим.
+ * Смотрим основной вариант (до «Альтернатив»); поля нет вовсе — не решаем.
+ * То же проверяет клиент (stepFarSideEmpty в parseAlternatives.ts).
+ */
+function farSideEmpty(techText, direction) {
+  const text = String(techText || "");
+  const altAt = text.search(/^#{1,2}\s*Альтернатив/m);
+  const main = altAt > 0 ? text.slice(0, altAt) : text;
+  const label = direction === "up" ? "Из чего производят" : "Что производят";
+  const m = new RegExp(`\\*\\*${label}:\\*\\*([^\\n]*)`).exec(main);
+  if (!m) return false;
+  const inner = m[1]
+    .trim()
+    .replace(/^\[/, "")
+    .replace(/\]\.?$/, "")
+    .trim();
+  return inner === "" || EMPTY_LIST_WORDS.test(inner);
+}
+
 function buildStepBuildUserPrompt({ productName, techText, existingProducts }) {
   const existingList =
     existingProducts.length > 0 ? existingProducts.join(", ") : "(нет)";
@@ -346,6 +372,16 @@ router.post("/gpt/step/build", async (req, res) => {
     return res
       .status(400)
       .json({ success: false, error: "techText is required" });
+  }
+
+  if (farSideEmpty(techText, direction)) {
+    return res.status(422).json({
+      success: false,
+      error:
+        direction === "up"
+          ? `В обобщении пусто «Из чего производят»: источники не говорят, из чего получают «${productName}». Шаг не строим — сырьё пришлось бы придумывать. Доберите источники и обобщите заново или впишите сырьё в текст обобщения.`
+          : `В обобщении пусто «Что производят»: источники не говорят, что получают из «${productName}». Шаг не строим — продукты пришлось бы придумывать. Доберите источники и обобщите заново или впишите продукты в текст обобщения.`,
+    });
   }
 
   const stream = startAntiIdle(res, req, { heartbeatMs: 15000 });
