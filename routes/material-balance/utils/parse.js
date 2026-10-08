@@ -3,10 +3,15 @@
 // Ответ модели — Markdown по шаблону (prompt.js) — в структуру для клиента.
 //
 // Целиком ответ клиент показывает как есть, а числа нужны отдельно: массы
-// продуктов — для подписей на узлах и пересчёта на любой базис, коэффициенты —
-// для «выход 82%» на преобразовании, потоки и источники — для вкладки. Разбор
-// терпит то, что модели пишут вразнобой: «1 000» и «1000,0», «≈180», «150–200»,
-// «Р1» кириллицей, жирные подписи полей с двоеточием внутри и снаружи.
+// продуктов — для подписей на узлах и пересчёта на любое количество сырья,
+// поля «Расчёта по преобразованиям» — чтобы показать расчёт одного продукта,
+// потоки и источники — для вкладки. Разбор терпит то, что модели пишут
+// вразнобой: «1 000» и «1000,0», «≈180», «150–200», «Р1» кириллицей, жирные
+// подписи полей с двоеточием внутри и снаружи.
+//
+// Понимает и ответы прежнего промпта (пара «сырьё → продукт»): «Цепочка»
+// вместо «Схемы участка», «Расчёт по переходам» вместо «Расчёта по
+// преобразованиям», таблица «Коэффициенты переходов».
 
 /** Статусы шаблона. «Частично рассчитан» проверяется раньше «Рассчитан». */
 const STATUSES = [
@@ -184,7 +189,10 @@ function parseProducts(body, refs) {
     .filter((p) => p.ref || p.name);
 }
 
-/** «Коэффициенты переходов»: показатель стадии как в источнике. */
+/**
+ * «Коэффициенты переходов» прежнего промпта: показатель стадии как в
+ * источнике. В новом шаблоне такой таблицы нет — пусто.
+ */
 function parseCoefficients(body) {
   const table = firstTable(body);
   if (!table) return [];
@@ -235,6 +243,69 @@ function parseFlows(body) {
       };
     })
     .filter((f) => f.name);
+}
+
+/** Поля стадии из шаблона — их узнаём и без жирного шрифта. */
+const STEP_FIELDS = [
+  "Преобразование",
+  "Входные потоки",
+  "Выходные потоки",
+  "Коэффициенты",
+  "Коэффициент",
+  "Источник и условия",
+  "Расчёт",
+  "Расчет",
+  "Невыбранные потоки",
+  "Дополнительные потоки",
+  "Проверка стадии",
+];
+
+const FIELD_LINE = new RegExp(
+  `^[-*•]\\s*(?:(?:\\*\\*|__)\\s*([^*_\\n]{2,60}?)\\s*:?\\s*(?:\\*\\*|__)|(${STEP_FIELDS.join("|")}))\\s*:?\\s*(.*)$`,
+  "i",
+);
+
+/**
+ * Поля одной стадии: «- **Расчёт:** …» и всё, что ниже до следующего поля, —
+ * вложенные пункты и продолжение строки. Метка — без жирного и двоеточия.
+ */
+function stepFields(text) {
+  const fields = [];
+  let current = null;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    // Поле — только пункт без отступа: вложенный «- **P3:** 820 кг» — часть
+    // поля выше.
+    const m = /^\S/.test(line) ? line.match(FIELD_LINE) : null;
+    if (m) {
+      current = { label: (m[1] || m[2]).trim().replace(/:$/, ""), text: m[3].trim() };
+      fields.push(current);
+    } else if (current) {
+      current.text += `\n${line}`;
+    }
+  }
+  return fields
+    .map((f) => ({ label: f.label, text: f.text.replace(/\s+$/, "").replace(/^\n+/, "") }))
+    .filter((f) => f.label);
+}
+
+/**
+ * «Расчёт по преобразованиям»: раздел «## 1. А + Б → В + Г» на каждое
+ * преобразование. title — заголовок без номера, fields — поля шаблона.
+ */
+function parseSteps(body) {
+  return String(body || "")
+    .split(/^##\s+/m)
+    .slice(1)
+    .map((part) => {
+      const [head, ...rest] = part.split(/\r?\n/);
+      const text = rest.join("\n").trim();
+      return {
+        title: stripMd(head).replace(/^\d+\s*[.)]\s*/, ""),
+        fields: stepFields(text),
+        body: text,
+      };
+    })
+    .filter((s) => s.title || s.body);
 }
 
 /**
@@ -300,10 +371,14 @@ function parseAnswer(markdown, refs = []) {
   const head = section(sections, "Материальный баланс");
   const statusLabel = field(head, "Статус") ?? "";
   const balance = section(sections, "Общий баланс участка");
+  const transitions =
+    section(sections, "Расчёт по преобразованиям") ||
+    section(sections, "Расчет по преобразованиям") ||
+    section(sections, "Расчёт по переходам");
   return {
     status: statusOf(statusLabel),
     statusLabel,
-    chain: field(head, "Цепочка"),
+    chain: field(head, "Схема участка") ?? field(head, "Цепочка"),
     basisText: field(head, "Базис"),
     nature: field(head, "Характер результата"),
     products: parseProducts(section(sections, "Результаты по продуктам"), refs),
@@ -316,9 +391,10 @@ function parseAnswer(markdown, refs = []) {
       residual: field(balance, "Невязка"),
       conclusion: field(balance, "Вывод о балансе"),
     },
+    steps: parseSteps(transitions),
     sources: parseSources(section(sections, "Источники")),
     sections: {
-      transitions: section(sections, "Расчёт по переходам"),
+      transitions,
       balance,
       notes: section(sections, "Примечания"),
     },
@@ -333,4 +409,5 @@ module.exports = {
   refOf,
   splitSections,
   firstTable,
+  parseSteps,
 };

@@ -1,10 +1,12 @@
 // routes/material-balance/material-balance.js
 //
-// Материальный баланс одного преобразования: сколько продукта получается из
-// 1 т сырья. Подробности — MATERIAL-BALANCE.md.
+// Материальный баланс преобразования целиком: всё его сырьё и выбранные
+// продукты, на количество опорного сырья, которое задал человек. Каждый
+// продукт модель считает отдельно, а запрос и запись в базе — одни на
+// преобразование. Подробности — MATERIAL-BALANCE.md.
 //
 //   GET  /api/graphs/material-balance/prompt    промпт по умолчанию (правится на клиенте)
-//   POST /api/graphs/material-balance/lookup    готовые расчёты пары в базе
+//   POST /api/graphs/material-balance/lookup    готовые расчёты в базе
 //   POST /api/graphs/material-balance           запустить расчёт (или взять готовый)
 //   GET  /api/graphs/material-balance/jobs/:id  ход расчёта
 //   POST /api/graphs/material-balance/jobs/:id/cancel  отменить расчёт
@@ -27,11 +29,13 @@ const {
   MATERIAL_BALANCE_SYSTEM,
   MATERIAL_BALANCE_USER_TEMPLATE,
   PLACEHOLDERS,
-  BASIS_KG,
+  UNITS,
+  basisAmount,
   buildRefs,
   buildVars,
   fillPrompt,
 } = require("./utils/prompt");
+const { productKey } = require("../local-sources/utils/query");
 const { parseAnswer, cleanAnswer } = require("./utils/parse");
 const store = require("./utils/store");
 const jobs = require("./utils/jobs");
@@ -53,25 +57,73 @@ function node(raw) {
   };
 }
 
-/** Тело запроса расчёта → проверенный ввод или текст ошибки. */
+const MAX_NODES = 30;
+
+const nodes = (v) => (Array.isArray(v) ? v.map(node).filter(Boolean).slice(0, MAX_NODES) : []);
+
+/** Без повторов по id: первый остаётся. */
+function uniq(list, taken = new Set()) {
+  return list.filter((n) => !taken.has(n.id) && taken.add(n.id));
+}
+
+/**
+ * Тело запроса расчёта → проверенный ввод или текст ошибки.
+ *
+ *   transformation  преобразование
+ *   inputs          всё его сырьё
+ *   outputs         все его продукты
+ *   targets         id продуктов, для которых считать (нет — все)
+ *   basis           { id, amount, unit } — опорное сырьё и его количество
+ *
+ * Прежний вид — пара: basis и target узлами, на 1 т сырья. Его шлёт клиент
+ * прежней версии; это тот же расчёт с одним продуктом.
+ */
 function readInput(body) {
   const transformation = node(body?.transformation);
-  const basis = node(body?.basis);
-  const target = node(body?.target);
   if (!transformation) return { error: "Не передано преобразование (transformation.name)" };
-  if (!basis) return { error: "Не передано сырьё (basis.name)" };
-  if (!target) return { error: "Не передан продукт (target.name)" };
-  if (basis.id === target.id) return { error: "Сырьё и продукт совпадают" };
-  const list = (v) => (Array.isArray(v) ? v.map(node).filter(Boolean).slice(0, 30) : []);
+  let inputs = nodes(body?.inputs);
+  let outputs = nodes(body?.outputs);
+  let targets;
+  let basis;
+  if (body?.target && !Array.isArray(body?.targets)) {
+    const b = node(body?.basis);
+    const t = node(body?.target);
+    if (!b) return { error: "Не передано сырьё (basis.name)" };
+    if (!t) return { error: "Не передан продукт (target.name)" };
+    if (b.id === t.id) return { error: "Сырьё и продукт совпадают" };
+    inputs = [b, ...inputs];
+    outputs = [t, ...outputs];
+    targets = [t.id];
+    basis = { id: b.id, ...basisAmount(1, "т") };
+  } else {
+    targets = Array.isArray(body?.targets) ? body.targets.map((id) => text(id, 200)) : null;
+    const amount = basisAmount(body?.basis?.amount, text(body?.basis?.unit, 10));
+    if (!amount) {
+      return {
+        error: `Неверное количество сырья: нужно положительное число и единица ${UNITS.map((u) => `«${u}»`).join(", ")} (basis.amount, basis.unit)`,
+      };
+    }
+    basis = { id: text(body?.basis?.id, 200), ...amount };
+  }
+  // Продукт, нарисованный и входом, и выходом, — вход.
+  inputs = uniq(inputs);
+  outputs = uniq(outputs, new Set(inputs.map((n) => n.id)));
+  if (!inputs.length) return { error: "Не передано сырьё преобразования (inputs)" };
+  if (!outputs.length) return { error: "Не переданы продукты преобразования (outputs)" };
+  targets = outputs.filter((n) => !targets || targets.includes(n.id)).map((n) => n.id);
+  if (!targets.length) return { error: "Не выбран ни один продукт для расчёта (targets)" };
+  if (!inputs.some((n) => n.id === basis.id)) {
+    return { error: "Количество задано не для сырья этого преобразования (basis.id)" };
+  }
   const system = text(body?.system, MAX_PROMPT);
   const template = text(body?.template, MAX_PROMPT);
   return {
     input: {
       transformation,
+      inputs,
+      outputs,
+      targets,
       basis,
-      target,
-      inputs: list(body?.inputs),
-      outputs: list(body?.outputs),
       knownData: text(body?.knownData, MAX_KNOWN_DATA),
       system: system && system !== MATERIAL_BALANCE_SYSTEM ? system : "",
       template: template && template !== MATERIAL_BALANCE_USER_TEMPLATE ? template : "",
@@ -80,6 +132,42 @@ function readInput(body) {
       force: body?.force === true,
     },
   };
+}
+
+/** Сырьё запроса: опорное первым — так оно встанет в базе. */
+function inputNames(input) {
+  const ref = input.inputs.find((n) => n.id === input.basis.id);
+  return [ref, ...input.inputs.filter((n) => n !== ref)].map((n) => n.name);
+}
+
+const targetNames = (input) =>
+  input.outputs.filter((n) => input.targets.includes(n.id)).map((n) => n.name);
+
+/**
+ * Узлы запроса по обозначениям готового расчёта: сырьё — среди сырья,
+ * продукты — среди продуктов, по справочнику (productKey). Расчёт из базы
+ * мог быть сделан на другом графе — там у узлов свои id.
+ */
+function matchRefs(refs, input) {
+  const out = {};
+  const used = new Set();
+  const pick = (list, name) => {
+    const key = productKey(name);
+    const lower = String(name).trim().toLowerCase();
+    const hit =
+      list.find((n) => !used.has(n.id) && productKey(n.name) === key) ??
+      list.find((n) => !used.has(n.id) && n.name.trim().toLowerCase() === lower);
+    if (hit) used.add(hit.id);
+    return hit;
+  };
+  for (const r of refs) {
+    if (!/^P\d+$/.test(r.ref)) continue;
+    const list = r.role === "basis" || r.role === "input" ? input.inputs : input.outputs;
+    const hit = pick(list, r.name);
+    if (hit) out[r.ref] = hit.id;
+  }
+  out.T1 = input.transformation.id;
+  return out;
 }
 
 /**
@@ -102,7 +190,7 @@ async function calculate(input, { signal } = {}) {
       tool_choice: "auto",
       reasoning: { effort: "medium" },
       truncation: "auto",
-      // Ответ большой: таблицы, расчёт по переходам, пять блоков источников.
+      // Ответ большой: таблицы, расчёт по преобразованию, блоки источников.
       // У рассуждающих моделей лимит делится с рассуждением.
       max_output_tokens: 20000,
     },
@@ -132,8 +220,9 @@ async function calculate(input, { signal } = {}) {
 
   const id = store.save({
     transformation: input.transformation.name,
-    basis: input.basis.name,
-    target: input.target.name,
+    inputs: inputNames(input),
+    targets: targetNames(input),
+    basisAmount: { amount: input.basis.amount, unit: input.basis.unit, kg: input.basis.kg },
     answer,
     parsed,
     refs,
@@ -148,19 +237,23 @@ async function calculate(input, { signal } = {}) {
 
 /**
  * Подпись запроса: одинаковые запросы, пока первый ещё считается, к модели
- * второй раз не идут — получают тот же расчёт.
+ * второй раз не идут — получают тот же расчёт. id узлов — в подписи: свежий
+ * расчёт несёт их в refs, и чужой граф с теми же названиями их получить не
+ * должен.
  */
 function signatureOf(input) {
-  const names = (list) => list.map((n) => n.name).sort();
+  const ids = (list) => list.map((n) => `${n.id}\u0000${n.name}`).sort();
   return crypto
     .createHash("sha1")
     .update(
       JSON.stringify([
+        input.transformation.id,
         input.transformation.name,
-        input.basis.name,
-        input.target.name,
-        names(input.inputs),
-        names(input.outputs),
+        ids(input.inputs),
+        ids(input.outputs),
+        [...input.targets].sort(),
+        input.basis.id,
+        input.basis.kg,
         input.knownData,
         input.system,
         input.template,
@@ -177,21 +270,39 @@ router.get("/material-balance/prompt", (req, res) => {
     system: MATERIAL_BALANCE_SYSTEM,
     template: MATERIAL_BALANCE_USER_TEMPLATE,
     placeholders: PLACEHOLDERS,
-    basisKg: BASIS_KG,
+    units: UNITS,
   });
 });
 
+const names = (v) =>
+  (Array.isArray(v) ? v : [])
+    .map((n) => text(n?.name ?? n, 300))
+    .filter(Boolean)
+    .slice(0, MAX_NODES);
+
+// Новый вид: { transformation, inputs, targets } — названия или узлы.
+// Прежний: { transformation, basis, target } — пара.
 router.post("/material-balance/lookup", (req, res) => {
   const transformation = text(req.body?.transformation?.name ?? req.body?.transformation, 300);
-  const basis = text(req.body?.basis?.name ?? req.body?.basis, 300);
-  const target = text(req.body?.target?.name ?? req.body?.target, 300);
-  if (!transformation || !basis || !target) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Нужны transformation, basis и target" });
-  }
   try {
-    res.json({ success: true, ...store.lookup({ transformation, basis, target }) });
+    if (req.body?.target && !Array.isArray(req.body?.targets)) {
+      const basis = text(req.body?.basis?.name ?? req.body?.basis, 300);
+      const target = text(req.body?.target?.name ?? req.body?.target, 300);
+      if (!transformation || !basis || !target) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Нужны transformation, basis и target" });
+      }
+      return res.json({ success: true, ...store.lookupPair({ transformation, basis, target }) });
+    }
+    const inputs = names(req.body?.inputs);
+    const targets = names(req.body?.targets);
+    if (!transformation || !inputs.length || !targets.length) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Нужны transformation, inputs и targets" });
+    }
+    res.json({ success: true, ...store.lookup({ transformation, inputs, targets }) });
   } catch (e) {
     console.error("[material-balance] lookup:", e);
     res.status(500).json({ success: false, error: e.message });
@@ -205,14 +316,22 @@ router.post("/material-balance", (req, res) => {
   try {
     // Обычный запрос берёт готовый расчёт из базы. Свои данные или правка
     // промпта — просьба посчитать именно так, и готовое тут не подходит.
+    // Готовый мог быть сделан на другом графе: nodeIds — какие узлы этого
+    // запроса стоят за его обозначениями.
     if (!input.force && !input.knownData && !input.system && !input.template) {
       const { exact } = store.lookup({
         transformation: input.transformation.name,
-        basis: input.basis.name,
-        target: input.target.name,
+        inputs: inputNames(input),
+        targets: targetNames(input),
       });
       if (exact) {
-        return res.json({ success: true, fromCache: true, result: store.get(exact.id) });
+        const result = store.get(exact.id);
+        return res.json({
+          success: true,
+          fromCache: true,
+          result,
+          nodeIds: matchRefs(result.refs, input),
+        });
       }
     }
     const job = jobs.start(signatureOf(input), ({ signal }) => calculate(input, { signal }));
@@ -265,3 +384,4 @@ router.get("/material-balance/:id", (req, res) => {
 module.exports = router;
 module.exports.calculate = calculate;
 module.exports.readInput = readInput;
+module.exports.matchRefs = matchRefs;
