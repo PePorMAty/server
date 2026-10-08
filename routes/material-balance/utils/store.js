@@ -367,6 +367,25 @@ function get(id) {
 }
 
 const plain = (r) => !r.known_data && !r.custom_prompt;
+
+/**
+ * У всех продуктов расчёта есть масса. С «Нет данных» у продукта расчёт
+ * неполон: в следующий раз модель может найти больше (и сервер попросит её
+ * поискать в интернете), — сразу его не отдаём, только предлагаем.
+ */
+function complete(r) {
+  try {
+    const parsed = JSON.parse(r.parsed);
+    // Записи без таблицы масс (ранние пары) судить не по чему — как раньше.
+    if (!Array.isArray(parsed.products)) return true;
+    const mass = new Map((parsed.products || []).filter((p) => p.ref).map((p) => [p.ref, p.massKg]));
+    return JSON.parse(r.refs)
+      .filter((x) => x.role === "target")
+      .every((x) => mass.get(x.ref));
+  } catch {
+    return false;
+  }
+}
 const REUSABLE_SQL = `direction = 'down' AND status IN (${REUSABLE.map(() => "?").join(", ")})`;
 
 /**
@@ -374,7 +393,8 @@ const REUSABLE_SQL = `direction = 'down' AND status IN (${REUSABLE.map(() => "?"
  *
  * exact — расчёт по преобразованию целиком (не прежней пары) той же
  * технологии, с тем же сырьём и теми же продуктами, обычный запрос (без
- * своих данных и правки промпта): его берём сразу. Количество сырья не в
+ * своих данных и правки промпта), с массами всех продуктов: его берём
+ * сразу. Количество сырья не в
  * ключе: массы пропорциональны, клиент пересчитывает.
  *
  * similar — расчёты, где посчитаны все нужные продукты (и, может быть,
@@ -404,12 +424,16 @@ function lookup({ transformation, inputs, targets, localKey = "" }) {
         r.inputs_key === keys.inputs_key &&
         r.targets_key === keys.targets_key &&
         r.local_key === localKey &&
-        plain(r),
+        plain(r) &&
+        complete(r),
     ) ?? null;
   // Похожее — по одному на вариант: старые расчёты того же варианта, что и
   // точное совпадение, — его же прошлые версии.
+  // Неполные (без массы продукта) — свой вариант: предлагается свежий из них.
   const kindOf = (r) =>
-    [r.kind, r.tech_key, r.inputs_key, r.targets_key, r.local_key, plain(r) ? "" : r.id].join("\u0000");
+    [r.kind, r.tech_key, r.inputs_key, r.targets_key, r.local_key, plain(r) ? (complete(r) ? "" : "incomplete") : r.id].join(
+      "\u0000",
+    );
   const seen = new Set(exact ? [kindOf(exact)] : []);
   const similar = [];
   for (const r of candidates) {
@@ -437,7 +461,7 @@ function lookupPair({ basis, target, transformation }) {
        ORDER BY created_at DESC, id DESC`,
     )
     .all(keys.basis_key, targetsKey, ...REUSABLE);
-  const exact = rows.find((r) => r.tech_key === keys.tech_key && plain(r)) ?? null;
+  const exact = rows.find((r) => r.tech_key === keys.tech_key && plain(r) && complete(r)) ?? null;
   const kindOf = (r) => `${r.tech_key}\u0000${plain(r) ? "" : r.id}`;
   const seen = new Set(exact ? [kindOf(exact)] : []);
   const similar = [];

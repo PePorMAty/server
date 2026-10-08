@@ -43,7 +43,8 @@ const {
 const { productKey } = require("../local-sources/utils/query");
 const { parseAnswer, cleanAnswer } = require("./utils/parse");
 const { findLocalSources, localBlock, localChecks, localKey } = require("./utils/local");
-const { checkSources, checkLines, applyChecks } = require("./utils/sources");
+const { checkSources, applyChecks } = require("./utils/sources");
+const { missingRefs, filledCount, followUpText } = require("./utils/followup");
 const store = require("./utils/store");
 const jobs = require("./utils/jobs");
 
@@ -220,6 +221,19 @@ function notTemplate(answer) {
   return new Error(`Ответ модели не по шаблону: не найден статус расчёта. Начало ответа: «${excerpt}»`);
 }
 
+/** Этап второго запроса: что не так с первым ответом. */
+function retryStage(failedCount, missing) {
+  const names =
+    missing
+      .slice(0, 3)
+      .map((r) => `«${r.name}»`)
+      .join(", ") + (missing.length > 3 ? ` и ещё ${missing.length - 3}` : "");
+  const failedText = `${failedCount} ${plural(failedCount, "источник не загрузился", "источника не загрузились", "источников не загрузились")}`;
+  if (failedCount && missing.length) return `${failedText}, нет данных для ${names} — модель ищет в интернете и пересчитывает`;
+  if (missing.length) return `Нет данных для ${names} — модель ищет их в интернете`;
+  return `${failedText} — модель ищет замену и пересчитывает`;
+}
+
 /** Источники проверяем, только когда модель что-то посчитала. */
 const checkable = (parsed) => !["invalid_selection", "invalid_basis"].includes(parsed.status);
 
@@ -236,9 +250,11 @@ const plural = (n, one, few, many) => {
  * 1. Модель считает: документы базы источников (ИТС) — в запросе первыми.
  * 2. Сервер загружает веб-источники ответа, проверяет в их тексте числа,
  *    сохраняет копии (sources.js).
- * 3. Какие-то не загрузились — второй запрос: тот же разговор и итоги
- *    проверки (SERVER_SOURCE_CHECKS); модель заменяет их и пересчитывает.
- *    Новые источники снова проверяются. Второй запрос не удался — остаётся
+ * 3. Какие-то не загрузились или у сырья и выбранных продуктов нет масс —
+ *    второй запрос: тот же разговор, итоги проверки и что не найдено
+ *    (followup.js); модель заменяет источники, ищет недостающее в
+ *    интернете и пересчитывает. Новые источники снова проверяются.
+ *    Второй запрос не удался или дал меньше масс, чем первый, — остаётся
  *    первый ответ с отметками проверки.
  */
 async function calculate(input, { signal, setStage = () => {} } = {}) {
@@ -261,26 +277,29 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
   let parsed = parseAnswer(answer, refs);
   if (parsed.status === "unknown") throw notTemplate(answer);
 
-  if (checkable(parsed) && parsed.sources.length) {
+  if (checkable(parsed)) {
     const progress = (label) => (done, total) =>
       total && setStage(`${label}: ${done} из ${total}`);
-    let checks = await checkSources(parsed.sources, {
-      signal,
-      onProgress: progress("Сервер загружает и проверяет источники"),
-    });
+    let checks = parsed.sources.length
+      ? await checkSources(parsed.sources, {
+          signal,
+          onProgress: progress("Сервер загружает и проверяет источники"),
+        })
+      : [];
     let rounds = 1;
+    let retry = null;
     const failed = checks.filter((c) => c.status === "failed");
-    if (failed.length && RETRY) {
-      setStage(
-        `${failed.length} ${plural(failed.length, "источник не загрузился", "источника не загрузились", "источников не загрузились")} — модель ищет замену и пересчитывает`,
-      );
-      const followUp = [
-        "# Результаты серверной проверки источников",
-        ...localChecks(local),
-        ...checkLines(checks),
-        "",
-        "Сервер загрузил источники из твоего ответа. Источники со status: failed сервер получить не смог: по правилам исключи их из используемых, найди замену и пересчитай зависимые результаты либо отметь их как неподтверждённые. Для источников со status: saved укажи server_status: saved и server_document_id. Верни ответ заново, целиком, по тому же шаблону.",
-      ].join("\n");
+    const missing = missingRefs(parsed, refs);
+    if ((failed.length || missing.length) && RETRY) {
+      retry = { failed: failed.length, missing: missing.map((r) => r.name), used: false };
+      setStage(retryStage(failed.length, missing));
+      const followUp = followUpText({
+        transformation: input.transformation.name,
+        local,
+        checks,
+        failed,
+        missing,
+      });
       try {
         const second = await ask(
           input,
@@ -293,24 +312,33 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
           { signal },
         );
         const parsed2 = parseAnswer(second.answer, refs);
-        if (parsed2.status !== "unknown") {
+        // Масс стало меньше — второй ответ хуже: остаётся первый, а его
+        // неподтверждённые источники так и помечены.
+        const worse = filledCount(parsed2, refs) < filledCount(parsed, refs);
+        if (parsed2.status !== "unknown" && checkable(parsed2) && !worse) {
           const previous = new Map(checks.map((c) => [c.url, c]));
-          checks = await checkSources(parsed2.sources, {
-            signal,
-            previous,
-            onProgress: progress("Сервер проверяет новые источники"),
-          });
+          checks = parsed2.sources.length
+            ? await checkSources(parsed2.sources, {
+                signal,
+                previous,
+                onProgress: progress("Сервер проверяет новые источники"),
+              })
+            : [];
           answer = second.answer;
           resp = second.resp;
           parsed = parsed2;
           rounds = 2;
+          retry.used = true;
         }
       } catch (e) {
         if (signal?.aborted) throw e;
         console.warn("[material-balance] второй запрос не удался:", e.message);
       }
     }
-    applyChecks(parsed, checks, rounds);
+    if (checks.length || retry) {
+      applyChecks(parsed, checks, rounds);
+      if (retry) parsed.sourceChecks.retry = retry;
+    }
   }
 
   const id = store.save({
