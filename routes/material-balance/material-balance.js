@@ -45,6 +45,7 @@ const { parseAnswer, cleanAnswer } = require("./utils/parse");
 const { findLocalSources, localBlock, localChecks, localKey } = require("./utils/local");
 const { checkSources, applyChecks } = require("./utils/sources");
 const { missingRefs, filledCount, followUpText } = require("./utils/followup");
+const { searchMissing } = require("./utils/websearch");
 const store = require("./utils/store");
 const jobs = require("./utils/jobs");
 
@@ -221,18 +222,34 @@ function notTemplate(answer) {
   return new Error(`Ответ модели не по шаблону: не найден статус расчёта. Начало ответа: «${excerpt}»`);
 }
 
-/** Этап второго запроса: что не так с первым ответом. */
-function retryStage(failedCount, missing) {
-  const names =
+/** «Синильная кислота», «Ацетонитрил» и ещё 2 — для этапа расчёта. */
+function namesText(missing) {
+  return (
     missing
       .slice(0, 3)
       .map((r) => `«${r.name}»`)
-      .join(", ") + (missing.length > 3 ? ` и ещё ${missing.length - 3}` : "");
-  const failedText = `${failedCount} ${plural(failedCount, "источник не загрузился", "источника не загрузились", "источников не загрузились")}`;
-  if (failedCount && missing.length) return `${failedText}, нет данных для ${names} — модель ищет в интернете и пересчитывает`;
-  if (missing.length) return `Нет данных для ${names} — модель ищет их в интернете`;
-  return `${failedText} — модель ищет замену и пересчитывает`;
+      .join(", ") + (missing.length > 3 ? ` и ещё ${missing.length - 3}` : "")
+  );
 }
+
+const failedText = (n) =>
+  `${n} ${plural(n, "источник не загрузился", "источника не загрузились", "источников не загрузились")}`;
+
+/** Этап второго запроса: с чем модель пересчитывает. */
+function retryStage(failedCount, missing, confirmed) {
+  const found = missing.length
+    ? confirmed
+      ? `найдено в интернете и подтверждено: ${confirmed} ${plural(confirmed, "источник", "источника", "источников")}`
+      : `для ${namesText(missing)} подтверждённых данных в интернете не нашлось`
+    : null;
+  const what = failedCount
+    ? `${failedText(failedCount)}${found ? `; ${found}` : ""} — модель ищет замену и пересчитывает`
+    : `${found} — модель пересчитывает`;
+  return what.replace(/^./, (c) => c.toUpperCase());
+}
+
+/** Поправки транспорта к запросу (DashScope): выключил ли он модели поиск. */
+const searchOff = (resp) => (resp?.ai?.fixes || []).some((f) => /без поиска/i.test(f));
 
 /** Источники проверяем, только когда модель что-то посчитала. */
 const checkable = (parsed) => !["invalid_selection", "invalid_basis"].includes(parsed.status);
@@ -274,6 +291,8 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
   const first = await ask(input, system, [{ role: "user", content: user }], { signal });
   let answer = first.answer;
   let resp = first.resp;
+  // Провайдер отверг поиск и ответил без него — человеку это надо видеть.
+  let noSearch = searchOff(resp);
   let parsed = parseAnswer(answer, refs);
   if (parsed.status === "unknown") throw notTemplate(answer);
 
@@ -292,13 +311,38 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
     const missing = missingRefs(parsed, refs);
     if ((failed.length || missing.length) && RETRY) {
       retry = { failed: failed.length, missing: missing.map((r) => r.name), used: false };
-      setStage(retryStage(failed.length, missing));
+      // Недостающее ищет сам сервер — коротким поисковым запросом; найденное
+      // загружает и проверяет, подтверждённое отдаёт модели (websearch.js).
+      let found = [];
+      if (missing.length) {
+        setStage(`Нет данных для ${namesText(missing)} — сервер ищет их в интернете`);
+        try {
+          const { sources } = await searchMissing({ input, missing, signal });
+          const webChecks = sources.length
+            ? await checkSources(sources, {
+                signal,
+                previous: new Map(checks.map((c) => [c.url, c])),
+                onProgress: progress("Сервер проверяет найденное в интернете"),
+              })
+            : [];
+          found = sources
+            .map((source, i) => ({ source, check: webChecks[i] }))
+            .filter((x) => x.check?.status === "saved");
+          retry.search = { sources: sources.length, confirmed: found.length };
+        } catch (e) {
+          if (signal?.aborted) throw e;
+          console.warn("[material-balance] поиск недостающего не удался:", e.message);
+          retry.search = { sources: 0, confirmed: 0, error: e.message };
+        }
+      }
+      setStage(retryStage(failed.length, missing, found.length));
       const followUp = followUpText({
         transformation: input.transformation.name,
         local,
         checks,
         failed,
         missing,
+        found,
       });
       try {
         const second = await ask(
@@ -316,7 +360,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
         // неподтверждённые источники так и помечены.
         const worse = filledCount(parsed2, refs) < filledCount(parsed, refs);
         if (parsed2.status !== "unknown" && checkable(parsed2) && !worse) {
-          const previous = new Map(checks.map((c) => [c.url, c]));
+          const previous = new Map([...checks, ...found.map((f) => f.check)].map((c) => [c.url, c]));
           checks = parsed2.sources.length
             ? await checkSources(parsed2.sources, {
                 signal,
@@ -329,6 +373,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
           parsed = parsed2;
           rounds = 2;
           retry.used = true;
+          if (searchOff(second.resp)) noSearch = true;
         }
       } catch (e) {
         if (signal?.aborted) throw e;
@@ -340,6 +385,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
       if (retry) parsed.sourceChecks.retry = retry;
     }
   }
+  if (noSearch) parsed.searchOff = true;
 
   const id = store.save({
     transformation: input.transformation.name,

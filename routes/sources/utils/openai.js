@@ -886,7 +886,9 @@ async function callOpenAIResponses({
  * Запрос к модели как есть: payload в формате Responses API.
  *
  * signal (AbortSignal) обрывает запрос — так фоновый расчёт отменяют, не
- * дожидаясь ответа модели.
+ * дожидаясь ответа модели. searchRequired — без веб-поиска запрос не имеет
+ * смысла: модель, которая не умеет искать, — ошибка, а не тихий ответ без
+ * поиска.
  */
 async function callOpenAIResponsesRaw({
   payload,
@@ -894,6 +896,7 @@ async function callOpenAIResponsesRaw({
   provider,
   model,
   signal,
+  searchRequired = false,
 }) {
   const { client, defaultModel, name } = getClient(provider);
   const isQwen = name === "qwen";
@@ -921,6 +924,7 @@ async function callOpenAIResponsesRaw({
         timeoutMs,
         name,
         signal,
+        searchRequired,
       });
       const out = chatToResponsesFormat(resp, { model: effectiveModel, fixes, ms });
       logDone(name, effectiveModel, { fixes, ms }, out);
@@ -932,7 +936,7 @@ async function callOpenAIResponsesRaw({
       }
       extractApiError(err);
       console.error(`[${name}] callOpenAIResponsesRaw error:`, apiErrorText(err));
-      throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
+      throw new Error(describeApiError(err, effectiveModel, { timeoutMs, searchRequired }));
     }
   }
 
@@ -959,7 +963,7 @@ async function callOpenAIResponsesRaw({
     }
     const msg = extractApiError(err);
     console.error(`[${name}] callOpenAIResponsesRaw error:`, msg);
-    throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
+    throw new Error(describeApiError(err, effectiveModel, { timeoutMs, searchRequired }));
   }
 }
 
