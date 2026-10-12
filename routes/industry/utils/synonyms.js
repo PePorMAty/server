@@ -61,20 +61,35 @@ const stemKey = (raw) =>
       .join(" "),
   );
 
+const REFERENCE_DIR = path.resolve(__dirname, "../../../reference");
+
+/** Файл, за каждую строку которого отвечает человек. Стоп-лист его не трогает. */
+const HAND_WRITTEN = "synonyms.txt";
+
 /**
  * Файлы справочника, в порядке доверия.
  *
  * Первый — правленный человеком, он и побеждает при расхождениях. Второй
- * собирается скриптом из Wikidata по номеру CAS и в репозитории может
- * отсутствовать: справочник должен работать и без него.
+ * собирается скриптом из Wikidata по номеру CAS. Дальше — отрасли целиком
+ * (synonyms-wikidata-<отрасль>.txt, сборщик fetch-wikidata-domain.js), по
+ * алфавиту: каждая согласована отдельно и отдельным файлом, чтобы её можно
+ * было убрать одним движением. Собранных файлов в репозитории может не быть:
+ * справочник должен работать и без них.
  */
-const FILES = [
-  path.resolve(__dirname, "../../../reference/synonyms.txt"),
-  path.resolve(__dirname, "../../../reference/synonyms-wikidata.txt"),
-];
-
-/** Файл, за каждую строку которого отвечает человек. Стоп-лист его не трогает. */
-const HAND_WRITTEN = path.basename(FILES[0]);
+function referenceFiles() {
+  let domains = [];
+  try {
+    domains = fs
+      .readdirSync(REFERENCE_DIR)
+      .filter((f) => /^synonyms-wikidata-.+\.txt$/.test(f))
+      .sort();
+  } catch {
+    // Нет папки — читать нечего; load() это переживёт.
+  }
+  return [HAND_WRITTEN, "synonyms-wikidata.txt", ...domains].map((f) =>
+    path.join(REFERENCE_DIR, f),
+  );
+}
 
 /**
  * Цел ли номер CAS.
@@ -155,7 +170,7 @@ let stats = null;
  * веществ. Такие не сливаем и не выбираем молча: побеждает первая запись, а
  * пара уходит в stats.conflicts, чтобы её разобрал человек.
  */
-function load() {
+function load(files = referenceFiles()) {
   const map = new Map();
   const conflicts = [];
   // Вердикт по паре записей. Одна пара даёт столько столкновений, сколько у
@@ -218,7 +233,7 @@ function load() {
   const sources = [];
   let lines = 0;
 
-  for (const file of FILES) {
+  for (const file of files) {
     let text;
     try {
       // BOM в начале: файл правят в том числе windows-редакторами, и первое
@@ -350,10 +365,55 @@ function load() {
     /** Номера CAS, отброшенные проверкой контрольной цифрой. */
     badCas,
     sources,
-    file: FILES[0],
+    file: path.join(REFERENCE_DIR, HAND_WRITTEN),
     loaded: sources.length > 0,
   };
   return map;
+}
+
+/**
+ * Каким стал бы справочник с ещё одним файлом — не трогая живой указатель.
+ *
+ * Для сборщика отрасли: предложение показывают человеку вместе с тем, как его
+ * прочтёт справочник, — что сольётся с прежними записями, что столкнётся, что
+ * отсеет стоп-лист. Считать это отдельно, своими правилами, значило бы рано
+ * или поздно показать одно, а внести другое.
+ *
+ * Файл с тем же именем, что уже лежит в reference/, его заменяет: так
+ * пересбор отрасли сравнивается со справочником без её прежней версии.
+ */
+function previewWith(file) {
+  const name = path.basename(file);
+  const files = [...referenceFiles().filter((f) => path.basename(f) !== name), file];
+  ensure(); // живой указатель — прочитан до подмены, чтобы было что вернуть
+  const saved = stats;
+  let map;
+  let previewStats;
+  try {
+    map = load(files);
+    previewStats = stats;
+  } finally {
+    stats = saved;
+  }
+  const stems = buildStemIndex(map);
+  /**
+   * Опознать название так, как опознавал бы справочник с этим файлом. Тем же
+   * identify, на время вызова подменив указатель: отдельная копия правил
+   * опознания разошлась бы с настоящей при первой же их правке.
+   */
+  const identifyIn = (rawName) => {
+    const live = index;
+    const liveStems = stemIndex;
+    index = map;
+    stemIndex = stems;
+    try {
+      return identify(rawName);
+    } finally {
+      index = live;
+      stemIndex = liveStems;
+    }
+  };
+  return { stats: previewStats, entries: entriesOf(map), identify: identifyIn };
 }
 
 /**
@@ -683,7 +743,11 @@ function synonymsStatus() {
  * справочнике НЕ хватает, и сравнивает с ним названия целыми списками.
  */
 function allEntries() {
-  const map = ensure();
+  return entriesOf(ensure());
+}
+
+/** Записи указателя — по одной на вещество. */
+function entriesOf(map) {
   const seen = new Set();
   const out = [];
   for (const entry of map.values()) {
@@ -702,9 +766,11 @@ function allEntries() {
       noSearch: new Set(
         entry.spellings.filter((s) => entry.noSearch?.has(dictKey(s))),
       ),
+      /** Файл, из которого пришла запись (слитые строки — по первой). */
+      source: entry.source,
     });
   }
   return out;
 }
 
-module.exports = { identify, spellingsOf, synonymsStatus, allEntries };
+module.exports = { identify, spellingsOf, synonymsStatus, allEntries, previewWith };
