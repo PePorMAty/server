@@ -216,6 +216,46 @@ function farSideEmpty(techText, direction) {
   return inner === "" || EMPTY_LIST_WORDS.test(inner);
 }
 
+/** Список «[А, Б (В, Г)]» — по запятым и точкам с запятой вне скобок. */
+function splitProductList(raw) {
+  const items = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of String(raw || "")) {
+    if (ch === "(" || ch === "[") depth += 1;
+    if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    if ((ch === "," || ch === ";") && depth === 0) {
+      items.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  items.push(cur);
+  return items.map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Продукты дальней стороны основного варианта текста: у шага «вниз» —
+ * «Что производят», у шага «вверх» — «Из чего производят». Пусто — поля нет
+ * или оно пустое (тогда шаг и не строится, см. farSideEmpty).
+ */
+function farSideListed(techText, direction) {
+  const text = String(techText || "");
+  const altAt = text.search(/^#{1,2}\s*Альтернатив/m);
+  const main = altAt > 0 ? text.slice(0, altAt) : text;
+  const label = direction === "up" ? "Из чего производят" : "Что производят";
+  const m = new RegExp(`\\*\\*${label}:\\*\\*([^\\n]*)`).exec(main);
+  if (!m) return [];
+  const inner = m[1]
+    .trim()
+    .replace(/^\[/, "")
+    .replace(/\]\.?$/, "")
+    .trim();
+  if (!inner || EMPTY_LIST_WORDS.test(inner)) return [];
+  return splitProductList(inner);
+}
+
 function buildStepBuildUserPrompt({ productName, techText, existingProducts }) {
   const existingList =
     existingProducts.length > 0 ? existingProducts.join(", ") : "(нет)";
@@ -533,6 +573,32 @@ router.post("/gpt/step/build", async (req, res) => {
         .map(markProduct)
         .filter((p) => p.name),
     };
+
+    // Разборщик иногда уходит от текста: обобщение «Что производят:
+    // [Бисфенол А]» (обратная переработка поликарбоната) превращалось в шаг
+    // «Гликолиз → Диолы поликарбоната», и названный продукт пропадал — а с
+    // ним и связь рециклинга на полотне. Дальняя сторона шага — из основного
+    // пути текста: названное там и не вернувшееся в ответе добавляем.
+    const farList =
+      direction === "up" ? step.inputProducts : step.outputProducts;
+    const sameProduct = (a, b) => {
+      const x = baseName(a);
+      const y = baseName(b);
+      if (!x || !y) return false;
+      return x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x)));
+    };
+    const restored = [];
+    for (const name of farSideListed(techText, direction)) {
+      if (normalize(name) === normalize(productName)) continue;
+      if (farList.some((p) => sameProduct(p.name, name))) continue;
+      farList.push(markProduct({ name }));
+      restored.push(name);
+    }
+    if (restored.length) {
+      console.log(
+        `[step/build] «${productName}» (${direction}): модель потеряла продукты основного пути — ${restored.join(", ")}; добавлены по тексту обобщения`,
+      );
+    }
 
     if (step.inputProducts.length === 0 || step.outputProducts.length === 0) {
       return reply(422, {
