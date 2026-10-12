@@ -4,7 +4,10 @@ const path = require("path");
 
 const {
   GRAPH_DIR,
+  BALANCES_DIR,
   safeId,
+  sidecarPath,
+  removeFile,
   readGraphFile,
   graphMeta,
   removeSidecars,
@@ -184,6 +187,10 @@ router.put("/:id", async (req, res) => {
     };
 
     await fs.writeFile(filePath, JSON.stringify(updated, null, 2), "utf-8");
+    // Расчёты баланса теперь в самом файле, в данных узлов: сайдкар с ними
+    // (см. material-balances.js) больше не нужен — и не должен перекрыть то,
+    // что сохранили, при следующем открытии.
+    await removeFile(sidecarPath(BALANCES_DIR, fileName));
 
     res.json({ success: true, data: graphMeta(fileName, updated) });
   } catch (e) {

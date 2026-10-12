@@ -3,10 +3,10 @@
 // Файловое хранилище библиотеки графов и приложенных к ним данных.
 //
 // Сам граф лежит в data/saved-graphs/<id>.json, где <id> — имя файла: он же
-// служит идентификатором в API. Закладки и история хранятся не внутри графа, а
-// отдельными файлами-сайдкарами под тем же именем в соседних каталогах. Так
-// закладка сохраняется сразу, не дожидаясь, пока пользователь сохранит сам
-// граф.
+// служит идентификатором в API. Закладки, история и расчёты материального
+// баланса хранятся не внутри графа, а отдельными файлами-сайдкарами под тем же
+// именем в соседних каталогах. Так закладка сохраняется сразу, не дожидаясь,
+// пока пользователь сохранит сам граф.
 
 const fs = require("fs/promises");
 const path = require("path");
@@ -16,6 +16,7 @@ const DATA_DIR = path.resolve(__dirname, "../../../data");
 const GRAPH_DIR = path.join(DATA_DIR, "saved-graphs");
 const BOOKMARKS_DIR = path.join(DATA_DIR, "bookmarks");
 const HISTORY_DIR = path.join(DATA_DIR, "history");
+const BALANCES_DIR = path.join(DATA_DIR, "material-balances");
 
 /** Шаблон промта, правленный пользователем. Пусто — берём из окружения. */
 const PROMPT_LAYOUT_FILE = path.join(DATA_DIR, "prompt-layout.json");
@@ -94,11 +95,12 @@ function graphMeta(fileName, content) {
   };
 }
 
-/** Убрать закладки и историю графа — зовём при его удалении. */
+/** Убрать закладки, историю и расчёты баланса графа — зовём при его удалении. */
 async function removeSidecars(fileName) {
   await Promise.all([
     removeFile(sidecarPath(BOOKMARKS_DIR, fileName)),
     removeFile(sidecarPath(HISTORY_DIR, fileName)),
+    removeFile(sidecarPath(BALANCES_DIR, fileName)),
   ]);
 }
 
@@ -107,6 +109,7 @@ module.exports = {
   GRAPH_DIR,
   BOOKMARKS_DIR,
   HISTORY_DIR,
+  BALANCES_DIR,
   PROMPT_LAYOUT_FILE,
   safeId,
   sidecarPath,
