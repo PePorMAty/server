@@ -1112,6 +1112,10 @@ function baseVerdict(c) {
   if (c.elementAfterNoun && c.parens !== "formulation") {
     return { ok: false, why: "элемент в чужом названии: марка или изделие" };
   }
+  // Пестицид с дозировкой ДРУГОГО вещества в скобке: имя препарата лишь
+  // совпало с запросом. Препарат самого вещества — «Сера 400, КС», «ТОРНАДО,
+  // ВР (360 г/л глифосата)» по «Глифосату» — правило не трогает.
+  if (c.otherActive) return { ok: false, why: `препарат другого вещества: ${c.otherActive}` };
   // «О-Ксилол химически чистый» при запросе «Ксилол»: изомер, который
   // справочник знает отдельным веществом.
   if (c.otherIsomer) return { ok: false, why: `другое вещество: «${c.otherIsomer}»` };
@@ -1525,6 +1529,27 @@ function isPesticideForm(name) {
 }
 
 /**
+ * Пестицид, у которого в скобке с дозировкой названо другое действующее
+ * вещество, — а запрос совпал с торговым именем: «КОБАЛЬТ, КМЭ (400 г/л
+ * пропиконазола)» по «Кобальту». Возвращает содержимое скобки или null.
+ *
+ * Только у пестицидов: «Карбамид (46% азота)» — сам карбамид, и в скобке у
+ * него не другое вещество, а его состав. И только когда спрошен элемент: по
+ * запросу-классу «Пестициды» «Пестицид Гардо Голд, СЭ (312,5 г/л
+ * С-метолахлора…)» — законная находка.
+ */
+function otherActiveSubstance(name, queryStems) {
+  const text = String(name ?? "");
+  if (!isPesticideForm(text)) return null;
+  for (const m of text.matchAll(/\(([^()]*)\)/g)) {
+    const inside = m[1];
+    if (!QUANTITY_RE.test(inside)) continue;
+    if (!stemPairs(inside).some((p) => queryStems.has(p.stem))) return inside.trim();
+  }
+  return null;
+}
+
+/**
  * Приставки положения: о-, м-, п-, орто-, мета-, пара-.
  *
  * С ними одно слово называет РАЗНЫЕ вещества: «Ксилол» — смесь изомеров, а
@@ -1663,25 +1688,28 @@ const FORM_WORDS = new Set(
  * оказаться посторонним уточнением, и запрещать по нему всю запись было бы
  * слишком грубо.
  *
- * Степень окисления между веществом и классом соседства не рвёт: «Железа (II)
- * сульфат» — тот же сульфат железа. А сама она сразу за веществом — уже
- * признак соединения: «Медь (II) - хром (III) оксид». Это правило молчит,
- * когда соединение и спросили («Оксид железа» → «Железа (III) оксид»):
- * степень окисления там — часть ответа.
+ * Когда спрошен химический элемент («Калий», «Железо»), правило строже —
+ * соль узнаётся и по виду слова (compoundWord), а степень окисления между
+ * элементом и классом соседства не рвёт: «Железа (II) сульфат» — тот же
+ * сульфат железа. Сама она сразу за элементом — уже признак соединения:
+ * «Медь (II) - хром (III) оксид». Для прочих запросов — только список: по виду
+ * слова у них отсеивались верные записи — «Гексафторосиликат калия» ← «Калий
+ * гексафторосиликат (калий кремнефтористый)», «Аммофос (Моноаммонийфосфат)»
+ * (снимок 680bec9 → 18a6990).
  */
-function foreignCompound(rowPairs, queryStems, rawName = "", queryCompound = false) {
-  const oxidation = OXIDATION_IN_PARENS.test(rawName);
+function foreignCompound(rowPairs, queryStems, rawName = "", elementQuery = false) {
+  const oxidation = elementQuery && OXIDATION_IN_PARENS.test(rawName);
   const isOxidation = (p) => oxidation && Boolean(p) && ROMAN_WORD.test(p.stem);
+  const isClass = (p) =>
+    elementQuery ? compoundWord(p.word, p.stem) : COMPOUND_CLASS.has(p.stem);
   for (let i = 0; i < rowPairs.length; i++) {
     if (!queryStems.has(rowPairs[i].stem)) continue;
-    if (!queryCompound && isOxidation(rowPairs[i + 1])) return "степень окисления";
+    if (isOxidation(rowPairs[i + 1])) return "степень окисления";
     for (const dir of [-1, 1]) {
       let j = i + dir;
       while (isOxidation(rowPairs[j])) j += dir;
       const near = rowPairs[j];
-      if (near && !queryStems.has(near.stem) && compoundWord(near.word, near.stem)) {
-        return near.stem;
-      }
+      if (near && !queryStems.has(near.stem) && isClass(near)) return near.stem;
     }
   }
   return null;
@@ -1886,9 +1914,6 @@ function keepBestOverlap(rows, rawName, required = null) {
   const element = askedElement(queryPairs);
   // Спрошен химический элемент по имени — «Титан», «Цинк» (см. ELEMENT_NAMES).
   const elementName = askedElementName(queryPairs);
-  // Спросили само соединение («Оксид железа»): степень окисления в записи —
-  // часть ответа, а не признак чужого вещества.
-  const queryCompound = queryPairs.some((p) => compoundWord(p.word, p.stem));
   // Спрошенное вещество по справочнику — чтобы узнать запись про другой
   // изомер того же корня: «О-Ксилол» при запросе «Ксилол». См. otherIsomer.
   const askedCanon = identify(rawName)?.canon ?? null;
@@ -1971,7 +1996,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       strong: shared.filter((s) => s.length > 2).length,
       parens: matchedInParens(row.name || "", queryStems),
       // Слово-класс впритык к совпавшему: запись про соединение, не про него.
-      foreignClass: foreignCompound(rowPairs, queryStems, row.name || "", queryCompound),
+      foreignClass: foreignCompound(rowPairs, queryStems, row.name || "", Boolean(elementName)),
       // Спросили сам элемент, а в записи он только в косвенном падеже.
       elementCompound: element ? elementInCompound(rowPairs, element) : false,
       // Рядом с совпавшим — другой элемент: двойная соль или смесь.
@@ -2022,6 +2047,9 @@ function keepBestOverlap(rows, rawName, required = null) {
       ureaSolution: isUreaSolution(rowList),
       // Препаративная форма пестицида: «Сера 400, КС (фунгицид)».
       pesticideForm: isPesticideForm(row.name || ""),
+      // Препарат другого вещества под тем же именем: «КОБАЛЬТ, КМЭ (400 г/л
+      // пропиконазола)» — фунгицид на пропиконазоле, а не кобальт.
+      otherActive: elementName ? otherActiveSubstance(row.name || "", queryStems) : null,
       // Изомер, который справочник знает отдельным веществом.
       otherIsomer: otherIsomer(row.name || "", queryStems, askedCanon, queryMarked),
     };
@@ -2055,6 +2083,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       elementCompound: s.elementCompound,
       otherElement: s.otherElement,
       elementAfterNoun: s.elementAfterNoun,
+      otherActive: s.otherActive,
       onlyClass: s.onlyClass,
       supplyForm: s.supplyForm,
       adjectivesBefore: s.adjectivesBefore,
