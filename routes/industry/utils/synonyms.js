@@ -496,6 +496,7 @@ function ensure() {
 function buildStemIndex(map) {
   const out = new Map();
   for (const [key, entry] of map) {
+    if (nounLosesEnding(key)) continue;
     const sk = stemKey(key);
     if (!sk) continue;
     const prev = out.get(sk);
@@ -503,6 +504,21 @@ function buildStemIndex(map) {
     else if (prev && prev.canon !== entry.canon) out.set(sk, null);
   }
   return out;
+}
+
+/**
+ * Однословное имя на «-ий», у которого усечение отрезает окончание целиком,
+ * как у прилагательного: «Фермий» → «ферм», «Глиний» → «глин», «Актиний» →
+ * «актин». Такая основа — чужое слово: по усечению «Фермы» (строительные)
+ * опознавались фермием, «Глина» — алюминием (у него старое имя «Глиний»),
+ * «Актин» — актинием. В указатель по усечению такие имена не идут: опознаются
+ * только точно. Элементы, у которых основа держит «-и» («Натрий» → «натри»,
+ * ELEMENT_NOUNS в normalize.js), это не задевает — у них падежи сходятся
+ * по-прежнему.
+ */
+function nounLosesEnding(key) {
+  if (key.includes(" ") || !key.endsWith("ий")) return false;
+  return stemWord(key) === key.slice(0, -2);
 }
 
 /**
