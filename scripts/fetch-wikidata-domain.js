@@ -48,7 +48,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { collectProducts } = require("./lib/graph-products");
-const { allEntries, identify, previewWith } = require("../routes/industry/utils/synonyms");
+const { previewWith, previewWithout } = require("../routes/industry/utils/synonyms");
 const {
   isElementFormula,
   normalizeName,
@@ -66,6 +66,7 @@ const {
 } = require("./lib/wikidata");
 
 const OUT_DIR = path.resolve(__dirname, "../data/wikidata");
+const REFERENCE_DIR = path.resolve(__dirname, "../reference");
 
 /** По скольку элементов забираем за раз: у химических элементов утверждений много. */
 const BATCH = 25;
@@ -109,6 +110,16 @@ function metalElement(item) {
  *
  * walk: "instances" — только прямые экземпляры (химические элементы);
  *       "tree"      — подклассы вглубь и экземпляры на каждом уровне.
+ *
+ * decisions — решения согласования, по коду элемента Wikidata. Записаны
+ * здесь, а не правкой готового файла: пересбор отрасли (Wikidata меняется)
+ * должен давать согласованное, а не возвращать отклонённое.
+ *   dropItems     — предмет не берём целиком;
+ *   canon         — главное имя Wikidata неудачно, берём другое; прежнее
+ *                   уходит совсем;
+ *   dropSpellings — написания, которые не синонимы своего предмета;
+ *   noSearch      — написания только для опознания, по реестру не искать
+ *                   (в строке со звёздочкой, как в synonyms.txt).
  */
 const DOMAINS = {
   metals: {
@@ -129,11 +140,78 @@ const DOMAINS = {
         walk: "tree",
       },
     ],
+    // Согласовано заказчиком 2026-10-13 по отчёту первого сбора.
+    decisions: {
+      dropItems: {
+        Q5561558: "покрытие, а не сплав; «красная латунь» в синонимах — другое",
+        Q901785: "синонимы — процесс и другой продукт, без них одно имя без CAS",
+      },
+      canon: {
+        Q725158: { name: "Конструкционная сталь", why: "«Стальной профиль» — прокат, изделие" },
+      },
+      dropSpellings: {
+        Q925: { spellings: ["Меркурий"], why: "планета и торговые марки" },
+        Q649090: {
+          spellings: ["Аргентан", "Медно-никелевый сплав", "Медноникелевый сплав"],
+          why: "аргентан — нейзильбер; медно-никелевые — целая группа",
+        },
+        Q39782: { spellings: ["Алюминиевая латунь", "Аурихалк"], why: "подвид; легендарный металл" },
+        Q1127242: { spellings: ["Р6М5"], why: "одна марка, а не вся быстрорежущая сталь" },
+        Q1072385: { spellings: ["Нихром х20н80", "Х20Н80"], why: "одна марка: у нихрома есть и Х15Н60" },
+        Q967996: {
+          spellings: ["Высокоуглеродистая сталь", "Среднеуглеродистая сталь"],
+          why: "подвиды",
+        },
+        Q637345: { spellings: ["Тугоплавкие сплавы"], why: "другое: сплавы вольфрама, молибдена" },
+        Q907347: { spellings: ["Сплав железа", "Сплавы железа"], why: "сплавы железа — и сталь, и чугун" },
+        Q756257: { spellings: ["Полутомпак"], why: "другая марка (Л80)" },
+        Q911380: { spellings: ["Белая медь"], why: "так зовут и мельхиор, и нейзильбер" },
+        Q475736: { spellings: ["Дамаск"], why: "город и ткань" },
+        Q2248028: { spellings: ["Феррит"], why: "фаза стали и магнитная керамика" },
+        Q1061375: { spellings: ["NiFe"], why: "любой железоникелевый сплав" },
+        Q423265: { spellings: ["Вольфрама карбиды"], why: "множественное: WC и W2C" },
+        Q31576: { spellings: ["Стерлинг"], why: "валюта" },
+        Q4377547: {
+          spellings: [
+            "ГОСТ 10994-74", "NILO", "42Н", "Инварные сплавы", "Магнитно-мягкие сплавы",
+            "Магнитно-твердые сплавы", "Сплавы с заданными свойствами упругости",
+            "Сверхпроводящие сплавы", "Термобиметаллы", "Магнитно-мягкий сплав",
+            "Магнитно-мягкие материалы", "Магнитно-твердые материалы",
+          ],
+          why: "виды прецизионных сплавов, а не их имена",
+        },
+      },
+      noSearch: {
+        Q898215: ["36Н", "Н36"],
+        Q1127242: ["HSS"],
+      },
+    },
   },
 };
 
 /** Вымышленное и легендарное: «мифрил», «орихалк» — не продукт. */
 const FICTION = /вымышл|мифическ|мифологическ|легендарн|фантастическ|сказочн/i;
+
+/**
+ * Предприятие, а не материал: «Металлургический завод в Аджаокуте» размечен
+ * в Wikidata как сталь. \b с кириллицей в JS не работает — граница слова
+ * записана явно.
+ */
+const ENTERPRISE = /(?:^|[^а-яё])(?:завод|комбинат|компани|предприяти|корпораци|фабрик)/i;
+
+/**
+ * Написание, которое не имя предмета, хотя стоит в синонимах Wikidata.
+ * Возвращает причину или null.
+ */
+function aliasReject(alias, label) {
+  // Заголовок статьи с уточнением: «Уран (элемент)», «Победит (сплав)» —
+  // то же имя плюс пометка Википедии, а не второе название.
+  const paren = /^(.+?)\s*\([^)]*\)$/.exec(alias);
+  if (paren && key(paren[1]) === key(label)) return "заголовок статьи с уточнением в скобках";
+  // «Элемент 27» — номер в таблице, а не название.
+  if (/^элемент\s+\d+$/i.test(alias.trim())) return "номер элемента, не название";
+  return null;
+}
 
 /** Ключ сравнения слов: «Оловянная бронза» и «бронза оловянная» — одно. */
 const stems = (s) => new Set(words(normalizeName(s)).map(stemWord));
@@ -348,7 +426,8 @@ async function walkInstances(root) {
 
 /** Строка справочника: имена через «|», в хвосте — группа, CAS и код элемента. */
 function lineOf(e) {
-  return `${e.spellings.join(" | ")}   # ${e.group}${e.cas ? `, CAS ${e.cas}` : ""} ${e.id}`;
+  const names = e.spellings.map((s, i) => (i > 0 && e.noSearch?.has(key(s)) ? `*${s}` : s));
+  return `${names.join(" | ")}   # ${e.group}${e.cas ? `, CAS ${e.cas}` : ""} ${e.id}`;
 }
 
 function parseArgs(argv) {
@@ -425,6 +504,15 @@ async function main() {
       : "Поиск «или» не понимает — спрашиваем по классу; это дольше.",
   );
 
+  const decisions = domain.decisions ?? {};
+  /** Решения, которые пригодились: прочие устарели — Wikidata поменялась. */
+  const used = new Set();
+  const fileName = `synonyms-wikidata-${opts.domain}.txt`;
+  // Точка отсчёта — справочник без этой отрасли: при пересборе её прежняя
+  // версия уже лежит в reference/, и сравнение с ней самой показало бы, что
+  // ничего нового нет.
+  const baseline = previewWithout(fileName);
+
   // ── 2) обход ──
   const items = new Map(); // код → предмет (первая группа, где нашёлся)
   const skipped = [];
@@ -452,14 +540,25 @@ async function main() {
       // Подписи по-русски в Wikidata нет, а статья есть: её заголовок и есть
       // русское название — без уточнения в скобках («Бронза (сплав)»).
       if (!it.label) it.label = it.ruwiki.replace(/\s*\([^)]*\)\s*$/, "").trim();
+      const decided = decisions.dropItems?.[it.id];
+      if (decided) used.add(it.id);
       const why =
         (!it.label && "нет русского названия") ||
         (FICTION.test(it.description) && "вымышленное") ||
+        (ENTERPRISE.test(it.label) && "предприятие, а не материал") ||
+        (decided && `решение согласования: ${decided}`) ||
         (g.keep && g.keep(it)) ||
         null;
       if (why) {
         skipped.push({ group: g.name, why, what: `${asCanon(it.label) || it.id} (${it.id})` });
         continue;
+      }
+      const rename = decisions.canon?.[it.id];
+      if (rename) {
+        used.add(it.id);
+        it.renamedFrom = { label: it.label, why: rename.why };
+        it.aliases = it.aliases.filter((a) => key(a) !== key(rename.name));
+        it.label = rename.name;
       }
       it.group = g.name;
       it.parentLabel = asCanon(it.parents.map((p) => labels.get(p)).filter(Boolean)[0] ?? "") || null;
@@ -480,7 +579,7 @@ async function main() {
   const entries = [];
   const dropped = [];
   const byCanon = new Map();
-  const live = new Map(allEntries().map((e) => [key(e.canon), e]));
+  const live = new Map(baseline.entries.map((e) => [key(e.canon), e]));
   let silent = 0;
   let nothingNew = 0;
   // Главное имя одного предмета в синонимах другого — почти всегда класс или
@@ -498,11 +597,24 @@ async function main() {
       dropped.push({ why: `${canonBad} (главное имя — строка не взята)`, what: `${asCanon(it.label)} (${it.id})` });
       continue;
     }
+    if (it.renamedFrom) {
+      dropped.push({
+        why: `решение согласования: ${it.renamedFrom.why}`,
+        what: `${asCanon(it.renamedFrom.label)} (было главным у ${it.id}, стало «${asCanon(it.label)}»)`,
+      });
+    }
+    const decidedDrop = decisions.dropSpellings?.[it.id];
+    const dropKeys = new Set((decidedDrop?.spellings ?? []).map(key));
     const spellings = [];
     const seen = new Set();
     const ownKey = key(it.label);
     for (const s of [it.label, ...it.aliases]) {
-      const why = rejectReason(s);
+      const why =
+        rejectReason(s) ||
+        (s !== it.label && aliasReject(s, it.label)) ||
+        (s !== it.label && dropKeys.has(key(s)) && `решение согласования: ${decidedDrop.why}`) ||
+        null;
+      if (dropKeys.has(key(s))) used.add(`${it.id}|${key(s)}`);
       if (why) {
         dropped.push({ why, what: `${s} (у «${asCanon(it.label)}»)` });
         continue;
@@ -516,12 +628,15 @@ async function main() {
       seen.add(k);
       spellings.push(asCanon(s));
     }
+    const noSearch = new Set((decisions.noSearch?.[it.id] ?? []).map(key));
+    for (const s of spellings) if (noSearch.has(key(s))) used.add(`${it.id}|*${key(s)}`);
     const e = {
       id: it.id,
       group: it.group,
       canon: spellings[0],
       spellings,
       cas: it.cas,
+      noSearch,
       parentLabel: it.parentLabel,
     };
     // Два предмета Wikidata с одним русским названием («Бронза» — сплав и
@@ -566,15 +681,14 @@ async function main() {
 
   // ── 4) предложение — в data/, и как его прочтёт справочник ──
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const fileName = `synonyms-wikidata-${opts.domain}.txt`;
   const proposal = path.join(OUT_DIR, fileName);
   const head = [
     `# Синонимы отрасли «${domain.title}», собранные из Wikidata.`,
     "#",
     `# СОБРАН МАШИНОЙ: node scripts/fetch-wikidata-domain.js ${opts.domain}`,
-    "# Согласован по отрасли целиком. Нашли ошибку — поправьте запись в",
-    "# reference/synonyms.txt (тот файл читается первым и побеждает), лишнее",
-    "# написание — в reference/synonyms-stop.txt.",
+    "# Согласован по отрасли целиком; решения согласования — в DOMAINS сборщика.",
+    "# Нашли ошибку — поправьте запись в reference/synonyms.txt (тот файл",
+    "# читается первым и побеждает), лишнее написание — в synonyms-stop.txt.",
     "#",
     "# В хвосте строки — группа, номер CAS, если он есть, и код элемента",
     "# Wikidata: https://www.wikidata.org/wiki/Q…",
@@ -600,7 +714,7 @@ async function main() {
   // молчаливые по одинаковому главному имени.
   const extended = [];
   const after = new Map(preview.entries.map((e) => [e.canon, e]));
-  for (const before of allEntries()) {
+  for (const before of baseline.entries) {
     const now = after.get(before.canon);
     if (!now) continue;
     const had = new Set(before.spellings.map(key));
@@ -620,7 +734,7 @@ async function main() {
   const graphChanges = { gained: [], changed: [], lost: [] };
   const { counts } = collectProducts();
   for (const label of counts.keys()) {
-    const was = identify(label)?.canon ?? null;
+    const was = baseline.identify(label)?.canon ?? null;
     const will = preview.identify(label)?.canon ?? null;
     if (was === will) continue;
     if (!was) graphChanges.gained.push(`«${label}» → «${will}»`);
@@ -705,6 +819,36 @@ async function main() {
     }
   }
 
+  // Что изменится против файла, который уже лежит в reference/: при пересборе
+  // это и есть предмет согласования.
+  const current = readEntryLines(path.join(REFERENCE_DIR, fileName));
+  if (current) {
+    const proposed = body.filter((l) => l && !l.startsWith("#"));
+    const had = new Set(current);
+    const will = new Set(proposed);
+    const plus = proposed.filter((l) => !had.has(l));
+    const minus = current.filter((l) => !will.has(l));
+    say(`\n── ПО СРАВНЕНИЮ С reference/${fileName} ──`);
+    if (!plus.length && !minus.length) say("  совпадает строка в строку");
+    list([...plus.map((l) => `+ ${l}`), ...minus.map((l) => `− ${l}`)], Infinity);
+  }
+
+  // Решение, которому не нашлось предмета или написания, устарело: Wikidata
+  // поменялась. Само по себе не вредно, но решения надо держать в порядке.
+  const stale = [];
+  for (const q of Object.keys(decisions.dropItems ?? {})) if (!used.has(q)) stale.push(`dropItems ${q}`);
+  for (const q of Object.keys(decisions.canon ?? {})) if (!used.has(q)) stale.push(`canon ${q}`);
+  for (const [q, d] of Object.entries(decisions.dropSpellings ?? {})) {
+    for (const sp of d.spellings) if (!used.has(`${q}|${key(sp)}`)) stale.push(`dropSpellings ${q} «${sp}»`);
+  }
+  for (const [q, list2] of Object.entries(decisions.noSearch ?? {})) {
+    for (const sp of list2) if (!used.has(`${q}|*${key(sp)}`)) stale.push(`noSearch ${q} «${sp}»`);
+  }
+  if (stale.length) {
+    say("\n── РЕШЕНИЯ СОГЛАСОВАНИЯ, КОТОРЫЕ НЕ ПРИГОДИЛИСЬ (Wikidata поменялась?) ──");
+    list(stale, Infinity);
+  }
+
   say("\n── СТРОКИ ──");
   for (const g of domain.groups) {
     const rows = entries.filter((e) => e.group === g.name);
@@ -722,6 +866,17 @@ async function main() {
   console.log("Справочник не тронут. Пришлите отчёт на согласование:");
   console.log(`  cat ${path.relative(process.cwd(), report) || report}`);
   console.log(`(пауза между запросами к концу работы: ${currentDelay()} мс)`);
+}
+
+/** Строки записей файла справочника — без шапки и пустых; null, если файла нет. */
+function readEntryLines(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  return text.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith("#"));
 }
 
 function writeReport(domainName, lines) {

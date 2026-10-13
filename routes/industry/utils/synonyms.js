@@ -383,8 +383,22 @@ function load(files = referenceFiles()) {
  * пересбор отрасли сравнивается со справочником без её прежней версии.
  */
 function previewWith(file) {
-  const name = path.basename(file);
-  const files = [...referenceFiles().filter((f) => path.basename(f) !== name), file];
+  return preview(path.basename(file), file);
+}
+
+/**
+ * Каким был бы справочник без одного из файлов reference/ — по имени.
+ *
+ * Точка отсчёта для пересбора отрасли, которая в справочнике уже есть: иначе
+ * её строки сравнивались бы сами с собой и все выглядели бы «уже известными».
+ */
+function previewWithout(fileName) {
+  return preview(fileName, null);
+}
+
+function preview(name, file) {
+  const files = referenceFiles().filter((f) => path.basename(f) !== name);
+  if (file) files.push(file);
   ensure(); // живой указатель — прочитан до подмены, чтобы было что вернуть
   const saved = stats;
   let map;
@@ -773,4 +787,11 @@ function entriesOf(map) {
   return out;
 }
 
-module.exports = { identify, spellingsOf, synonymsStatus, allEntries, previewWith };
+module.exports = {
+  identify,
+  spellingsOf,
+  synonymsStatus,
+  allEntries,
+  previewWith,
+  previewWithout,
+};
