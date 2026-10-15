@@ -6,6 +6,7 @@
 //   node scripts/fetch-wikidata-domain.js --list         — какие отрасли есть
 //   node scripts/fetch-wikidata-domain.js metals         — собрать и показать сводку
 //   node scripts/fetch-wikidata-domain.js metals --all   — показать отчёт целиком
+//   node scripts/fetch-wikidata-domain.js drugs          — лекарственные вещества
 //   node scripts/fetch-wikidata-domain.js metals --max-classes 200
 //                                                        — оборвать обход раньше
 //
@@ -91,6 +92,32 @@ const NON_METALS = new Set([
 /** Дальше фермия элементы получают атомами на ускорителе — не продукт. */
 const MAX_ATOMIC_NUMBER = 100;
 
+/**
+ * Код АТХ действующего вещества: семь знаков, «N02BE01». Короче — группа
+ * («N02» — анальгетики, «N02BE» — анилиды), а не вещество.
+ */
+const ATC_SUBSTANCE = /^[A-Z]\d\d[A-Z][A-Z]\d\d$/;
+
+const atcCodes = (item) => (item.claims.P267 ?? []).filter((c) => ATC_SUBSTANCE.test(c));
+
+/**
+ * Лекарственное ли вещество; иначе — причина, почему не берём.
+ *
+ * Поиск уже просит и код АТХ, и номер CAS, но его указатель отстаёт от правок
+ * Wikidata — проверяем по самим утверждениям.
+ */
+function drugSubstance(item) {
+  if (!atcCodes(item).length) return "код АТХ группы, а не вещества";
+  if (!item.cas) return "без номера CAS: смесь, комбинация или биопрепарат";
+  return null;
+}
+
+/** Коды АТХ в хвост строки — по ним видно, что это за лекарство. */
+function atcTag(item) {
+  const codes = atcCodes(item);
+  return `АТХ ${codes.slice(0, 2).join(" ")}${codes.length > 2 ? " …" : ""}`;
+}
+
 /** Металл ли элемент; иначе — причина, почему не берём. */
 function metalElement(item) {
   const symbol = item.claims.P246?.[0];
@@ -109,7 +136,15 @@ function metalElement(item) {
  * бы в чужое дерево и принёс сотни чужих строк. Сверка ловит это до обхода.
  *
  * walk: "instances" — только прямые экземпляры (химические элементы);
- *       "tree"      — подклассы вглубь и экземпляры на каждом уровне.
+ *       "tree"      — подклассы вглубь и экземпляры на каждом уровне;
+ *       "statement" — все, у кого есть утверждение (у лекарств — код АТХ):
+ *                     корень тогда — свойство (pid), а не класс, и поисковый
+ *                     запрос задан в query.
+ *
+ * keep(item)      — причина не брать предмет или null;
+ * tag(item)       — что дописать в хвост строки (коды АТХ);
+ * brandsNoSearch  — написания, похожие на торговые названия, только для
+ *                   опознания (см. brandLike).
  *
  * decisions — решения согласования, по коду элемента Wikidata. Записаны
  * здесь, а не правкой готового файла: пересбор отрасли (Wikidata меняется)
@@ -196,6 +231,24 @@ const DOMAINS = {
       },
     },
   },
+  drugs: {
+    title: "Лекарственные вещества",
+    groups: [
+      {
+        name: "лекарства",
+        about: "действующие вещества: код АТХ и номер CAS",
+        root: { pid: "P267", expect: /АТХ|ATC/i },
+        walk: "statement",
+        // И код АТХ, и номер CAS: без номера — группы АТХ, комбинации
+        // («амоксициллин + клавулановая кислота»), смеси и биопрепараты.
+        query: "haswbstatement:P267 haswbstatement:P231",
+        keep: drugSubstance,
+        tag: atcTag,
+        brandsNoSearch: true,
+      },
+    ],
+    decisions: {},
+  },
 };
 
 /** Вымышленное и легендарное: «мифрил», «орихалк» — не продукт. */
@@ -220,6 +273,30 @@ function aliasReject(alias, label) {
   // «Элемент 27» — номер в таблице, а не название.
   if (/^элемент\s+\d+$/i.test(alias.trim())) return "номер элемента, не название";
   return null;
+}
+
+const isLower = (c) => c !== c.toUpperCase();
+const isUpper = (c) => c !== c.toLowerCase();
+
+/**
+ * Похоже ли написание на торговое название.
+ *
+ * В Wikidata русские названия веществ пишутся со строчной: «парацетамол»,
+ * «ацетилсалициловая кислота». Торговое название — имя собственное, с
+ * заглавной: «Панадол», «Но-шпа». Поэтому: главное имя со строчной, синоним —
+ * с заглавной и дальше не одними заглавными (это сокращение, «АСК»), и не
+ * приставка-обозначение изомера вроде «L-тироксин» или «N-ацетилцистеин».
+ *
+ * По реестру такое имя ищет препараты одной марки — в том числе
+ * комбинированные («Панадол Экстра» — с кофеином), а опознать узел «Панадол»
+ * как парацетамол оно помогает. Поэтому — только для опознания.
+ */
+function brandLike(alias, label) {
+  const a = alias.trim();
+  const l = label.trim();
+  if (!isLower(l.charAt(0)) || !isUpper(a.charAt(0))) return false;
+  if (/^[A-Z]-/.test(a)) return false;
+  return [...a.slice(1)].some(isLower);
 }
 
 /** Ключ сравнения слов: «Оловянная бронза» и «бронза оловянная» — одно. */
@@ -352,7 +429,7 @@ function childQueries(qids, orOk) {
   return queries;
 }
 
-const CLAIMS = ["P31", "P279", "P246", "P1086"];
+const CLAIMS = ["P31", "P279", "P246", "P1086", "P267"];
 
 /** Сведения о предметах — пачками. */
 async function fetchItems(ids, progress) {
@@ -433,10 +510,33 @@ async function walkInstances(root) {
   return { found: info, classes: 1, cut: false };
 }
 
+/**
+ * Все, у кого есть утверждение: «haswbstatement:P267 haswbstatement:P231» —
+ * и код АТХ, и номер CAS.
+ *
+ * Сколько всего предметов со свойством, считаем отдельно: разница — те, кого
+ * запрос не взял (у лекарств — без номера CAS), её показываем в отчёте.
+ */
+async function walkStatement(group) {
+  const withProperty = await searchCount(`haswbstatement:${group.root.pid}`);
+  const { ids, total } = await searchAll(group.query);
+  const info = await fetchItems(ids, (n, of) =>
+    process.stdout.write(`\r  разобрано предметов: ${n} из ${of}   `),
+  );
+  process.stdout.write("\n");
+  for (const item of info.values()) {
+    item.depth = 1;
+    item.parents = [];
+  }
+  // Поиск не листает дальше 10 000 — тогда часть предметов не дошла бы до нас.
+  return { found: info, classes: 0, cut: ids.length < total, withProperty, total, got: ids.length };
+}
+
 /** Строка справочника: имена через «|», в хвосте — группа, CAS и код элемента. */
 function lineOf(e) {
   const names = e.spellings.map((s, i) => (i > 0 && e.noSearch?.has(key(s)) ? `*${s}` : s));
-  return `${names.join(" | ")}   # ${e.group}${e.cas ? `, CAS ${e.cas}` : ""} ${e.id}`;
+  const tail = [e.group, e.tag, e.cas && `CAS ${e.cas}`].filter(Boolean).join(", ");
+  return `${names.join(" | ")}   # ${tail} ${e.id}`;
 }
 
 function parseArgs(argv) {
@@ -490,28 +590,33 @@ async function main() {
   say(`══ ${domain.title} — сбор из Wikidata, ${today} ══`);
 
   // ── 1) корни: сверить, что код ведёт туда, куда мы думаем ──
-  const roots = await entities(domain.groups.map((g) => g.root.qid));
+  const rootId = (g) => g.root.qid ?? g.root.pid;
+  const roots = await entities(domain.groups.map(rootId));
   await pause();
   say("\nКорни:");
   for (const g of domain.groups) {
-    const r = roots.get(g.root.qid);
+    const r = roots.get(rootId(g));
     if (!r || !g.root.expect.test(r.label)) {
       console.error(
-        `\nКорень группы «${g.name}» (${g.root.qid}) называется «${r?.label ?? "—"}», ` +
+        `\nКорень группы «${g.name}» (${rootId(g)}) называется «${r?.label ?? "—"}», ` +
           `а ждали ${g.root.expect}. Код в DOMAINS неверен — обход ушёл бы не туда.`,
       );
       process.exit(1);
     }
     g.rootLabel = r.label;
-    say(`  ${g.name.padEnd(9)} ← «${r.label}» (${g.root.qid}): ${g.about}`);
+    say(`  ${g.name.padEnd(9)} ← «${r.label}» (${rootId(g)}): ${g.about}`);
   }
 
-  const orOk = await orSupported(domain.groups.find((g) => g.walk === "tree")?.root.qid ?? domain.groups[0].root.qid);
-  console.log(
-    orOk
-      ? "Поиск понимает «или» — уровень дерева спрашиваем парой запросов."
-      : "Поиск «или» не понимает — спрашиваем по классу; это дольше.",
-  );
+  // «Или» нужно только обходу дерева классов.
+  const treeRoot = domain.groups.find((g) => g.walk === "tree")?.root.qid;
+  const orOk = treeRoot ? await orSupported(treeRoot) : false;
+  if (treeRoot) {
+    console.log(
+      orOk
+        ? "Поиск понимает «или» — уровень дерева спрашиваем парой запросов."
+        : "Поиск «или» не понимает — спрашиваем по классу; это дольше.",
+    );
+  }
 
   const decisions = domain.decisions ?? {};
   /** Решения, которые пригодились: прочие устарели — Wikidata поменялась. */
@@ -528,12 +633,15 @@ async function main() {
   const walkNotes = [];
   for (const g of domain.groups) {
     console.log(`\nГруппа «${g.name}»…`);
-    const walked = g.walk === "tree"
-      ? await walkTree(g.root, { orOk, maxDepth: opts.maxDepth, maxClasses: opts.maxClasses })
-      : await walkInstances(g.root);
+    const walked =
+      g.walk === "tree"
+        ? await walkTree(g.root, { orOk, maxDepth: opts.maxDepth, maxClasses: opts.maxClasses })
+        : g.walk === "statement"
+          ? await walkStatement(g)
+          : await walkInstances(g.root);
     let taken = 0;
     let noArticle = 0;
-    const labels = new Map([[g.root.qid, g.rootLabel]]);
+    const labels = new Map([[rootId(g), g.rootLabel]]);
     for (const it of walked.found.values()) labels.set(it.id, it.label || it.id);
     const ordered = [...walked.found.values()].sort(
       g.order ?? ((a, b) => a.label.localeCompare(b.label, "ru")),
@@ -548,6 +656,8 @@ async function main() {
       }
       // Подписи по-русски в Wikidata нет, а статья есть: её заголовок и есть
       // русское название — без уточнения в скобках («Бронза (сплав)»).
+      // Заголовок всегда с заглавной — по нему торговое название не узнать.
+      it.wikidataLabel = it.label;
       if (!it.label) it.label = it.ruwiki.replace(/\s*\([^)]*\)\s*$/, "").trim();
       const decided = decisions.dropItems?.[it.id];
       if (decided) used.add(it.id);
@@ -570,15 +680,24 @@ async function main() {
         it.label = rename.name;
       }
       it.group = g.name;
+      it.groupSpec = g;
       it.parentLabel = asCanon(it.parents.map((p) => labels.get(p)).filter(Boolean)[0] ?? "") || null;
       items.set(it.id, it);
       taken += 1;
     }
+    const found =
+      g.walk === "statement"
+        ? `со свойством ${g.root.pid} всего ${walked.withProperty}, по запросу ` +
+          `«${g.query}» — ${walked.total}`
+        : `найдено ${walked.found.size}`;
+    const cutWhy =
+      g.walk === "statement"
+        ? ` — ОБРЕЗАНО: поиск отдал ${walked.got} из ${walked.total}`
+        : " — ОБХОД ОБОРВАН по --max-classes/--max-depth";
     walkNotes.push(
-      `  ${g.name}: найдено ${walked.found.size}, без статьи в русской Википедии ${noArticle}, ` +
-        `взято ${taken}` +
+      `  ${g.name}: ${found}, без статьи в русской Википедии ${noArticle}, взято ${taken}` +
         (g.walk === "tree" ? `; классов опрошено ${walked.classes}` : "") +
-        (walked.cut ? " — ОБХОД ОБОРВАН по --max-classes/--max-depth" : ""),
+        (walked.cut ? cutWhy : ""),
     );
   }
   say("\nОбход:");
@@ -617,6 +736,7 @@ async function main() {
     const spellings = [];
     const seen = new Set();
     const ownKey = key(it.label);
+    const brands = new Set();
     for (const s of [it.label, ...it.aliases]) {
       const why =
         rejectReason(s) ||
@@ -636,16 +756,22 @@ async function main() {
       if (!k || seen.has(k)) continue;
       seen.add(k);
       spellings.push(asCanon(s));
+      if (it.groupSpec.brandsNoSearch && k !== ownKey && it.wikidataLabel && brandLike(s, it.wikidataLabel)) {
+        brands.add(k);
+      }
     }
     const noSearch = new Set((decisions.noSearch?.[it.id] ?? []).map(key));
     for (const s of spellings) if (noSearch.has(key(s))) used.add(`${it.id}|*${key(s)}`);
+    for (const b of brands) noSearch.add(b);
     const e = {
       id: it.id,
       group: it.group,
       canon: spellings[0],
       spellings,
       cas: it.cas,
+      tag: it.groupSpec.tag?.(it) ?? null,
       noSearch,
+      brands,
       parentLabel: it.parentLabel,
     };
     // Два предмета Wikidata с одним русским названием («Бронза» — сплав и
@@ -732,7 +858,7 @@ async function main() {
     if (added.length || casAdded) {
       extended.push(
         `«${before.canon}» (${before.source})` +
-          (added.length ? ` ← ${added.map((s) => `«${s}»`).join(", ")}` : "") +
+          (added.length ? ` ← ${added.map((s) => `«${now.noSearch.has(s) ? "*" : ""}${s}»`).join(", ")}` : "") +
           (casAdded ? ` ← номер CAS ${casAdded}` : ""),
       );
     }
@@ -756,6 +882,26 @@ async function main() {
     for (const f of flagsOf(e)) flagged.push(`${e.canon}: ${f}   (${e.id})`);
   }
 
+  const brandRows = [];
+  for (const e of entries) {
+    const names = e.spellings.filter((s) => e.brands.has(key(s)));
+    if (names.length) brandRows.push(`${e.canon}: ${names.map((s) => `«${s}»`).join(", ")}   (${e.id})`);
+  }
+
+  // Один номер CAS у разных записей справочника: это одно вещество, которое не
+  // слилось — общих написаний нет, — или ошибка номера в Wikidata, или разное
+  // под одним номером («Активированный уголь» с номером углерода).
+  const ourCas = new Set(entries.map((e) => e.cas).filter(Boolean));
+  const byCas = new Map();
+  for (const e of preview.entries) {
+    if (!e.cas || !ourCas.has(e.cas)) continue;
+    if (!byCas.has(e.cas)) byCas.set(e.cas, []);
+    byCas.get(e.cas).push(e);
+  }
+  const sameCas = [...byCas]
+    .filter(([, list2]) => list2.length > 1)
+    .map(([cas, list2]) => `${cas}: ${list2.map((e) => `«${e.canon}» (${e.source})`).join(", ")}`);
+
   say("\n── СВОДКА ──");
   say(`  строк в предложении:            ${entries.length}`);
   say(`    новых веществ:                ${fresh.length}`);
@@ -763,6 +909,8 @@ async function main() {
   say(`    одно имя и номер CAS:         ${entries.filter((e) => e.spellings.length === 1).length}`);
   say(`  конфликтов:                     ${conflicts.length}   ← смотреть все`);
   say(`  разные номера CAS:              ${casClashes.length}`);
+  say(`  один номер CAS у разных записей: ${sameCas.length}   ← смотреть все`);
+  if (brandRows.length) say(`  с торговыми названиями:         ${brandRows.length}   ← только для опознания, «*»`);
   say(`  пометок «смотреть глазами»:     ${flagged.length}`);
   say(
     `  на графах опознается иначе:     ${graphChanges.changed.length + graphChanges.lost.length}` +
@@ -793,6 +941,14 @@ async function main() {
   if (graphChanges.gained.length) {
     say("\n── НА ВАШИХ ГРАФАХ ОПОЗНАЮТСЯ ВПЕРВЫЕ ──");
     list(graphChanges.gained, 20);
+  }
+  if (sameCas.length) {
+    say("\n── ОДИН НОМЕР CAS У РАЗНЫХ ЗАПИСЕЙ — одно вещество не слилось или разное под одним номером ──");
+    list(sameCas, Infinity);
+  }
+  if (brandRows.length) {
+    say("\n── ТОРГОВЫЕ НАЗВАНИЯ? — с заглавной при строчном главном имени; только для опознания ──");
+    list(brandRows, 30);
   }
   if (flagged.length) {
     say("\n── СМОТРЕТЬ ГЛАЗАМИ ──");
