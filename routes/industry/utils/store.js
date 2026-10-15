@@ -1104,6 +1104,8 @@ function baseVerdict(c) {
   if (c.elementCompound) return { ok: false, why: "соединение элемента, а не он сам" };
   // «Аммоний кальций нитрат» при запросе «Нитрат аммония»: двойная соль.
   if (c.otherElement) return { ok: false, why: `другое соединение: рядом «${c.otherElement}»` };
+  // «Железа (III) хлорид» при запросе «Хлорид железа(II)»: другое вещество.
+  if (c.otherOxidation) return { ok: false, why: `другая степень окисления: ${c.otherOxidation}` };
   // Спросили элемент — «Титан», — а он стоит после существительного:
   // «Техноэласт Титан SOLO» (кровля), «Микрополидок Цинк» (удобрение). Это
   // марка или изделие, а не сам металл; сам металл реестр называет первым
@@ -1368,6 +1370,32 @@ function compoundWord(word, stem) {
 const OXIDATION_IN_PARENS = /\(\s*(?:I{1,3}|IV|VI{0,3}|V)(?:\s*,\s*(?:I{1,3}|IV|VI{0,3}|V))*\s*\)/;
 /** Та же степень окисления, разобранная на слова: «ii», «iii», «iv». */
 const ROMAN_WORD = /^(?:i{1,3}|iv|vi{0,3}|v)$/;
+
+/** Степени окисления в названии — в круглых или квадратных скобках. */
+const OXIDATION_STATES = /[([]\s*((?:I{1,3}|IV|VI{0,3}|V)(?:\s*,\s*(?:I{1,3}|IV|VI{0,3}|V))*)\s*[)\]]/g;
+
+const oxidationStates = (name) =>
+  [...String(name ?? "").matchAll(OXIDATION_STATES)].map((m) => m[1].replace(/\s+/g, ""));
+
+/**
+ * Запись про то же соединение, но с другой степенью окисления: спросили
+ * «Хлорид железа(II)», а запись — «Железа (III) хлорид технический». Слова
+ * совпадают все, поиск разницы не видит, а вещества разные (FeCl2 и FeCl3).
+ * Сверяем, только если степень названа и в запросе, и в записи; «(II,III)» —
+ * смешанный оксид, отдельное вещество. Возвращает «(III) вместо (II)» или null.
+ *
+ * Степень берём и из главного имени вещества: второе написание её не несёт
+ * («Хлористое железо» у «Хлорида железа(II)»), а поиск по нему находит
+ * хлориды железа любой валентности.
+ */
+function otherOxidationState(rawName, rowName, canon = null) {
+  const own = oxidationStates(rawName);
+  const asked = own.length ? own : oxidationStates(canon);
+  if (!asked.length) return null;
+  const found = oxidationStates(rowName);
+  if (!found.length || found.some((f) => asked.includes(f))) return null;
+  return `(${found[0]}) вместо (${asked[0]})`;
+}
 
 /**
  * Слова, которыми названа ФОРМА ПОСТАВКИ, а не вещество.
@@ -2052,6 +2080,8 @@ function keepBestOverlap(rows, rawName, required = null) {
       otherActive: elementName ? otherActiveSubstance(row.name || "", queryStems) : null,
       // Изомер, который справочник знает отдельным веществом.
       otherIsomer: otherIsomer(row.name || "", queryStems, askedCanon, queryMarked),
+      // Та же соль, другая степень окисления: FeCl3 при запросе FeCl2.
+      otherOxidation: otherOxidationState(rawName, row.name || "", askedCanon),
     };
   });
 
@@ -2084,6 +2114,7 @@ function keepBestOverlap(rows, rawName, required = null) {
       otherElement: s.otherElement,
       elementAfterNoun: s.elementAfterNoun,
       otherActive: s.otherActive,
+      otherOxidation: s.otherOxidation,
       onlyClass: s.onlyClass,
       supplyForm: s.supplyForm,
       adjectivesBefore: s.adjectivesBefore,
