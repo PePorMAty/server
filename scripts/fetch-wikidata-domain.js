@@ -7,6 +7,10 @@
 //   node scripts/fetch-wikidata-domain.js metals         — собрать и показать сводку
 //   node scripts/fetch-wikidata-domain.js metals --all   — показать отчёт целиком
 //   node scripts/fetch-wikidata-domain.js drugs          — лекарственные вещества
+//   node scripts/fetch-wikidata-domain.js --probe "мука" "растительное масло"
+//                                                        — разведка: какие классы
+//                                                          Wikidata так называются
+//                                                          и сколько под ними
 //   node scripts/fetch-wikidata-domain.js metals --max-classes 200
 //                                                        — оборвать обход раньше
 //
@@ -942,9 +946,13 @@ function lineOf(e) {
 }
 
 function parseArgs(argv) {
-  const opts = { all: false, list: false, domain: null, maxClasses: 400, maxDepth: 6 };
+  const opts = { all: false, list: false, domain: null, maxClasses: 400, maxDepth: 6, probe: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === "--probe") {
+      opts.probe = argv.slice(i + 1).filter((t) => !t.startsWith("--"));
+      break;
+    }
     if (a === "--all") opts.all = true;
     else if (a === "--list") opts.list = true;
     else if (a === "--max-classes") opts.maxClasses = Number(argv[++i]);
@@ -954,8 +962,62 @@ function parseArgs(argv) {
   return opts;
 }
 
+/**
+ * Разведка перед новой отраслью: какие элементы Wikidata называются так по-
+ * русски и сколько под каждым подклассов и экземпляров.
+ *
+ * Корни отрасли вписываются в DOMAINS кодом, и угадывать коды по памяти — путь
+ * в чужое дерево: «Пшеница» в Wikidata — род растений, а не зерно, «Сахар» —
+ * класс углеводов. Здесь видно, что есть что, до того как отрасль собрана.
+ */
+async function probe(terms) {
+  console.log("Разведка: кандидаты в корни отрасли.");
+  console.log("Подклассы — сколько классов прямо под ним (обход дерева идёт по ним вглубь),");
+  console.log("экземпляры — сколько предметов прямо его вида.\n");
+  for (const term of terms) {
+    const data = await api({
+      action: "wbsearchentities",
+      search: term,
+      language: "ru",
+      uselang: "ru",
+      type: "item",
+      limit: "5",
+    });
+    await pause();
+    const hits = data?.search ?? [];
+    console.log(`«${term}»`);
+    if (!hits.length) {
+      console.log("  — ничего\n");
+      continue;
+    }
+    const info = await entities(hits.map((h) => h.id), { claims: ["P279", "P31"] });
+    await pause();
+    for (const h of hits) {
+      const it = info.get(h.id);
+      const subclasses = await searchCount(`haswbstatement:P279=${h.id}`);
+      const instances = await searchCount(`haswbstatement:P31=${h.id}`);
+      const label = it?.label || h.label || "—";
+      const about = it?.description || h.description || "";
+      const parents = [...(it?.claims.P279 ?? []), ...(it?.claims.P31 ?? []).map((q) => `${q}(вид)`)];
+      console.log(
+        `  ${h.id.padEnd(10)} «${label}»${about ? ` — ${about}` : ""}${it?.ruwiki ? "" : "   [нет статьи]"}\n` +
+          `             подклассов ${subclasses}, экземпляров ${instances}; сам под: ${parents.join(" ") || "—"}`,
+      );
+    }
+    console.log("");
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.probe) {
+    if (!opts.probe.length) {
+      console.error("После --probe — слова для поиска: --probe \"мука\" \"растительное масло\"");
+      process.exit(2);
+    }
+    await probe(opts.probe);
+    return;
+  }
   if (opts.list || !opts.domain) {
     console.log("Отрасли:");
     for (const [name, d] of Object.entries(DOMAINS)) {
