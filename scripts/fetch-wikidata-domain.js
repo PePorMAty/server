@@ -109,6 +109,9 @@ const atcCodes = (item) => (item.claims.P267 ?? []).filter((c) => ATC_SUBSTANCE.
 function drugSubstance(item) {
   if (!atcCodes(item).length) return "код АТХ группы, а не вещества";
   if (!item.cas) return "без номера CAS: смесь, комбинация или биопрепарат";
+  // Номер CAS бывает и у комбинации: «Абакавир/Ламивудин».
+  if (/[/+]/.test(item.label)) return "комбинация веществ";
+  if (/препарат|средств/i.test(item.label)) return "группа препаратов, а не вещество";
   return null;
 }
 
@@ -143,8 +146,13 @@ function metalElement(item) {
  *
  * keep(item)      — причина не брать предмет или null;
  * tag(item)       — что дописать в хвост строки (коды АТХ);
- * brandsNoSearch  — написания, похожие на торговые названия, только для
- *                   опознания (см. brandLike).
+ * brands          — торговые названия (brandsOf): "drop" — не брать,
+ *                   "noSearch" — только для опознания;
+ * abbrNoSearch    — латинские сокращения («DMSO») только для опознания;
+ * aliasChecks     — свои проверки написаний: функция → причина или null;
+ * joinKnown       — строка о веществе, которое справочник уже знает под другим
+ *                   главным именем (тот же номер CAS или наше главное имя у
+ *                   него среди написаний), вливается в его запись.
  *
  * decisions — решения согласования, по коду элемента Wikidata. Записаны
  * здесь, а не правкой готового файла: пересбор отрасли (Wikidata меняется)
@@ -154,7 +162,8 @@ function metalElement(item) {
  *                   уходит совсем;
  *   dropSpellings — написания, которые не синонимы своего предмета;
  *   noSearch      — написания только для опознания, по реестру не искать
- *                   (в строке со звёздочкой, как в synonyms.txt).
+ *                   (в строке со звёздочкой, как в synonyms.txt);
+ *   notBrand      — написания, которые brandsOf ошибочно счёл торговыми.
  */
 const DOMAINS = {
   metals: {
@@ -244,10 +253,31 @@ const DOMAINS = {
         query: "haswbstatement:P267 haswbstatement:P231",
         keep: drugSubstance,
         tag: atcTag,
-        brandsNoSearch: true,
+        brands: "drop",
+        abbrNoSearch: true,
+        aliasChecks: [researchCode, organicGrossFormula],
+        joinKnown: true,
       },
     ],
-    decisions: {},
+    // Предложено 2026-10-15 по первому сбору — ждёт согласования заказчиком.
+    decisions: {
+      dropItems: {
+        Q98270627: "вакцина, а не вещество",
+      },
+      dropSpellings: {
+        Q207843: { spellings: ["Оксид азота"], why: "так зовут и NO, и N2O, и NO2" },
+        Q214863: { spellings: ["Сульфат железа", "Железа сульфат"], why: "без валентности — и сульфат железа(III)" },
+        Q407867: { spellings: ["Хлорид железа", "Железа хлорид"], why: "в промышленности «хлорид железа» — обычно FeCl3" },
+        Q143200: { spellings: ["Хлорид ртути"], why: "так зовут и каломель Hg2Cl2" },
+        Q422071: { spellings: ["Камедь"], why: "класс: камеди бывают разные" },
+        Q412082: { spellings: ["Cироп из инвертного сахара"], why: "продукт, а не вещество" },
+        Q411347: { spellings: ["S-амлодипин"], why: "отдельное вещество — левамлодипин" },
+        Q180623: { spellings: ["Холинолитик"], why: "класс веществ противоположного действия" },
+        Q410922: { spellings: ["FITC"], why: "флуоресцеинизотиоцианат — другое вещество" },
+        Q252251: { spellings: ["Кобаламин", "Кобаламины"], why: "класс: все кобаламины, не только циано-" },
+        Q339940: { spellings: ["Экзотермический лёд"], why: "применение, а не имя" },
+      },
+    },
   },
 };
 
@@ -278,26 +308,138 @@ function aliasReject(alias, label) {
 const isLower = (c) => c !== c.toUpperCase();
 const isUpper = (c) => c !== c.toLowerCase();
 
-/**
- * Похоже ли написание на торговое название.
- *
- * В Wikidata русские названия веществ пишутся со строчной: «парацетамол»,
- * «ацетилсалициловая кислота». Торговое название — имя собственное, с
- * заглавной: «Панадол», «Но-шпа». Поэтому: главное имя со строчной, синоним —
- * с заглавной и дальше не одними заглавными (это сокращение, «АСК»), и не
- * приставка-обозначение изомера вроде «L-тироксин» или «N-ацетилцистеин».
- *
- * По реестру такое имя ищет препараты одной марки — в том числе
- * комбинированные («Панадол Экстра» — с кофеином), а опознать узел «Панадол»
- * как парацетамол оно помогает. Поэтому — только для опознания.
- */
-function brandLike(alias, label) {
-  const a = alias.trim();
-  const l = label.trim();
-  if (!isLower(l.charAt(0)) || !isUpper(a.charAt(0))) return false;
-  if (/^[A-Z]-/.test(a)) return false;
-  return [...a.slice(1)].some(isLower);
+/** Первая буква: цифры, скобки и знаки пропускаем — «2-фенилфенол» → «ф». */
+const firstLetter = (s) => /\p{L}/u.exec(String(s ?? ""))?.[0] ?? "";
+
+/** Сколько правок отделяет одно слово от другого (Левенштейн). */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
 }
+
+/**
+ * Родственны ли два написания: есть слово с той же основой, одно слово внутри
+ * другого или они отличаются на одну-две буквы. Так связаны соль и основание
+ * («Амлодипина бесилат» — «амлодипин»), множественное число («Гентамицины»),
+ * разные транскрипции («Альпразолам» — «алпразолам»).
+ */
+function related(a, b) {
+  const aw = words(normalizeName(a)).filter((w) => w.length >= 3);
+  const bw = words(normalizeName(b)).filter((w) => w.length >= 3);
+  return aw.some((x) =>
+    bw.some((y) => {
+      if (stemWord(x) === stemWord(y)) return true;
+      if (Math.min(x.length, y.length) < 5) return false;
+      return x.includes(y) || y.includes(x) || editDistance(x, y) <= 2;
+    }),
+  );
+}
+
+/**
+ * Части химических названий: «Ортогидроксидифенил», «Натрия ацетат» с
+ * заглавной — это не торговые названия, а систематические.
+ */
+const CHEMICAL_PART =
+  /гидрокс|оксид|фенил|метил|этил|пропил|бутил|хлор|бром|фтор|амино|нитро|карбокс|сульф|фосф|кислот|натри|кали[йя]|кальци|магни|ацетат/i;
+
+/**
+ * Похоже на торговое название по виду: с заглавной и дальше не одними
+ * заглавными («АСК» — сокращение), не приставка изомера («L-тироксин»,
+ * «N-ацетилцистеин»), не формула, не «Витамин B12».
+ */
+function brandShape(alias) {
+  const a = alias.trim();
+  const first = firstLetter(a);
+  if (a.charAt(0) !== first || !isUpper(first)) return false;
+  if (![...a.slice(1)].some(isLower)) return false;
+  if (/^[A-Z]-/.test(a) || realFormula(a)) return false;
+  if (/^(?:про)?витамин|^кофермент|^коэнзим/i.test(a)) return false;
+  return !CHEMICAL_PART.test(a);
+}
+
+/**
+ * Препарат производителя: имя вещества плюс марка через дефис или пробел —
+ * «Веро-Индапамид», «Хлоропирамин-ЭСКОМ», «Ультракаин Д-С». Приставка из
+ * одной буквы — изомер («L-триптофан»), не марка.
+ */
+function makerVariant(alias, label) {
+  const at = alias.trim().split(/[\s-]+/).filter(Boolean);
+  const lt = label.trim().split(/[\s-]+/).filter(Boolean);
+  if (at.length <= lt.length) return false;
+  const same = (xs) => xs.length === lt.length && xs.every((t, i) => key(t) === key(lt[i]));
+  let rest = null;
+  if (same(at.slice(0, lt.length))) rest = at.slice(lt.length);
+  else if (same(at.slice(at.length - lt.length))) rest = at.slice(0, at.length - lt.length);
+  if (!rest) return false;
+  if (rest.length === 1 && rest[0].length === 1) return false;
+  return rest.every((t) => isUpper(firstLetter(t)) && t.charAt(0) === firstLetter(t));
+}
+
+/**
+ * Торговые названия среди синонимов предмета — ключ → почему.
+ *
+ * В Wikidata русские названия веществ пишутся со строчной («парацетамол»), а
+ * торговые — с заглавной («Панадол»). Синоним торгового вида, не родственный
+ * главному имени, у предмета со строчным главным именем — торговое название.
+ * Если главное имя с заглавной (или взято из заголовка статьи), по регистру
+ * не понять; тогда торговыми считаем, только если таких синонимов три и
+ * больше: настоящих вторых имён с другим корнем у вещества одно-два
+ * («Адреналин» — «Эпинефрин»), а марок — десятки.
+ *
+ * Торговое название — не имя вещества: по реестру оно находит препараты одной
+ * марки, часто комбинированные («Андипал» — метамизол с тремя другими), а
+ * опознание сливало бы такой препарат с одним из его веществ.
+ */
+function brandsOf(item, keepKeys) {
+  const out = new Map();
+  const label = item.label;
+  const labelLower = Boolean(item.wikidataLabel) && !item.renamedFrom && isLower(firstLetter(item.wikidataLabel));
+  const loose = [];
+  const seen = new Set([key(label)]);
+  for (const a of item.aliases) {
+    const k = key(a);
+    if (!k || seen.has(k) || keepKeys.has(k)) continue;
+    seen.add(k);
+    if (makerVariant(a, label)) out.set(k, "препарат производителя");
+    else if (brandShape(a) && !related(a, label)) loose.push(k);
+  }
+  if (labelLower) for (const k of loose) out.set(k, "с заглавной при строчном главном имени");
+  else if (loose.length >= 3) for (const k of loose) out.set(k, "много несвязанных имён с заглавной");
+  return out;
+}
+
+/**
+ * Шифр соединения латиницей: «BMS-562247-01», «MK-3475», «T-705» — не
+ * название, и в реестре его нет.
+ */
+function researchCode(name) {
+  if (/[а-яё]/i.test(name) || !/\d/.test(name) || realFormula(name)) return null;
+  return "шифр соединения латиницей, не название";
+}
+
+/**
+ * Брутто-формула органического вещества: «C21H23NO5» — одна на все изомеры
+ * (у «C3H6O3» и молочная кислота, и глицеральдегид). Формулы, где элемент
+ * повторяется («CH3COONa»), — структурные, их оставляем.
+ */
+function organicGrossFormula(name) {
+  const bare = String(name).replace(/\s+/g, "");
+  if (!realFormula(bare)) return null;
+  const symbols = bare.match(/[A-Z][a-z]?/g) ?? [];
+  if (symbols[0] !== "C" || symbols[1] !== "H" || new Set(symbols).size !== symbols.length) return null;
+  const carbons = Number(/^C(\d*)/.exec(bare)[1] || 1);
+  return carbons >= 2 ? "брутто-формула органического вещества — одна на все изомеры" : null;
+}
+
+/** Латинское сокращение: «DMSO», «GABA» — для опознания, но не для поиска. */
+const LATIN_ABBREVIATION = /^[A-Z]{3,6}$/;
 
 /** Ключ сравнения слов: «Оловянная бронза» и «бронза оловянная» — одно. */
 const stems = (s) => new Set(words(normalizeName(s)).map(stemWord));
@@ -644,7 +786,9 @@ async function main() {
     const labels = new Map([[rootId(g), g.rootLabel]]);
     for (const it of walked.found.values()) labels.set(it.id, it.label || it.id);
     const ordered = [...walked.found.values()].sort(
-      g.order ?? ((a, b) => a.label.localeCompare(b.label, "ru")),
+      // Без подписи по-русски имя потом возьмётся из заголовка статьи — по нему
+      // и сортируем, иначе такие предметы встают в начало списка.
+      g.order ?? ((a, b) => (a.label || a.ruwiki || "").localeCompare(b.label || b.ruwiki || "", "ru")),
     );
     for (const it of ordered) {
       if (items.has(it.id)) continue;
@@ -719,6 +863,33 @@ async function main() {
     const k = key(it.label);
     if (k && !canonOwner.has(k)) canonOwner.set(k, it.id);
   }
+  const brandRows = [];
+  const abbrRows = [];
+
+  // Куда влить строку о веществе, которое справочник уже знает под другим
+  // главным именем. Без этого «Бензоилпероксид» и «Дибензоилпероксид» (один
+  // номер CAS) остались бы двумя веществами, а «Изопропиловый спирт» — уже
+  // второе имя «Изопропанола» — столкнулся бы с ним и потерял главное имя.
+  // Вливаем, вписав первым главное имя той записи: одинаковые главные имена
+  // справочник сливает сам.
+  const spellingOwner = new Map();
+  const casOwners = new Map();
+  for (const b of baseline.entries) {
+    for (const sp of b.spellings) {
+      const k = key(sp);
+      if (k && !spellingOwner.has(k)) spellingOwner.set(k, b);
+    }
+    if (b.cas) casOwners.set(b.cas, [...(casOwners.get(b.cas) ?? []), b]);
+  }
+  const joinTarget = (e) => {
+    const ck = key(e.canon);
+    if (live.has(ck)) return null;
+    const owner = spellingOwner.get(ck);
+    if (owner) return { to: owner, why: `«${e.canon}» у него среди написаний` };
+    const sameCas = e.cas ? (casOwners.get(e.cas) ?? []) : [];
+    if (sameCas.length === 1) return { to: sameCas[0], why: `тот же номер CAS ${e.cas}` };
+    return null;
+  };
   for (const it of items.values()) {
     const canonBad = rejectReason(it.label);
     if (canonBad) {
@@ -731,17 +902,24 @@ async function main() {
         what: `${asCanon(it.renamedFrom.label)} (было главным у ${it.id}, стало «${asCanon(it.label)}»)`,
       });
     }
+    const g = it.groupSpec;
     const decidedDrop = decisions.dropSpellings?.[it.id];
     const dropKeys = new Set((decidedDrop?.spellings ?? []).map(key));
+    const notBrand = new Set((decisions.notBrand?.[it.id] ?? []).map(key));
+    for (const a of it.aliases) if (notBrand.has(key(a))) used.add(`${it.id}|!${key(a)}`);
+    const brandWhy = g.brands ? brandsOf(it, notBrand) : new Map();
     const spellings = [];
     const seen = new Set();
     const ownKey = key(it.label);
-    const brands = new Set();
+    const brands = [];
+    const abbrs = [];
     for (const s of [it.label, ...it.aliases]) {
+      const alias = s !== it.label;
       const why =
         rejectReason(s) ||
-        (s !== it.label && aliasReject(s, it.label)) ||
-        (s !== it.label && dropKeys.has(key(s)) && `решение согласования: ${decidedDrop.why}`) ||
+        (alias && aliasReject(s, it.label)) ||
+        (alias && (g.aliasChecks ?? []).map((check) => check(s)).find(Boolean)) ||
+        (alias && dropKeys.has(key(s)) && `решение согласования: ${decidedDrop.why}`) ||
         null;
       if (dropKeys.has(key(s))) used.add(`${it.id}|${key(s)}`);
       if (why) {
@@ -755,25 +933,37 @@ async function main() {
       }
       if (!k || seen.has(k)) continue;
       seen.add(k);
-      spellings.push(asCanon(s));
-      if (it.groupSpec.brandsNoSearch && k !== ownKey && it.wikidataLabel && brandLike(s, it.wikidataLabel)) {
-        brands.add(k);
+      if (alias && brandWhy.has(k)) {
+        brands.push({ name: asCanon(s), why: brandWhy.get(k) });
+        if (g.brands === "drop") continue;
       }
+      if (alias && g.abbrNoSearch && LATIN_ABBREVIATION.test(s.trim())) abbrs.push(asCanon(s));
+      spellings.push(asCanon(s));
     }
     const noSearch = new Set((decisions.noSearch?.[it.id] ?? []).map(key));
     for (const s of spellings) if (noSearch.has(key(s))) used.add(`${it.id}|*${key(s)}`);
-    for (const b of brands) noSearch.add(b);
+    if (g.brands === "noSearch") for (const b of brands) noSearch.add(key(b.name));
+    for (const a of abbrs) noSearch.add(key(a));
+    if (brands.length) brandRows.push({ id: it.id, canon: spellings[0], brands });
+    if (abbrs.length) abbrRows.push(`${spellings[0]}: ${abbrs.map((a) => `«${a}»`).join(", ")}   (${it.id})`);
     const e = {
       id: it.id,
       group: it.group,
       canon: spellings[0],
       spellings,
       cas: it.cas,
-      tag: it.groupSpec.tag?.(it) ?? null,
+      tag: g.tag?.(it) ?? null,
       noSearch,
-      brands,
       parentLabel: it.parentLabel,
     };
+    if (g.joinKnown) {
+      const join = joinTarget(e);
+      if (join) {
+        e.joined = { from: e.canon, to: join.to, why: join.why };
+        e.spellings = [join.to.canon, ...e.spellings.filter((x) => key(x) !== key(join.to.canon))];
+        e.canon = join.to.canon;
+      }
+    }
     // Два предмета Wikidata с одним русским названием («Бронза» — сплав и
     // «Бронза» — что-то ещё) справочник слил бы молча: канон тот же. Берём
     // первый, второй показываем.
@@ -789,7 +979,7 @@ async function main() {
     }
     // Одно имя без номера CAS справочнику ничего не даёт: одинаковые названия
     // схлопываются и без него.
-    if (spellings.length < 2 && !e.cas) {
+    if (e.spellings.length < 2 && !e.cas) {
       silent += 1;
       continue;
     }
@@ -798,7 +988,7 @@ async function main() {
     const known = live.get(ck);
     if (known) {
       const knownKeys = new Set(known.spellings.map(key));
-      const adds = spellings.some((s) => !knownKeys.has(key(s))) || (e.cas && !known.cas);
+      const adds = e.spellings.some((x) => !knownKeys.has(key(x))) || (e.cas && !known.cas);
       if (!adds) {
         nothingNew += 1;
         continue;
@@ -844,6 +1034,15 @@ async function main() {
   const casClashes = st.casConflicts.filter((c) => c.ignoredFrom === fileName);
   const stopDropped = st.dropped.filter((d) => d.from === fileName);
 
+  // Код Wikidata по написанию строки предложения — чтобы решение согласования
+  // можно было записать прямо по отчёту.
+  const idOf = new Map();
+  for (const e of entries) for (const sp of e.spellings) if (!idOf.has(key(sp))) idOf.set(key(sp), e.id);
+  const qid = (...names) => {
+    const id = names.map((n) => idOf.get(key(n))).find(Boolean);
+    return id ? `   (${id})` : "";
+  };
+
   // Чем дополнятся записи, которые справочник уже знает: сравниваем
   // справочник до и после — так видны и слияния по двум общим именам, и
   // молчаливые по одинаковому главному имени.
@@ -859,7 +1058,8 @@ async function main() {
       extended.push(
         `«${before.canon}» (${before.source})` +
           (added.length ? ` ← ${added.map((s) => `«${now.noSearch.has(s) ? "*" : ""}${s}»`).join(", ")}` : "") +
-          (casAdded ? ` ← номер CAS ${casAdded}` : ""),
+          (casAdded ? ` ← номер CAS ${casAdded}` : "") +
+          qid(...added, before.canon),
       );
     }
   }
@@ -872,9 +1072,9 @@ async function main() {
     const was = baseline.identify(label)?.canon ?? null;
     const will = preview.identify(label)?.canon ?? null;
     if (was === will) continue;
-    if (!was) graphChanges.gained.push(`«${label}» → «${will}»`);
+    if (!was) graphChanges.gained.push(`«${label}» → «${will}»${qid(label, will)}`);
     else if (!will) graphChanges.lost.push(`«${label}»: было «${was}», станет — никак`);
-    else graphChanges.changed.push(`«${label}»: было «${was}», станет «${will}»`);
+    else graphChanges.changed.push(`«${label}»: было «${was}», станет «${will}»${qid(label, will)}`);
   }
 
   const flagged = [];
@@ -882,11 +1082,19 @@ async function main() {
     for (const f of flagsOf(e)) flagged.push(`${e.canon}: ${f}   (${e.id})`);
   }
 
-  const brandRows = [];
-  for (const e of entries) {
-    const names = e.spellings.filter((s) => e.brands.has(key(s)));
-    if (names.length) brandRows.push(`${e.canon}: ${names.map((s) => `«${s}»`).join(", ")}   (${e.id})`);
-  }
+  // Торговые названия — по предметам; почему так решено, пишем, только если
+  // не по главному правилу («с заглавной при строчном главном имени»).
+  const brandLines = brandRows.map((r) => {
+    const names = r.brands.map((b) => {
+      const note = b.why === "с заглавной при строчном главном имени" ? "" : ` [${b.why}]`;
+      return `«${b.name}»${note}`;
+    });
+    return `${r.canon}: ${names.join(", ")}   (${r.id})`;
+  });
+  const brandCount = brandRows.reduce((n, r) => n + r.brands.length, 0);
+  const joined = entries
+    .filter((e) => e.joined)
+    .map((e) => `«${e.joined.from}» (${e.id}) → «${e.canon}» (${e.joined.to.source}): ${e.joined.why}`);
 
   // Один номер CAS у разных записей справочника: это одно вещество, которое не
   // слилось — общих написаний нет, — или ошибка номера в Wikidata, или разное
@@ -910,7 +1118,12 @@ async function main() {
   say(`  конфликтов:                     ${conflicts.length}   ← смотреть все`);
   say(`  разные номера CAS:              ${casClashes.length}`);
   say(`  один номер CAS у разных записей: ${sameCas.length}   ← смотреть все`);
-  if (brandRows.length) say(`  с торговыми названиями:         ${brandRows.length}   ← только для опознания, «*»`);
+  if (joined.length) say(`  вольются в записи справочника:  ${joined.length}   ← смотреть все`);
+  if (brandRows.length) {
+    const how = domain.groups.some((g) => g.brands === "noSearch") ? "только для опознания, «*»" : "не берём";
+    say(`  торговых названий:              ${brandCount} у ${brandRows.length} веществ — ${how}`);
+  }
+  if (abbrRows.length) say(`  латинские сокращения:           ${abbrRows.length}   ← только для опознания, «*»`);
   say(`  пометок «смотреть глазами»:     ${flagged.length}`);
   say(
     `  на графах опознается иначе:     ${graphChanges.changed.length + graphChanges.lost.length}` +
@@ -926,7 +1139,11 @@ async function main() {
   if (conflicts.length) {
     say("\n── КОНФЛИКТЫ: одно написание у разных веществ — справочник оставит прежнее ──");
     list(
-      conflicts.map((c) => `«${c.spelling}»: у «${c.kept}» (${c.keptFrom}) и у «${c.ignored}» (${c.ignoredFrom})`),
+      conflicts.map(
+        (c) =>
+          `«${c.spelling}»: у «${c.kept}» (${c.keptFrom}) и у «${c.ignored}» (${c.ignoredFrom})` +
+          qid(c.ignoredFrom === fileName ? c.ignored : c.kept),
+      ),
       Infinity,
     );
   }
@@ -946,9 +1163,17 @@ async function main() {
     say("\n── ОДИН НОМЕР CAS У РАЗНЫХ ЗАПИСЕЙ — одно вещество не слилось или разное под одним номером ──");
     list(sameCas, Infinity);
   }
+  if (joined.length) {
+    say("\n── ВОЛЬЮТСЯ В ЗАПИСИ СПРАВОЧНИКА — то же вещество под другим главным именем ──");
+    list(joined, Infinity);
+  }
   if (brandRows.length) {
-    say("\n── ТОРГОВЫЕ НАЗВАНИЯ? — с заглавной при строчном главном имени; только для опознания ──");
-    list(brandRows, 30);
+    say("\n── ТОРГОВЫЕ НАЗВАНИЯ — по реестру нашли бы препараты марки, часто комбинированные ──");
+    list(brandLines, 40);
+  }
+  if (abbrRows.length) {
+    say("\n── ЛАТИНСКИЕ СОКРАЩЕНИЯ — только для опознания ──");
+    list(abbrRows, 20);
   }
   if (flagged.length) {
     say("\n── СМОТРЕТЬ ГЛАЗАМИ ──");
@@ -1008,6 +1233,9 @@ async function main() {
   }
   for (const [q, list2] of Object.entries(decisions.noSearch ?? {})) {
     for (const sp of list2) if (!used.has(`${q}|*${key(sp)}`)) stale.push(`noSearch ${q} «${sp}»`);
+  }
+  for (const [q, list2] of Object.entries(decisions.notBrand ?? {})) {
+    for (const sp of list2) if (!used.has(`${q}|!${key(sp)}`)) stale.push(`notBrand ${q} «${sp}»`);
   }
   if (stale.length) {
     say("\n── РЕШЕНИЯ СОГЛАСОВАНИЯ, КОТОРЫЕ НЕ ПРИГОДИЛИСЬ (Wikidata поменялась?) ──");
