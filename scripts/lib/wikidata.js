@@ -333,10 +333,11 @@ async function entities(ids, withMore = null) {
   const out = new Map();
   for (const [id, item] of Object.entries(data?.entities ?? {})) {
     if (item?.missing !== undefined) continue;
-    const label = String(item?.labels?.ru?.value ?? "").trim();
-    const aliases = (item?.aliases?.ru ?? [])
-      .map((a) => String(a?.value ?? "").trim())
-      .filter(Boolean);
+    // Знак ударения («Ди́кая груша», «Кишка́») — не часть написания: на графах
+    // его не ставят, и ключом сравнения такое слово не совпало бы ни с чем.
+    const plain = (s) => String(s ?? "").replace(/́/g, "").trim();
+    const label = plain(item?.labels?.ru?.value);
+    const aliases = (item?.aliases?.ru ?? []).map((a) => plain(a?.value)).filter(Boolean);
 
     // Номер CAS: берём первое непустое значение P231.
     let cas = null;
