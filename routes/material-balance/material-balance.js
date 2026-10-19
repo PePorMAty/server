@@ -488,6 +488,48 @@ router.post("/material-balance/lookup", (req, res) => {
   }
 });
 
+/** Сколько преобразований спросить за раз — граф целиком. */
+const MAX_READY_ITEMS = 300;
+
+// Готовые расчёты для преобразований открытого графа — без модели и без
+// задач: клиент зовёт при открытии сохранённого графа, чтобы не нажимать
+// «Рассчитать» там, где расчёт уже есть в базе (в том числе сделанный на
+// другом графе). Тело: { items: [{ transformation, inputs, outputs }] } —
+// узлы с id и названием. Совпадение то же, что у «Рассчитать» без своих
+// данных: всё сырьё, все продукты, те же разделы базы источников, полный
+// расчёт. Ответ: { results: { [id преобразования]: { result, nodeIds } } } —
+// только найденное.
+router.post("/material-balance/ready", (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, MAX_READY_ITEMS) : [];
+  try {
+    const results = {};
+    for (const raw of items) {
+      const transformation = node(raw?.transformation);
+      if (!transformation) continue;
+      const inputs = uniq(nodes(raw?.inputs));
+      const outputs = uniq(nodes(raw?.outputs), new Set(inputs.map((n) => n.id)));
+      if (!inputs.length || !outputs.length) continue;
+      const local = findLocalSources({ inputs, targets: outputs });
+      const { exact } = store.lookup({
+        transformation: transformation.name,
+        inputs: inputs.map((n) => n.name),
+        targets: outputs.map((n) => n.name),
+        localKey: localKey(local),
+      });
+      const result = exact ? store.get(exact.id) : null;
+      if (!result) continue;
+      results[transformation.id] = {
+        result,
+        nodeIds: matchRefs(result.refs, { transformation, inputs, outputs }),
+      };
+    }
+    res.json({ success: true, results });
+  } catch (e) {
+    console.error("[material-balance] ready:", e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 router.post("/material-balance", (req, res) => {
   const { input, error } = readInput(req.body);
   if (error) return res.status(400).json({ success: false, error });
