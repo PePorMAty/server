@@ -34,8 +34,12 @@ let delayMs = DELAY_START_MS;
 
 /** Сколько ждём один ответ. */
 const TIMEOUT_MS = 30_000;
-/** Сколько раз повторяем запрос, упёршийся в ограничение частоты. */
-const RETRIES = 5;
+/**
+ * Сколько раз повторяем запрос, упёршийся в ограничение частоты или занятый
+ * поиск. Восемь попыток — около двух с половиной минут ожидания: поиск
+ * Wikidata под нагрузкой отказывает подолгу.
+ */
+const RETRIES = 8;
 /** По скольку названий спрашиваем у Википедии (предел API — 50). */
 const TITLE_BATCH = 50;
 /**
@@ -155,13 +159,48 @@ const pause = () => sleep(delayMs);
 let calm = 0;
 
 /**
+ * Отказ API, после которого надо подождать и повторить, а не бросать сбор.
+ *
+ * Поиск Wikidata под нагрузкой отвечает не 429, а обычным ответом с ошибкой
+ * внутри: «Search is currently too busy. Please try again later.» — на нём
+ * сорвался третий сбор еды (2026-10-26) посреди группы «фрукты». maxlag и
+ * ratelimited — то же «помедленнее» словами API.
+ */
+function busyError(error) {
+  const code = String(error?.code ?? "");
+  const info = String(error?.info ?? "");
+  return code === "maxlag" || code === "ratelimited" || /too busy|try again later/i.test(info);
+}
+
+/**
+ * Подождать перед повтором: столько, сколько просят заголовком Retry-After,
+ * иначе по нарастающей, — и увеличить паузу для всех следующих запросов.
+ * Попытки кончились — ошибка со словами why («держит ограничение частоты
+ * (429)»).
+ */
+async function backOff(attempt, why, retryAfter) {
+  calm = 0;
+  delayMs = Math.min(Math.round(delayMs * 1.6), DELAY_MAX_MS);
+  if (attempt >= RETRIES) {
+    throw new Error(`Wikidata ${why} даже после ${RETRIES} попыток`);
+  }
+  const askedFor = Number(retryAfter);
+  const wait = Number.isFinite(askedFor) && askedFor > 0
+    ? askedFor * 1000
+    : Math.min(2000 * 2 ** attempt, 30_000);
+  process.stdout.write(`\r  притормаживаю на ${Math.round(wait / 1000)} с…            `);
+  await sleep(wait);
+}
+
+/**
  * Запрос к Wikimedia с уважением к ограничению частоты.
  *
  * 429 — это «помедленнее», а не «нет доступа»: ждём столько, сколько просят
  * заголовком Retry-After (или по нарастающей), увеличиваем паузу для всех
  * следующих запросов и пробуем снова. Ровно этим прошлый заход и захлебнулся:
  * 429 считался отказом, счётчик неудач добирал до предела, и скрипт бросал
- * работу, советуя проверить доступ, которого на самом деле хватало.
+ * работу, советуя проверить доступ, которого на самом деле хватало. Так же
+ * ждём, когда занят поиск (busyError).
  */
 async function request(endpoint, params) {
   const url = `${endpoint}?${new URLSearchParams({ format: "json", ...params })}`;
@@ -179,19 +218,7 @@ async function request(endpoint, params) {
 
     // Слишком часто или сервер занят — это повод подождать, а не сдаться.
     if (res.status === 429 || res.status === 503) {
-      calm = 0;
-      delayMs = Math.min(Math.round(delayMs * 1.6), DELAY_MAX_MS);
-      if (attempt >= RETRIES) {
-        throw new Error(
-          `Wikidata держит ограничение частоты (${res.status}) даже после ${RETRIES} попыток`,
-        );
-      }
-      const askedFor = Number(res.headers.get("retry-after"));
-      const wait = Number.isFinite(askedFor) && askedFor > 0
-        ? askedFor * 1000
-        : Math.min(2000 * 2 ** attempt, 30_000);
-      process.stdout.write(`\r  притормаживаю на ${Math.round(wait / 1000)} с…            `);
-      await sleep(wait);
+      await backOff(attempt, `держит ограничение частоты (${res.status})`, res.headers.get("retry-after"));
       continue;
     }
 
@@ -202,6 +229,15 @@ async function request(endpoint, params) {
     }
 
     const data = await res.json();
+    // То же «подождите», но ответом 200 с ошибкой внутри: занят поиск.
+    if (data?.error && busyError(data.error)) {
+      await backOff(
+        attempt,
+        `отвечает «${data.error.info ?? data.error.code}»`,
+        res.headers.get("retry-after"),
+      );
+      continue;
+    }
     if (data?.error) throw new Error(data.error.info ?? data.error.code);
 
     // Долго идёт гладко — понемногу возвращаем скорость.
