@@ -401,28 +401,34 @@ function trailingParen(text) {
  * дейтерием» деление выдёргивает «водород», а это не водород. Своя позиция у
  * вещества побеждает часть перечня (tnvedByName.js).
  *
- * @returns {{ text: string, whole: boolean }[]}
+ * lead — вся позиция или первая часть перечня. Дальние части бывают
+ * продолжением первой: в «двойные соли и смеси нитрата кальция и нитрата
+ * аммония» «нитрата аммония» — не нитрат аммония, а чем смеси.
+ *
+ * @returns {{ text: string, whole: boolean, lead: boolean }[]}
  */
 function tnvedNameVariants(name) {
   const out = new Map();
-  const add = (text, whole) => {
-    if (text.length > 2) out.set(text, out.get(text) === true || whole);
+  const add = (text, whole, lead) => {
+    if (text.length <= 2) return;
+    const prev = out.get(text);
+    out.set(text, { whole: Boolean(prev?.whole) || whole, lead: Boolean(prev?.lead) || lead });
   };
-  const addWithParen = (text, whole) => {
+  const addWithParen = (text, whole, lead) => {
     const t = text.replace(/\s+/g, " ").trim();
     if (!t) return;
-    add(t, whole);
+    add(t, whole, lead);
     const p = trailingParen(t);
     if (!p) return;
-    add(p.head, whole);
-    for (const alt of splitOutsideParens(p.inner, /^[;,]\s+/)) add(alt, whole);
+    add(p.head, whole, lead);
+    for (const alt of splitOutsideParens(p.inner, /^[;,]\s+/)) add(alt, whole, lead);
   };
-  addWithParen(name, true);
-  for (const part of splitOutsideParens(name, /^(\s+и\s+|[;,]\s+)/)) {
-    if (/^\(|^(его|ее|её|их)\s/i.test(part)) continue;
-    addWithParen(part, false);
-  }
-  return [...out].map(([text, whole]) => ({ text, whole }));
+  addWithParen(name, true, true);
+  splitOutsideParens(name, /^(\s+и\s+|[;,]\s+)/).forEach((part, i) => {
+    if (/^\(|^(его|ее|её|их)\s/i.test(part)) return;
+    addWithParen(part, false, i === 0);
+  });
+  return [...out].map(([text, v]) => ({ text, ...v }));
 }
 
 /**
@@ -452,6 +458,61 @@ function tnvedSubstancePositions() {
   return out;
 }
 
+/**
+ * Где ещё в ТН ВЭД названия — сами продукты отраслей справочника (Wikidata по
+ * отраслям), а не изделия из них: по началу кода.
+ *
+ *   еда — мясо (02), молоко, сыры, масло, яйца, мёд (04), овощи (07), фрукты
+ *     и орехи (08), кофе, чай, пряности (09), злаки (10), мука, крупа,
+ *     солод, крахмал (11), масличные семена (12), жиры и масла (15), сахар
+ *     (17), какао (18), жмых и отруби (23). Не берём рыбу (03), живых
+ *     животных и растения (01, 06) и готовые продукты (16, 19–22): «в
+ *     оливковом масле» в 16 — это сардины;
+ *   металлы — драгоценные металлы (7106–7112, без камней и украшений),
+ *     чугун, сталь, ферросплавы (72), медь, никель, алюминий (74–76),
+ *     свинец, цинк, олово (78–80), прочие металлы (81);
+ *   полимеры в первичных формах (3901–3914) — без плит, труб и мешков «из»
+ *     них (3916–3926); каучуки (4001–4006) — без резиновых изделий;
+ *   удобрения (31).
+ */
+const TNVED_DOMAIN_CODES =
+  /^(?:0[2478]|09|1[0-2]|15|1[78]|23|710[6-9]|711[0-2]|72|7[4-6]|7[89]|80|81|390\d|391[0-4]|400[1-6]|31)/;
+
+/**
+ * Позиция — обработанный продукт, а не сам продукт: сушёный, замороженный,
+ * консервированный, солёный чеснок или фрукты — не чеснок и не фрукты;
+ * гидрогенизированное льняное масло — не льняное масло. По позиции и всем её
+ * заголовкам: «чеснок» под «Овощи сушеные…» — сушёный.
+ *
+ * Сюда же «сырое» масло: под «масло сырое» стоит позиция «масло
+ * подсолнечное», и подсолнечное масло вообще получало код сырого. Без неё
+ * остаётся товарная позиция 1512 целиком. Слово — целиком: «сыры» — это сыры.
+ */
+const TNVED_PROCESSED =
+  /сушен|заморожен|консервирован|приготовлен|маринован|засахарен|солен|копчен|в рассоле|сгущен|отработан|гидрогенизирован|переэтерифицирован|(?:^|[\s,(])сыр(?:ое|ой|ая|ые)(?=$|[\s,;:)])/i;
+
+let tnvedDomain = null;
+
+/**
+ * Позиции ТН ВЭД отраслей (TNVED_DOMAIN_CODES) — вторая очередь поиска кода
+ * по названию: туда смотрим, только если в химических группах 28–29 ничего
+ * не нашлось (tnvedByName.js). «Прочие» и обработанное (TNVED_PROCESSED) не
+ * берём.
+ */
+function tnvedDomainPositions() {
+  if (tnvedDomain) return tnvedDomain;
+  if (tnved === null) tnved = loadTnved();
+  const out = [];
+  for (const [code, e] of tnved) {
+    if (!TNVED_DOMAIN_CODES.test(code)) continue;
+    if (/(^|\s)проч/i.test(e.name)) continue;
+    if (TNVED_PROCESSED.test(e.path)) continue;
+    out.push({ code, display: formatTnved(code), name: e.name, variants: tnvedNameVariants(e.name) });
+  }
+  tnvedDomain = out;
+  return out;
+}
+
 /** Что удалось прочитать — для диагностики и страницы состояния. */
 function classifiersStatus() {
   if (okpd2 === null) okpd2 = loadOkpd2();
@@ -470,5 +531,6 @@ module.exports = {
   formatTnved,
   tnvedName,
   tnvedSubstancePositions,
+  tnvedDomainPositions,
   classifiersStatus,
 };
