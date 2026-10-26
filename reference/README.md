@@ -17,6 +17,7 @@
 | `tnved.txt` | товарная номенклатура ЕАЭС, иерархическая |
 | `synonyms.txt` | справочник веществ, ведётся руками |
 | `synonyms-wikidata.txt` | то же, собрано скриптом из Wikidata |
+| `synonyms-wikidata-metals.txt`, `-drugs.txt`, `-food.txt` | отрасли из Wikidata: металлы и сплавы, лекарства, сельское хозяйство и пищевое сырьё (`scripts/fetch-wikidata-domain.js`, IDENTIFICATION.md) |
 | `synonyms-stop.txt` | что из собранного машиной не брать |
 
 ## okpd2.txt — 1 736 позиций, 252 КБ
