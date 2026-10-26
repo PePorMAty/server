@@ -99,20 +99,45 @@ const SUBSTANCE_CLASSES = [
   "17", "19", "20", "21", "22", "23", "24", "35",
 ];
 
-/** Условие SQL «запись из класса веществ»; prefix — псевдоним таблицы с точкой. */
-function substanceClassSql(prefix = "") {
+/**
+ * Классы, где ищутся продукты файла еды (synonyms-wikidata-food.txt):
+ * сельское хозяйство, лес, рыба (01–03), пищевые продукты (10, 11) и химия
+ * (20) — в ней эфирные масла и скипидар. Без потребительской химии:
+ * пестицидов (20.20), мыла (20.41), косметики (20.42), — и без пластмасс и
+ * металлов. Снимок 028b642 → eae9b73: из 15 новых названий еды, нашедших
+ * что-то, верных было два («Пшеничная мука», «Скипидар»), а прочие — «Йогурт-
+ * крем для тела», гербицид «САХАРА®», «Дуршлаг для крупы», трафарет «Фрукты»,
+ * «Зелёные» трубы.
+ */
+const FOOD_SOURCE = "synonyms-wikidata-food.txt";
+const FOOD_CLASSES = ["01", "02", "03", "10", "11", "20"];
+const FOOD_EXCEPT = ["20.20", "20.41", "20.42"];
+
+/**
+ * Условие SQL «запись из этих классов»; prefix — псевдоним таблицы с
+ * точкой, except — подгруппы, которые из классов вычесть.
+ */
+function classSql(prefix, classes, except = []) {
   const code = `TRIM(${prefix}okpd2)`;
   // Класс целиком («20») и подгруппа («13.1») сравниваются с началом кода
   // своей длины.
-  const byLength = new Map();
-  for (const c of SUBSTANCE_CLASSES) {
-    if (!byLength.has(c.length)) byLength.set(c.length, []);
-    byLength.get(c.length).push(`'${c}'`);
-  }
-  const starts = [...byLength]
-    .map(([len, list]) => `substr(${code}, 1, ${len}) IN (${list.join(",")})`)
-    .join(" OR ");
-  return `(${prefix}okpd2 IS NULL OR ${code} = '' OR ${starts})`;
+  const startsWith = (list) => {
+    const byLength = new Map();
+    for (const c of list) {
+      if (!byLength.has(c.length)) byLength.set(c.length, []);
+      byLength.get(c.length).push(`'${c}'`);
+    }
+    return [...byLength]
+      .map(([len, codes]) => `substr(${code}, 1, ${len}) IN (${codes.join(",")})`)
+      .join(" OR ");
+  };
+  const minus = except.length ? ` AND NOT (${startsWith(except)})` : "";
+  return `(${prefix}okpd2 IS NULL OR ${code} = '' OR ((${startsWith(classes)})${minus}))`;
+}
+
+/** Условие SQL «запись из класса веществ»; prefix — псевдоним таблицы с точкой. */
+function substanceClassSql(prefix = "") {
+  return classSql(prefix, SUBSTANCE_CLASSES);
 }
 
 /**
@@ -413,6 +438,9 @@ function lookupProduct(rawName, opts) {
 
   const spellings = spellingsOf(rawName);
   const known = identify(rawName);
+  // Продукт из файла еды: ищем только там, где выпускают еду (FOOD_CLASSES),
+  // и «в составе препарата» не засчитываем — у еды это каталоги смесей.
+  const food = known?.source === FOOD_SOURCE;
 
   /**
    * Категория классификатора по названию — на случай, когда реестр промолчит.
@@ -488,7 +516,7 @@ function lookupProduct(rawName, opts) {
       scope === "all"
         ? ""
         : scope === "materials"
-          ? `AND ${substanceClassSql(prefix)}`
+          ? `AND ${food ? classSql(prefix, FOOD_CLASSES, FOOD_EXCEPT) : substanceClassSql(prefix)}`
           : `AND NOT ${substanceClassSql(prefix)}`;
     const exactStmt = conn.prepare(
       `SELECT * FROM products WHERE name_norm = ?
@@ -513,6 +541,9 @@ function lookupProduct(rawName, opts) {
      */
     const judge = (c) => {
       const v = verdict(c);
+      // Смесь специй «Декоративная праздничная…» с перечнем составов — не
+      // чеснок, не колбаса и не апельсиновое масло (снимок 028b642 → eae9b73).
+      if (food && v.ok && v.formulation) return { ok: false, why: "еда в составе смеси, а не сама" };
       const leads = c?.at === 0 || Boolean(c?.adjectivesBefore);
       if (strict && v.ok && (!leads || v.formulation)) {
         return { ok: false, why: "изделие, а продукт в нём не первым словом" };
