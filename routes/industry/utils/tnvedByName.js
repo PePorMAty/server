@@ -70,6 +70,12 @@ function singular(text) {
  */
 function strictKey(text) {
   if (isSingleWord(text)) return singular(text);
+  // Короткие части смотрим по самому названию: words() выбрасывает предлоги
+  // и союзы, а у «Бисфенола А» и «Бисфенола С» буква — всё отличие. Без
+  // этого оба сводились к «бисфенол», и бисфенол C получал код бисфенола А
+  // (codes-coverage 2026-10-26).
+  const raw = normalizeName(text).split(/[^a-zа-яё0-9]+/i).filter(Boolean);
+  if (raw.some((w) => w.length < 3 || /\d/.test(w))) return null;
   const all = words(stemName(text));
   if (!all.length || all.some((w) => w.length < 3 || /\d/.test(w))) return null;
   return [...new Set(all)].sort().join(" ");
