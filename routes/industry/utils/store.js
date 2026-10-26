@@ -544,6 +544,11 @@ function lookupProduct(rawName, opts) {
       // Смесь специй «Декоративная праздничная…» с перечнем составов — не
       // чеснок, не колбаса и не апельсиновое масло (снимок 028b642 → eae9b73).
       if (food && v.ok && v.formulation) return { ok: false, why: "еда в составе смеси, а не сама" };
+      // Скобка у еды — описание, а не второе имя: «Имитатор запаха
+      // продовольствия (фрукты)» (20.59) — не фрукты (снимок eae9b73 →
+      // 284034b). Второе имя в скобках — правило химии: «Изопропилбензол
+      // (кумол)».
+      if (food && v.ok && v.parenName) return { ok: false, why: "еда в скобке — описание, а не второе имя" };
       const leads = c?.at === 0 || Boolean(c?.adjectivesBefore);
       if (strict && v.ok && (!leads || v.formulation)) {
         return { ok: false, why: "изделие, а продукт в нём не первым словом" };
@@ -1173,7 +1178,7 @@ function baseVerdict(c) {
   }
   if (c.at === 0) return { ok: true, why: "первое слово" };
   if (c.at === 1 && c.strong >= 1 && c.share >= 1 / 3) return { ok: true, why: "второе слово" };
-  if (c.parens === "synonym") return { ok: true, why: "второе имя в скобках" };
+  if (c.parens === "synonym") return { ok: true, why: "второе имя в скобках", parenName: true };
   if (nearPair(c)) return { ok: true, why: "два слова рядом" };
   if (c.parens === "formulation") {
     return { ok: true, why: "в составе препарата", formulation: true };
