@@ -497,7 +497,11 @@ let tnvedDomain = null;
  * Позиции ТН ВЭД отраслей (TNVED_DOMAIN_CODES) — вторая очередь поиска кода
  * по названию: туда смотрим, только если в химических группах 28–29 ничего
  * не нашлось (tnvedByName.js). «Прочие» и обработанное (TNVED_PROCESSED) не
- * берём.
+ * берём. «В другом месте не поименованные» — тоже остаток: «Целлюлоза и ее
+ * химические производные, в первичных формах, в другом месте не
+ * поименованные» (3912) — не та целлюлоза, что на графах: та древесная, в
+ * группе 47 (решение заказчика 2026-10-26). Подпозиции под таким заголовком
+ * — «карбоксиметилцеллюлоза» — берём: остаток — сам заголовок.
  */
 function tnvedDomainPositions() {
   if (tnvedDomain) return tnvedDomain;
@@ -506,6 +510,7 @@ function tnvedDomainPositions() {
   for (const [code, e] of tnved) {
     if (!TNVED_DOMAIN_CODES.test(code)) continue;
     if (/(^|\s)проч/i.test(e.name)) continue;
+    if (/в другом месте не поименован/i.test(e.name)) continue;
     if (TNVED_PROCESSED.test(e.path)) continue;
     out.push({ code, display: formatTnved(code), name: e.name, variants: tnvedNameVariants(e.name) });
   }
