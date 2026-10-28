@@ -97,7 +97,7 @@ function buildStepSchema() {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["transformation", "inputProducts", "outputProducts"],
+    required: ["transformation", "inputProducts", "outputProducts", "byproducts"],
     properties: {
       transformation: {
         type: "object",
@@ -134,6 +134,14 @@ function buildStepSchema() {
         minItems: 1,
         items: productSchema,
       },
+      /**
+       * Побочные продукты того же преобразования (метанол переэтерификации,
+       * фенол поликонденсации в расплаве). Нет — пустой массив.
+       */
+      byproducts: {
+        type: "array",
+        items: productSchema,
+      },
     },
   };
 }
@@ -160,11 +168,13 @@ const STEP_BUILD_SYSTEM = `Ты — парсер производственны�
   transformation: { name, description, industry, mainPurpose, notes },
   inputProducts: [{ name, description, industry, mainPurpose }, ...],
   outputProducts: [{ name, description, industry, mainPurpose }, ...],
+  byproducts: [{ name, description, industry, mainPurpose }, ...],
 }
 
 Правила размещения input/output (безусловные):
 - outputProducts — это то, ЧТО производят на этом шаге. Всегда берётся из секции «Что производят» Markdown (это раскрываемый целевой продукт).
 - inputProducts — это то, ИЗ ЧЕГО производят (feedstock/сырьё). Всегда берётся из секции «Из чего производят» Markdown.
+- byproducts — побочные продукты шага. Всегда берётся из секции «Побочные продукты» Markdown; нет секции или там [] — пустой массив. Побочные продукты не переносятся в outputProducts, а продукты из «Что производят» — в byproducts. Не придумывай побочных продуктов, которых нет в Markdown.
 - Агрегат всегда возвращает шаг в формате «целевой продукт ← сырьё», поэтому направление построения цепочки на размещение input/output не влияет.
 
 Остальные правила:
@@ -236,25 +246,56 @@ function splitProductList(raw) {
 }
 
 /**
+ * Продукты поля `label` основного варианта текста. Пусто — поля нет или оно
+ * пустое.
+ */
+function listedInMain(techText, label) {
+  const text = String(techText || "");
+  const altAt = text.search(/^#{1,2}\s*Альтернатив/m);
+  const main = altAt > 0 ? text.slice(0, altAt) : text;
+  const m = new RegExp(`\\*\\*${label}:\\*\\*([^\\n]*)`).exec(main);
+  if (!m) return [];
+  const inner = bracketBody(m[1]);
+  if (!inner || EMPTY_LIST_WORDS.test(inner)) return [];
+  return splitProductList(inner);
+}
+
+/**
+ * Содержимое списка «[…]» в начале строки — до парной скобки: хвост вроде
+ * «[] — нет» или «[Фенол] (выделяется)» в список не попадает. Без скобок —
+ * строка целиком.
+ */
+function bracketBody(raw) {
+  const s = String(raw || "").trim();
+  if (!s.startsWith("[")) return s.replace(/\]\.?$/, "").trim();
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "[") depth += 1;
+    if (s[i] === "]") depth -= 1;
+    if (depth === 0) return s.slice(1, i).trim();
+  }
+  return s.slice(1).trim();
+}
+
+/**
  * Продукты дальней стороны основного варианта текста: у шага «вниз» —
  * «Что производят», у шага «вверх» — «Из чего производят». Пусто — поля нет
  * или оно пустое (тогда шаг и не строится, см. farSideEmpty).
  */
 function farSideListed(techText, direction) {
-  const text = String(techText || "");
-  const altAt = text.search(/^#{1,2}\s*Альтернатив/m);
-  const main = altAt > 0 ? text.slice(0, altAt) : text;
-  const label = direction === "up" ? "Из чего производят" : "Что производят";
-  const m = new RegExp(`\\*\\*${label}:\\*\\*([^\\n]*)`).exec(main);
-  if (!m) return [];
-  const inner = m[1]
-    .trim()
-    .replace(/^\[/, "")
-    .replace(/\]\.?$/, "")
-    .trim();
-  if (!inner || EMPTY_LIST_WORDS.test(inner)) return [];
-  return splitProductList(inner);
+  return listedInMain(
+    techText,
+    direction === "up" ? "Из чего производят" : "Что производят",
+  );
 }
+
+/**
+ * Не побочные продукты, хотя модель порой их так называет: вода, энергия и
+ * безымянные отходы — не узлы графа. Сравнивается название без уточнения в
+ * скобках, в нижнем регистре.
+ */
+const NOT_A_BYPRODUCT =
+  /^(?:вода|водяной пар|пар|тепло|теплота|энергия|электроэнергия|отходы|сточные воды|выбросы|отходящие газы|примеси|остатки)$/;
 
 function buildStepBuildUserPrompt({ productName, techText, existingProducts }) {
   const existingList =
@@ -271,7 +312,8 @@ ${techText}
 Напоминание о размещении:
 - outputProducts = «Что производят» (целевой продукт).
 - inputProducts  = «Из чего производят» (сырьё).
-Оба массива должны быть непустыми.
+- byproducts     = «Побочные продукты» (нет — пустой массив).
+outputProducts и inputProducts должны быть непустыми.
 
 ОБЯЗАТЕЛЬНО: для каждого продукта проверь список «Существующие продукты в графе». Если продукт по смыслу совпадает с любым из них (даже если формулировка чуть отличается, или в скобках указано уточнение, или регистр другой), используй ТОЧНО ТО ИМЯ из списка. Не создавай новое имя, если существующее подходит.
 
@@ -599,6 +641,50 @@ router.post("/gpt/step/build", async (req, res) => {
         `[step/build] «${productName}» (${direction}): модель потеряла продукты основного пути — ${restored.join(", ")}; добавлены по тексту обобщения`,
       );
     }
+
+    // Побочные продукты — по тексту обобщения: он решает, что побочное, а что
+    // выход. Сравнение строгое (без уточнения в скобках): нестрогое sameProduct
+    // сочло бы «Фенол» тем же, что «Бисфенол А», и побочный фенол
+    // поликонденсации пропал бы как «уже есть во входах».
+    const sameName = (a, b) => !!baseName(a) && baseName(a) === baseName(b);
+    const listedOutputs = listedInMain(techText, "Что производят");
+    const listedByproducts = listedInMain(techText, "Побочные продукты");
+    const byproducts = [];
+    const addByproduct = (p) => {
+      const name = String(p?.name || "").trim();
+      if (!name || NOT_A_BYPRODUCT.test(baseName(name))) return false;
+      if (sameName(name, productName)) return false;
+      const taken = [...step.inputProducts, ...step.outputProducts, ...byproducts];
+      if (taken.some((q) => sameName(q.name, name))) return false;
+      byproducts.push(p.isExisting === undefined ? markProduct(p) : p);
+      return true;
+    };
+    // Разборщик положил побочный продукт в выходы — в тексте он побочный и в
+    // «Что производят» не назван. Последний выход не трогаем: шаг без выходов
+    // не строится.
+    for (const name of listedByproducts) {
+      if (listedOutputs.some((o) => sameName(o, name))) continue;
+      const i = step.outputProducts.findIndex((p) => sameName(p.name, name));
+      if (i < 0 || step.outputProducts.length < 2) continue;
+      const [moved] = step.outputProducts.splice(i, 1);
+      addByproduct(moved);
+    }
+    for (const p of Array.isArray(parsed.byproducts) ? parsed.byproducts : []) {
+      addByproduct(p);
+    }
+    // В тексте обобщения названия бывают со строчной («метанол»), а узлы
+    // графа — с заглавной. Приставки вроде «н-бутан» не трогаем.
+    const capitalized = (s) =>
+      /^[а-яёa-z](?=[а-яёa-z])/.test(s) ? s[0].toUpperCase() + s.slice(1) : s;
+    const restoredByproducts = listedByproducts.filter((name) =>
+      addByproduct({ name: capitalized(name) }),
+    );
+    if (restoredByproducts.length) {
+      console.log(
+        `[step/build] «${productName}» (${direction}): модель потеряла побочные продукты — ${restoredByproducts.join(", ")}; добавлены по тексту обобщения`,
+      );
+    }
+    step.byproducts = byproducts;
 
     if (step.inputProducts.length === 0 || step.outputProducts.length === 0) {
       return reply(422, {
