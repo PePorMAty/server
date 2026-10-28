@@ -17,6 +17,7 @@ const GRAPH_DIR = path.join(DATA_DIR, "saved-graphs");
 const BOOKMARKS_DIR = path.join(DATA_DIR, "bookmarks");
 const HISTORY_DIR = path.join(DATA_DIR, "history");
 const BALANCES_DIR = path.join(DATA_DIR, "material-balances");
+const PRODUCT_IDS_DIR = path.join(DATA_DIR, "product-ids");
 
 /** Шаблон промта, правленный пользователем. Пусто — берём из окружения. */
 const PROMPT_LAYOUT_FILE = path.join(DATA_DIR, "prompt-layout.json");
@@ -95,12 +96,16 @@ function graphMeta(fileName, content) {
   };
 }
 
-/** Убрать закладки, историю и расчёты баланса графа — зовём при его удалении. */
+/**
+ * Убрать закладки, историю, расчёты баланса и идентификаторы продуктов графа
+ * — зовём при его удалении.
+ */
 async function removeSidecars(fileName) {
   await Promise.all([
     removeFile(sidecarPath(BOOKMARKS_DIR, fileName)),
     removeFile(sidecarPath(HISTORY_DIR, fileName)),
     removeFile(sidecarPath(BALANCES_DIR, fileName)),
+    removeFile(sidecarPath(PRODUCT_IDS_DIR, fileName)),
   ]);
 }
 
@@ -110,6 +115,7 @@ module.exports = {
   BOOKMARKS_DIR,
   HISTORY_DIR,
   BALANCES_DIR,
+  PRODUCT_IDS_DIR,
   PROMPT_LAYOUT_FILE,
   safeId,
   sidecarPath,

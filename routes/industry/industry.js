@@ -46,6 +46,7 @@ router.get("/industry/status", (req, res) => {
       ...status(),
       synonyms: {
         ready: synonyms.loaded,
+        version: synonyms.version ?? null,
         substances: synonyms.entries,
         spellings: synonyms.spellings,
         // Из каких файлов собрано: правленного руками и собранного из Wikidata.
@@ -96,8 +97,16 @@ router.post("/industry/identify", (req, res) => {
         : null;
     }
 
+    // version — версия справочника: клиент хранит её рядом с идентификатором
+    // узла и спрашивает об узле снова, только когда она сменилась. Пустой
+    // список продуктов — законный запрос «какая сейчас версия».
     const info = synonymsStatus();
-    res.json({ success: true, ready: info.loaded, results });
+    res.json({
+      success: true,
+      ready: info.loaded,
+      version: info.version ?? null,
+      results,
+    });
   } catch (e) {
     console.error("Industry identify error:", e);
     res.status(500).json({ success: false, error: "Failed to identify products" });

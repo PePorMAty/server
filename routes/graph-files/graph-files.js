@@ -5,6 +5,7 @@ const path = require("path");
 const {
   GRAPH_DIR,
   BALANCES_DIR,
+  PRODUCT_IDS_DIR,
   safeId,
   sidecarPath,
   removeFile,
@@ -191,6 +192,8 @@ router.put("/:id", async (req, res) => {
     // (см. material-balances.js) больше не нужен — и не должен перекрыть то,
     // что сохранили, при следующем открытии.
     await removeFile(sidecarPath(BALANCES_DIR, fileName));
+    // Идентификаторы продуктов — тоже в файле (см. product-ids.js).
+    await removeFile(sidecarPath(PRODUCT_IDS_DIR, fileName));
 
     res.json({ success: true, data: graphMeta(fileName, updated) });
   } catch (e) {

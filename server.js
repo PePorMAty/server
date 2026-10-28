@@ -7,6 +7,7 @@ const graphFileRoutes = require("./routes/graph-files/graph-files");
 const graphBookmarks = require("./routes/graph-files/bookmarks");
 const graphHistory = require("./routes/graph-files/history");
 const graphBalances = require("./routes/graph-files/material-balances");
+const graphProductIds = require("./routes/graph-files/product-ids");
 const graphSources = require("./routes/sources/sources");
 const graphAggregate = require("./routes/sources/aggregate");
 const chainRoutes = require("./routes/chain/chain");
@@ -87,12 +88,13 @@ app.use("/api/graphs", graphRoutes);
 app.use("/api/graphs", graphSources);
 app.use("/api/graphs", graphAggregate);
 app.use("/api/graphs", chainRoutes);
-// Закладки, история и расчёты баланса монтируются на тот же префикс: их пути
+// Закладки, история, расчёты баланса и идентификаторы продуктов монтируются на тот же префикс: их пути
 // на сегмент длиннее (/:id/bookmarks), поэтому с «/:id» графов не конфликтуют.
 app.use("/api/graph-files", graphFileRoutes);
 app.use("/api/graph-files", graphBookmarks);
 app.use("/api/graph-files", graphHistory);
 app.use("/api/graph-files", graphBalances);
+app.use("/api/graph-files", graphProductIds);
 app.use("/api/graphs", fillCardRouter);
 app.use("/api/graphs", stepSources);
 app.use("/api/graphs", stepAggregate);

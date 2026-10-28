@@ -13,6 +13,7 @@
 // базы. Чтение ленивое, при первом обращении; полторы сотни строк остаются в
 // памяти. Файла нет — всё работает как раньше, просто без синонимов.
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -232,6 +233,15 @@ function load(files = referenceFiles()) {
 
   const sources = [];
   let lines = 0;
+  // Версия справочника — по прочитанным файлам и стоп-листу: клиент хранит её
+  // рядом с идентификатором узла и переспрашивает справочник, только когда
+  // версия сменилась (правка файла и перезапуск сервера).
+  const digest = crypto.createHash("sha1");
+  try {
+    digest.update(fs.readFileSync(STOP_FILE));
+  } catch {
+    // Стоп-листа нет — версия по одним файлам справочника.
+  }
 
   for (const file of files) {
     let text;
@@ -246,6 +256,8 @@ function load(files = referenceFiles()) {
       // Файла нет — штатно для того, что собирается скриптом.
       continue;
     }
+    digest.update(path.basename(file));
+    digest.update(text);
 
     let fileLines = 0;
     for (const rawLine of text.split("\n")) {
@@ -367,6 +379,8 @@ function load(files = referenceFiles()) {
     sources,
     file: path.join(REFERENCE_DIR, HAND_WRITTEN),
     loaded: sources.length > 0,
+    /** Версия справочника: сменилась — ответы опознания могли измениться. */
+    version: sources.length > 0 ? digest.digest("hex").slice(0, 12) : null,
   };
   return map;
 }
