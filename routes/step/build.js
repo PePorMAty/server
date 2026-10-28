@@ -290,6 +290,18 @@ function farSideListed(techText, direction) {
 }
 
 /**
+ * Продукты ближней стороны основного варианта: у шага «вниз» — «Из чего
+ * производят» (раскрываемый продукт и второе сырьё), у шага «вверх» — «Что
+ * производят».
+ */
+function nearSideListed(techText, direction) {
+  return listedInMain(
+    techText,
+    direction === "up" ? "Что производят" : "Из чего производят",
+  );
+}
+
+/**
  * Не побочные продукты, хотя модель порой их так называет: вода, энергия и
  * безымянные отходы — не узлы графа. Сравнивается название без уточнения в
  * скобках, в нижнем регистре.
@@ -642,6 +654,43 @@ router.post("/gpt/step/build", async (req, res) => {
       );
     }
 
+    // В тексте обобщения названия бывают со строчной («метанол»), а узлы
+    // графа — с заглавной. Приставки вроде «н-бутан» не трогаем.
+    const capitalized = (s) =>
+      /^[а-яёa-z](?=[а-яёa-z])/.test(s) ? s[0].toUpperCase() + s.slice(1) : s;
+
+    // Ближняя сторона — так же: второе сырьё шага «вниз» (А + В → Б) пропадало
+    // из ответа без следа, и шаг ложился на граф как «Б из А». Раскрываемый
+    // продукт не добавляем — он на полотне уже есть; продукт, который разборщик
+    // положил на дальнюю сторону, — тоже: одному узлу не быть и входом, и
+    // выходом шага.
+    //
+    // Тот же продукт — то же название или одно целым словом входит в другое
+    // («Ацетон» и «Ацетон технический»). Вхождение подстрокой, как у
+    // sameProduct, сочло бы «Формальдегид» уже взятым, раз в выходах стоят
+    // «Фенолоформальдегидные смолы».
+    const sameWords = (a, b) => {
+      const [x, y] = [baseName(a), baseName(b)].sort((p, q) => p.length - q.length);
+      if (!x) return false;
+      if (x === y) return true;
+      const escaped = x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return x.length >= 4 && new RegExp(`(^|[\\s-])${escaped}($|[\\s-])`).test(y);
+    };
+    const nearList =
+      direction === "up" ? step.outputProducts : step.inputProducts;
+    const restoredNear = [];
+    for (const name of nearSideListed(techText, direction)) {
+      if (baseName(name) === baseName(productName)) continue;
+      if ([...nearList, ...farList].some((p) => sameWords(p.name, name))) continue;
+      nearList.push(markProduct({ name: capitalized(name) }));
+      restoredNear.push(name);
+    }
+    if (restoredNear.length) {
+      console.log(
+        `[step/build] «${productName}» (${direction}): модель потеряла второе сырьё / совместные продукты — ${restoredNear.join(", ")}; добавлены по тексту обобщения`,
+      );
+    }
+
     // Побочные продукты — по тексту обобщения: он решает, что побочное, а что
     // выход. Сравнение строгое (без уточнения в скобках): нестрогое sameProduct
     // сочло бы «Фенол» тем же, что «Бисфенол А», и побочный фенол
@@ -672,10 +721,6 @@ router.post("/gpt/step/build", async (req, res) => {
     for (const p of Array.isArray(parsed.byproducts) ? parsed.byproducts : []) {
       addByproduct(p);
     }
-    // В тексте обобщения названия бывают со строчной («метанол»), а узлы
-    // графа — с заглавной. Приставки вроде «н-бутан» не трогаем.
-    const capitalized = (s) =>
-      /^[а-яёa-z](?=[а-яёa-z])/.test(s) ? s[0].toUpperCase() + s.slice(1) : s;
     const restoredByproducts = listedByproducts.filter((name) =>
       addByproduct({ name: capitalized(name) }),
     );
