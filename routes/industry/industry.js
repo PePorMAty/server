@@ -18,6 +18,7 @@ const express = require("express");
 const { lookupProduct, status } = require("./utils/store");
 const { identify, synonymsStatus } = require("./utils/synonyms");
 const { describeOkpd2, describeTnved } = require("./utils/classifiers");
+const { ecicsStatus } = require("./utils/ecics");
 
 const router = express.Router();
 
@@ -64,6 +65,8 @@ router.get("/industry/status", (req, res) => {
         // Одному веществу проставлены два разных номера — ошибка в данных.
         casConflicts: synonyms.casConflicts,
       },
+      // Таможенный реестр химических веществ ЕС: номеров CAS с кодом.
+      ecics: ecicsStatus(),
     });
   } catch (e) {
     console.error("Industry status error:", e);

@@ -19,6 +19,7 @@
 | `synonyms-wikidata.txt` | то же, собрано скриптом из Wikidata |
 | `synonyms-wikidata-metals.txt`, `-drugs.txt`, `-food.txt` | отрасли из Wikidata: металлы и сплавы, лекарства, сельское хозяйство и пищевое сырьё (`scripts/fetch-wikidata-domain.js`, IDENTIFICATION.md) |
 | `synonyms-stop.txt` | что из собранного машиной не брать |
+| `ecics.txt` | номер CAS → код ТН ВЭД ЕС по таможенному реестру ECICS (© Европейский союз, CC BY 4.0); собирает `scripts/import-ecics.js` |
 
 ## okpd2.txt — 1 736 позиций, 252 КБ
 

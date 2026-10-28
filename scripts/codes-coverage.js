@@ -64,23 +64,29 @@ function main() {
     return;
   }
 
-  const kinds = { registry: [], classifier: [], none: [] };
+  // Порядок — как в карточке: код записей реестра, по номеру CAS из ECICS,
+  // по названию в классификаторе.
+  const kinds = { registry: [], cas: [], classifier: [], none: [] };
   for (const name of names) {
     const r = lookupProduct(name);
     if (r.placeholder) continue;
     if (r.found && r.tnved) kinds.registry.push(name);
+    else if (r.tnvedCas) kinds.cas.push(`${name} → ${r.tnvedCas.code} ${r.tnvedCas.name}`);
     else if (r.tnvedCategory) kinds.classifier.push(`${name} → ${r.tnvedCategory.code} ${r.tnvedCategory.name}`);
     else kinds.none.push(`${name}${r.found ? " (в реестре есть, кода у записей нет)" : ""}`);
   }
-  const shown = kinds.registry.length + kinds.classifier.length + kinds.none.length;
+  const shown = kinds.registry.length + kinds.cas.length + kinds.classifier.length + kinds.none.length;
 
   console.log(
     `\n── Продукты ${onlyGraph ? `графа «${onlyGraph}»` : `графов (${graphs.length})`}: ${shown} названий ──`,
   );
   console.log(`  ТН ВЭД из записей реестра:   ${String(kinds.registry.length).padStart(5)}  ${pct(kinds.registry.length, shown)}`);
+  console.log(`  по номеру CAS (ECICS):       ${String(kinds.cas.length).padStart(5)}  ${pct(kinds.cas.length, shown)}`);
   console.log(`  по классификатору:           ${String(kinds.classifier.length).padStart(5)}  ${pct(kinds.classifier.length, shown)}`);
   console.log(`  кода нет:                    ${String(kinds.none.length).padStart(5)}  ${pct(kinds.none.length, shown)}`);
 
+  console.log("\n── По номеру CAS из ECICS (проверьте глазами) ──");
+  for (const line of kinds.cas.sort((x, y) => x.localeCompare(y, "ru"))) console.log(`  ${line}`);
   console.log("\n── По классификатору (проверьте глазами) ──");
   for (const line of kinds.classifier.sort((x, y) => x.localeCompare(y, "ru"))) console.log(`  ${line}`);
   if (wantList) {
