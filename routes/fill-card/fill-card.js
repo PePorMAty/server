@@ -22,6 +22,7 @@ const {
 } = require("./utils/card");
 
 const { explainBadAnswer } = require("../sources/utils");
+const { knownTransformationData } = require("./utils/knownData");
 
 /** Что ждали от модели — для текста ошибки. */
 const CARD_ANSWER = { acc: "карточку", gen: "карточки" };
@@ -68,6 +69,13 @@ router.post("/gpt/fill-card", async (req, res) => {
     }
 
     const keys = cardKeys(nodeType, selectedFields);
+    // Материальный баланс преобразования — по данным ИТС и готовому расчёту
+    // баланса, а не по памяти модели (utils/knownData.js). По готовому тексту
+    // (rawText) граф не известен — данных не подбираем.
+    const known =
+      nodeType === "transformation" && keys.includes("material_balance") && !rawText
+        ? knownTransformationData(nodeObj, chainObj)
+        : null;
     // Формат ответа дописываем к любому промпту, и к правленому в интерфейсе
     // тоже: сам промпт описывает поля в виде «Поле: …», и без этой приписки
     // модели, не держащие схему, отвечали текстом.
@@ -75,8 +83,11 @@ router.post("/gpt/fill-card", async (req, res) => {
       customSystemPrompt
         ? String(customSystemPrompt)
         : buildFillCardSystemPrompt({ nodeType, productName })
-    }\n\n${formatInstruction(nodeType, keys)}`;
-    const userPrompt = buildFillCardUserPrompt({ nodeType, inputText });
+    }\n\n${formatInstruction(nodeType, keys)}${known ? `\n\n${known.instruction}` : ""}`;
+    const userPrompt = buildFillCardUserPrompt({
+      nodeType,
+      inputText: known?.block ? `${inputText}\n\n${known.block}` : inputText,
+    });
     const useWebSearch = !!req.body?.useWebSearch;
 
     const openaiResp = await callOpenAIFillCard({
@@ -129,6 +140,8 @@ router.post("/gpt/fill-card", async (req, res) => {
       product: productName || null,
       card_kind: nodeType, // ✅ UI поймёт что это за карточка
       productCard,
+      // Необязательное: дали ли модели данные ИТС / готового расчёта баланса.
+      ...(known ? { knownData: !!known.block } : {}),
       ai: openaiResp?.ai,
       took_ms: Date.now() - t0,
     });
