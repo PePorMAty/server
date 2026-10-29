@@ -334,6 +334,18 @@ function tnvedName(code) {
   return null;
 }
 
+/**
+ * Конечные позиции ТН ВЭД под кодом: «291719» → «291719100», «291719900».
+ * Конечная — та, под которой в номенклатуре ничего нет (9–10 знаков).
+ */
+function tnvedLeavesUnder(prefix) {
+  if (tnved === null) tnved = loadTnved();
+  const p = String(prefix ?? "").replace(/\D+/g, "");
+  if (p.length < 4) return [];
+  const under = [...tnved.keys()].filter((c) => c.startsWith(p));
+  return under.filter((c) => !under.some((d) => d !== c && d.startsWith(c)));
+}
+
 /** Код ТН ВЭД цифрами — как его пишут: «2933710000» → «2933 71 000 0». */
 function formatTnved(code) {
   const d = String(code ?? "").replace(/\D+/g, "");
@@ -534,6 +546,7 @@ module.exports = {
   okpd2NameExact,
   okpd2Retired,
   formatTnved,
+  tnvedLeavesUnder,
   tnvedName,
   tnvedSubstancePositions,
   tnvedDomainPositions,

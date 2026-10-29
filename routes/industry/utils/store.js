@@ -36,6 +36,7 @@ const {
 } = require("./classifiers");
 const { identify, spellingsOf } = require("./synonyms");
 const { tnvedByName } = require("./tnvedByName");
+const { tnvedByCas } = require("./ecics");
 
 const DEFAULT_DB_PATH = path.resolve(__dirname, "../../../data/gisp.sqlite");
 
@@ -459,6 +460,27 @@ function lookupProduct(rawName, opts) {
    * классификатору». Идентификатором не служит (tnvedByName.js).
    */
   const tnvedCategory = tnvedByName(rawName);
+  /**
+   * Код ТН ВЭД по номеру CAS — из таможенного реестра химических веществ ЕС
+   * (ECICS, utils/ecics.js). Точнее, чем по названию: это классификация
+   * таможни, и он находит вещества из «прочих» позиций, до которых по
+   * названию не дойти. Карточка ставит его после кода из записей реестра и
+   * перед кодом по названию. Справочно, юридической силы не имеет.
+   */
+  //
+  // Код по названию, уточняющий его, — точнее: у титана ECICS даёт товарную
+  // позицию 8108, а по названию — «8108 20 000 титан необработанный». Тогда
+  // код ECICS не нужен — карточка покажет уточнённый. Разошлись совсем
+  // («Диэтиловый эфир»: по названию 2920 90 100, по ECICS 2909 11 000) —
+  // верим ECICS.
+  const digits = (c) => String(c ?? "").replace(/\D+/g, "");
+  const byCas = known?.cas ? tnvedByCas(known.cas) : null;
+  const refines =
+    byCas &&
+    tnvedCategory &&
+    digits(tnvedCategory.code).length > digits(byCas.code).length &&
+    digits(tnvedCategory.code).startsWith(digits(byCas.code));
+  const tnvedCas = refines ? null : byCas;
 
   // Лестницу проходим по написаниям целиком: сперва все точные, потом все
   // мягкие. Иначе «похоже» по первому написанию побеждало бы «точно» по
@@ -821,6 +843,7 @@ function lookupProduct(rawName, opts) {
       cas: known?.cas ?? null,
       category,
       tnvedCategory,
+      tnvedCas,
     };
   } else if (!loose && !confirmed.length) {
     // Записи нашлись, но ни одна не про этот продукт. Разбор сохраняем: без
@@ -832,6 +855,7 @@ function lookupProduct(rawName, opts) {
       cas: known?.cas ?? null,
       category,
       tnvedCategory,
+      tnvedCas,
       weak: {
         match,
         entryCount: kept.length,
@@ -859,6 +883,7 @@ function lookupProduct(rawName, opts) {
       cas: known?.cas ?? null,
       category,
       tnvedCategory,
+      tnvedCas,
       weak: {
         match,
         entryCount: kept.length,
@@ -888,6 +913,7 @@ function lookupProduct(rawName, opts) {
       // иначе производители, регионы и ОКПД2 приехали бы из отброшенных.
       ...summarize(confirmed, spellings),
       tnvedCategory,
+      tnvedCas,
       found: true,
       match,
       sharedWords: picked.shared,
