@@ -201,7 +201,7 @@ products_fts  -- fts5(name_stem, content='', tokenize='unicode61 …')
 Минус: наполняется наугад относительно того, что реально встречается.
 
 **2. Wikidata** — `scripts/fetch-wikidata-synonyms.js` →
-`reference/synonyms-wikidata.txt`, 65 строк.
+`reference/synonyms-wikidata.txt`, 71 строка.
 
 ```
 node scripts/fetch-wikidata-synonyms.js --missing-only --dry-run --all
