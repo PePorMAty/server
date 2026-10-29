@@ -14,6 +14,7 @@
 const { checkLines } = require("./sources");
 const { localChecks } = require("./local");
 const { foundText } = require("./websearch");
+const { refOf } = require("./parse");
 
 /** Сырьё и выбранные продукты — то, чьи массы нужны человеку. Опорное задано им самим. */
 const wanted = (refs) => refs.filter((r) => r.role === "target" || r.role === "input");
@@ -22,6 +23,45 @@ const wanted = (refs) => refs.filter((r) => r.role === "target" || r.role === "i
 function missingRefs(parsed, refs) {
   const mass = new Map(parsed.products.filter((p) => p.ref).map((p) => [p.ref, p.massKg]));
   return wanted(refs).filter((r) => !mass.get(r.ref));
+}
+
+/** Допуск расхождения масс одного вещества в двух таблицах ответа. */
+const MISMATCH_TOLERANCE = 0.05;
+
+const plainName = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/\s*\([^)]*\)/g, "")
+    .replace(/[«»"'*]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Диапазоны масс не сходятся и с допуском. */
+const apart = (a, b) =>
+  b.max < a.min * (1 - MISMATCH_TOLERANCE) || b.min > a.max * (1 + MISMATCH_TOLERANCE);
+
+/**
+ * Вещества, чьи массы в «Результатах по продуктам» и «Общем балансе
+ * участка» расходятся. Интерфейс берёт массы из первой таблицы, а замкнутый
+ * баланс модель сводит во второй. Расчёт капролактама 2026-10-29: водород
+ * 1410 кг (тысячи м³, прочитанные как кг) против 134 и аммиак 948 (норма на
+ * тонну продукта) против 1023 (пересчёт на базис) — сайт показал сырьё
+ * «≈127 %». Поток узнаём по обозначению (P3) в названии, иначе по названию.
+ */
+function mismatches(parsed) {
+  const flows = (parsed.flows || []).filter((f) => f.massKg);
+  return (parsed.products || [])
+    .filter((p) => p.massKg)
+    .map((p) => {
+      const f =
+        (p.ref && flows.find((x) => refOf(x.name, "P") === p.ref)) ||
+        flows.find((x) => plainName(x.name) === plainName(p.name));
+      return f && apart(p.massKg, f.massKg)
+        ? { ref: p.ref, name: p.name, products: p.massText, flows: f.massText }
+        : null;
+    })
+    .filter(Boolean);
 }
 
 /** Сколько из нужных масс в ответе есть: второй ответ не должен быть хуже первого. */
@@ -35,7 +75,7 @@ const describe = (r) =>
  * failed — незагрузившиеся из них, missing — refs без массы, found —
  * найденное сервером в интернете и подтверждённое ([{ source, check }]).
  */
-function followUpText({ transformation, local = [], checks = [], failed = [], missing = [], found = [] }) {
+function followUpText({ transformation, local = [], checks = [], failed = [], missing = [], found = [], mismatched = [], basis = "" }) {
   const lines = [];
   if (checks.some((c) => c.status !== "local")) {
     lines.push("# Результаты серверной проверки источников", ...localChecks(local), ...checkLines(checks), "");
@@ -58,8 +98,18 @@ function followUpText({ transformation, local = [], checks = [], failed = [], mi
       "",
     );
   }
+  if (mismatched.length) {
+    lines.push(
+      "# Расхождение таблиц",
+      `У одних и тех же веществ в «Результатах по продуктам» и в «Общем балансе участка» разные массы: ${mismatched
+        .map((m) => `${m.ref ? `${m.ref} ` : ""}«${m.name}» — ${m.products} и ${m.flows}`)
+        .join("; ")}.`,
+      `Обе таблицы — на один и тот же базис${basis ? ` (${basis})` : ""}, и массы одного вещества в них должны совпадать. Перепроверь единицы (объём газа переведи в массу по плотности и укажи её в основании) и пересчёт удельных норм «на тонну продукта» на заданный базис, затем согласуй обе таблицы и итоги баланса.`,
+      "",
+    );
+  }
   lines.push("Верни ответ заново, целиком, по тому же шаблону.");
   return lines.join("\n");
 }
 
-module.exports = { missingRefs, filledCount, followUpText };
+module.exports = { missingRefs, filledCount, mismatches, followUpText };

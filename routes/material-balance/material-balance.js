@@ -44,7 +44,7 @@ const { productKey } = require("../local-sources/utils/query");
 const { parseAnswer, cleanAnswer } = require("./utils/parse");
 const { findLocalSources, localBlock, localChecks, localKey } = require("./utils/local");
 const { checkSources, applyChecks } = require("./utils/sources");
-const { missingRefs, filledCount, followUpText } = require("./utils/followup");
+const { missingRefs, filledCount, mismatches, followUpText } = require("./utils/followup");
 const { searchMissing } = require("./utils/websearch");
 const store = require("./utils/store");
 const jobs = require("./utils/jobs");
@@ -236,15 +236,18 @@ const failedText = (n) =>
   `${n} ${plural(n, "источник не загрузился", "источника не загрузились", "источников не загрузились")}`;
 
 /** Этап второго запроса: с чем модель пересчитывает. */
-function retryStage(failedCount, missing, confirmed) {
+function retryStage(failedCount, missing, confirmed, mismatched = []) {
   const found = missing.length
     ? confirmed
       ? `найдено в интернете и подтверждено: ${confirmed} ${plural(confirmed, "источник", "источника", "источников")}`
       : `для ${namesText(missing)} подтверждённых данных в интернете не нашлось`
     : null;
+  const apart = mismatched.length
+    ? `в двух таблицах ответа разные массы: ${mismatched.map((m) => m.name).join(", ")}`
+    : null;
   const what = failedCount
-    ? `${failedText(failedCount)}${found ? `; ${found}` : ""} — модель ищет замену и пересчитывает`
-    : `${found} — модель пересчитывает`;
+    ? `${[failedText(failedCount), found, apart].filter(Boolean).join("; ")} — модель ищет замену и пересчитывает`
+    : `${[found, apart].filter(Boolean).join("; ")} — модель пересчитывает`;
   return what.replace(/^./, (c) => c.toUpperCase());
 }
 
@@ -309,8 +312,16 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
     let retry = null;
     const failed = checks.filter((c) => c.status === "failed");
     const missing = missingRefs(parsed, refs);
-    if ((failed.length || missing.length) && RETRY) {
-      retry = { failed: failed.length, missing: missing.map((r) => r.name), used: false };
+    // Таблицы ответа противоречат друг другу — тот же второй запрос: иначе
+    // сайт покажет массы из одной, а сходящийся баланс останется в другой.
+    const mismatched = mismatches(parsed);
+    if ((failed.length || missing.length || mismatched.length) && RETRY) {
+      retry = {
+        failed: failed.length,
+        missing: missing.map((r) => r.name),
+        ...(mismatched.length ? { mismatched: mismatched.map((m) => m.name) } : {}),
+        used: false,
+      };
       // Недостающее ищет сам сервер — коротким поисковым запросом; найденное
       // загружает и проверяет, подтверждённое отдаёт модели (websearch.js).
       let found = [];
@@ -335,7 +346,8 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
           retry.search = { sources: 0, confirmed: 0, error: e.message };
         }
       }
-      setStage(retryStage(failed.length, missing, found.length));
+      setStage(retryStage(failed.length, missing, found.length, mismatched));
+      const basisRef = refs.find((r) => r.role === "basis");
       const followUp = followUpText({
         transformation: input.transformation.name,
         local,
@@ -343,6 +355,8 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
         failed,
         missing,
         found,
+        mismatched,
+        basis: `${input.basis.amount} ${input.basis.unit}${basisRef ? ` «${basisRef.name}»` : ""}`,
       });
       try {
         const second = await ask(
@@ -356,9 +370,12 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
           { signal },
         );
         const parsed2 = parseAnswer(second.answer, refs);
-        // Масс стало меньше — второй ответ хуже: остаётся первый, а его
-        // неподтверждённые источники так и помечены.
-        const worse = filledCount(parsed2, refs) < filledCount(parsed, refs);
+        // Масс стало меньше или расхождений таблиц больше — второй ответ
+        // хуже: остаётся первый, а его неподтверждённые источники так и
+        // помечены.
+        const worse =
+          filledCount(parsed2, refs) < filledCount(parsed, refs) ||
+          mismatches(parsed2).length > mismatched.length;
         if (parsed2.status !== "unknown" && checkable(parsed2) && !worse) {
           const previous = new Map([...checks, ...found.map((f) => f.check)].map((c) => [c.url, c]));
           checks = parsed2.sources.length
