@@ -201,6 +201,15 @@ async function resolveDest(pdf, dest) {
   return { page: index + 1, y: typeof y === "number" ? y : null };
 }
 
+/**
+ * Закладка — имя файла, а не заголовок: так Acrobat подписывает части
+ * склеенного документа («‎C:\Users\…\Поправки итс 31.pdf‎»).
+ */
+function isFileBookmark(title) {
+  const t = String(title || "").replace(/[\u200e\u200f\u202a-\u202e]/g, "").trim();
+  return /\.(pdf|docx?|rtf|odt)$/i.test(t) || /^[a-z]:\\/i.test(t) || /^\\\\|^\/(?:home|users)\//i.test(t);
+}
+
 /** Закладки PDF плоским списком: заголовок, уровень, страница, высота. */
 async function tocFromOutline(pdf) {
   const outline = await pdf.getOutline().catch(() => null);
@@ -305,7 +314,12 @@ async function extractPdf(buf) {
     const cover = pages[0] ? pages[0].lines.map((l) => ({ ...l })) : [];
 
     // Содержание — до срезания колонтитулов: строки оглавления нужны целиком.
-    const outline = await tocFromOutline(pdf);
+    // Закладки склеенного PDF — имена исходных файлов («C:\…\ИТС 31-2021
+    // (8).pdf», «Поправки итс 31.pdf»): это не разметка. Поверив им, ИТС 31
+    // стал двумя «разделами» по 12 и 582 страницы. Меньше трёх настоящих
+    // закладок — ищем содержание со ссылками или заголовки в тексте.
+    const marks = (await tocFromOutline(pdf)).filter((e) => !isFileBookmark(e.raw));
+    const outline = marks.length >= 3 ? marks : [];
     const links = outline.length ? [] : await tocFromLinks(pdf, pages);
     const toc = outline.length
       ? { kind: "outline", entries: outline }
@@ -334,4 +348,4 @@ async function extractPdf(buf) {
   }
 }
 
-module.exports = { extractPdf, isPdf, cleanPageText, groupLines };
+module.exports = { extractPdf, isPdf, cleanPageText, groupLines, isFileBookmark };

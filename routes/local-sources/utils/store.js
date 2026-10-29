@@ -3,16 +3,17 @@
 // База источников на сервере.
 //
 // Источник — не файл, а запись: раздел документа («ИТС 18 · 2.1 Производство
-// этилена · стр. 14–42») или источник, найденный моделью в интернете. Файл —
-// только способ пополнить базу: загруженный PDF делится на разделы, модель
+// этилена · стр. 14–42»). Файл — только способ пополнить базу: загруженный
+// PDF делится на разделы, модель
 // разбирает каждый — что производят, из какого сырья, что получается попутно,
 // — и раздел становится источником для этих продуктов:
 //   «вверх» (из чего производят X) — раздел, где X производят;
 //   «вниз» (что производят из X)   — раздел, где X идёт сырьём.
 //
 // Лежит в data/local-sources/ (в git не попадает, как и реестр ГИСП):
-//   sources.sqlite — документы, разделы, их связи с продуктами и
-//                    сохранённые веб-источники;
+//   sources.sqlite — документы, разделы, их связи с продуктами (и таблица
+//                    web_sources: найденное моделью раньше — с 2026-10-29
+//                    не пишется и не отдаётся, см. purgeWebSources);
 //   files/<sha256>.pdf — сами документы, чтобы открыть раздел на странице.
 
 const fs = require("fs");
@@ -22,7 +23,7 @@ const crypto = require("crypto");
 const { stemName } = require("../../industry/utils/normalize");
 const { identify, spellingsOf } = require("../../industry/utils/synonyms");
 const { extractPdf } = require("./pdf");
-const { buildUnits, documentTitles, productsFromTitle } = require("./structure");
+const { buildUnits, documentTitles, isServiceSection, productsFromTitle } = require("./structure");
 const { productKey } = require("./query");
 const { isProspectiveSection } = require("./prospective");
 
@@ -187,6 +188,29 @@ function migrate(conn) {
       }
     })();
   }
+
+  // Служебные разделы (structure.js, isServiceSection) — тоже не источник:
+  // записанные раньше удаляем один раз, новые writeSections не записывает.
+  const serviceSwept = conn.prepare("SELECT value FROM meta WHERE name = 'service_removed'").get();
+  if (!serviceSwept) {
+    conn.transaction(() => {
+      const ids = conn
+        .prepare("SELECT id, path, title, full_title FROM sections")
+        .all()
+        .filter((r) => isServiceSection({ title: r.title, fullTitle: r.full_title, path: r.path }))
+        .map((r) => r.id);
+      const dropLinks = conn.prepare("DELETE FROM section_products WHERE section_id = ?");
+      const dropSection = conn.prepare("DELETE FROM sections WHERE id = ?");
+      for (const id of ids) {
+        dropLinks.run(id);
+        dropSection.run(id);
+      }
+      conn
+        .prepare("INSERT OR REPLACE INTO meta (name, value) VALUES ('service_removed', ?)")
+        .run(String(ids.length));
+      if (ids.length) console.log(`[local-sources] удалены служебные разделы: ${ids.length}`);
+    })();
+  }
 }
 
 /** Открыть базу (создать при первом обращении). */
@@ -334,7 +358,53 @@ function linkSection(conn, sectionId, names, role, origin) {
 // Документы
 // ---------------------------------------------------------------------------
 
-function docRow(d) {
+/**
+ * Издание справочника по короткому названию: «ИТС 18—2023» → { series:
+ * "итс 18", year: 2023 }; черновик «ИТС 18—202_» → year: null. Без года
+ * («НДТ 03») — null: сравнивать не с чем.
+ */
+function editionOf(shortTitle) {
+  const m = /^(.*?\S)\s*[—–-]\s*(\d{2,4}_*)\s*$/.exec(String(shortTitle || "").trim());
+  if (!m) return null;
+  return {
+    series: m[1].toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " "),
+    year: /^\d{4}$/.test(m[2]) ? Number(m[2]) : null,
+  };
+}
+
+/**
+ * Документы, вместо которых в базе есть издание новее того же справочника:
+ * { id → { id, title } замены }. Разделы заменённого не отдаются: черновик
+ * «ИТС 18—202_» и «ИТС 18—2023» описывают одно, и модель считала их двумя
+ * независимыми подтверждениями (проверка базы 2026-10-29).
+ *
+ * Новее — с большим годом; если год есть не у обоих (черновик «202_»), —
+ * загруженный позже.
+ */
+function supersededDocs(conn = getDb()) {
+  const bySeries = new Map();
+  for (const d of conn.prepare("SELECT id, title, short_title, added_at FROM documents").all()) {
+    const e = editionOf(d.short_title);
+    if (!e) continue;
+    if (!bySeries.has(e.series)) bySeries.set(e.series, []);
+    bySeries.get(e.series).push({ d, year: e.year });
+  }
+  const newer = (a, b) =>
+    a.year && b.year && a.year !== b.year ? a.year > b.year : a.d.added_at > b.d.added_at;
+  const out = new Map();
+  for (const list of bySeries.values()) {
+    if (list.length < 2) continue;
+    const current = list.reduce((best, x) => (newer(x, best) ? x : best));
+    for (const x of list) {
+      if (x !== current) {
+        out.set(x.d.id, { id: current.d.id, title: current.d.short_title || current.d.title });
+      }
+    }
+  }
+  return out;
+}
+
+function docRow(d, superseded = new Map()) {
   return {
     id: d.id,
     fileName: d.file_name,
@@ -348,6 +418,8 @@ function docRow(d) {
     addedVia: d.added_via,
     structure: d.structure || null,
     model: d.model || null,
+    // Есть издание новее (supersededDocs): разделы этого не отдаются.
+    supersededBy: superseded.get(d.id) ?? null,
     sections: {
       total: d.s_total ?? 0,
       done: d.s_done ?? 0,
@@ -377,6 +449,8 @@ function writeSections(conn, docId, units) {
     // Перспективные технологии — не источник (prospective.js): не записываем
     // и, значит, не разбираем.
     if (isProspectiveSection(u.path, u.fullTitle || u.title)) continue;
+    // Служебные разделы — краткое содержание, обзор отрасли, приложения.
+    if (isServiceSection(u)) continue;
     const id = insert.run(
       docId,
       u.ord,
@@ -516,15 +590,75 @@ async function reparseLegacyDocuments() {
   return n;
 }
 
+/**
+ * Разобрать документ на разделы заново из сохранённого файла — после правки
+ * разметки (ИТС 31: склеенный PDF, закладки — имена файлов; НДТ 03: пункты
+ * «Производственных процессов»). Раздел, который совпал с прежним (тот же
+ * заголовок и текст), сохраняет разбор моделью; новые встают в очередь — по
+ * запросу к модели на раздел. Возвращает { before, after, kept, structure }.
+ */
+async function reparseDocument(id) {
+  const conn = getDb();
+  const d = conn.prepare("SELECT * FROM documents WHERE id = ?").get(id);
+  if (!d) return null;
+  const prev = conn
+    .prepare(
+      `SELECT id, title, text, status, summary, io, extracted, model, decoded_at
+       FROM sections WHERE doc_id = ?`,
+    )
+    .all(id);
+  const prevLinks = conn
+    .prepare(
+      `SELECT section_id, label, role FROM section_products
+       WHERE origin = 'model' AND section_id IN (SELECT id FROM sections WHERE doc_id = ?)
+       ORDER BY rowid`,
+    )
+    .all(id);
+  const buf = fs.readFileSync(filePath(d.sha256));
+  const { structure, offset, units, titles } = await parseDocument(buf, d.file_name);
+  let kept = 0;
+  conn.transaction(() => {
+    conn
+      .prepare(
+        "DELETE FROM section_products WHERE section_id IN (SELECT id FROM sections WHERE doc_id = ?)",
+      )
+      .run(id);
+    conn
+      .prepare(
+        `UPDATE documents SET title = ?, short_title = ?, structure = ?, page_offset = ?, parsed_at = ?
+         WHERE id = ?`,
+      )
+      .run(titles.title, titles.short, structure, offset, new Date().toISOString(), id);
+    writeSections(conn, id, units);
+    const keep = conn.prepare(
+      `UPDATE sections SET status = 'done', summary = ?, io = ?, extracted = ?, model = ?, decoded_at = ?
+       WHERE id = ?`,
+    );
+    for (const f of conn.prepare("SELECT id, title, text FROM sections WHERE doc_id = ?").all(id)) {
+      const old = prev.find((p) => p.status === "done" && p.title === f.title && p.text === f.text);
+      if (!old) continue;
+      keep.run(old.summary, old.io, old.extracted, old.model, old.decoded_at, f.id);
+      for (const l of prevLinks) if (l.section_id === old.id) linkSection(conn, f.id, [l.label], l.role, "model");
+      kept++;
+    }
+  })();
+  const after = conn.prepare("SELECT COUNT(*) AS n FROM sections WHERE doc_id = ?").get(id).n;
+  return { before: prev.length, after, kept, structure };
+}
+
 /** Все документы, новые сверху, со счётом разделов по состоянию разбора. */
 function listDocuments() {
-  return getDb().prepare(`${DOC_SELECT} ORDER BY d.id DESC`).all().map(docRow);
+  const superseded = supersededDocs();
+  return getDb()
+    .prepare(`${DOC_SELECT} ORDER BY d.id DESC`)
+    .all()
+    .map((d) => docRow(d, superseded));
 }
 
 /** Документ по id с путём к файлу, или null. */
 function getDocument(id) {
   const d = getDb().prepare(`${DOC_SELECT} WHERE d.id = ?`).get(id);
-  return d ? { ...docRow(d), filePath: filePath(d.sha256) } : null;
+  return d ? { ...docRow(d, supersededDocs()), filePath: filePath(d.sha256) } : null;
 }
 
 /** Удалить документ, его разделы и файл. Возвращает true, если было что удалять. */
@@ -846,15 +980,31 @@ function sectionSource(r) {
  */
 function sectionRows(keys, direction, limit = 0) {
   if (!keys.length) return [];
+  const conn = getDb();
   const dir = direction === "up" ? "up" : "down";
   const marks = keys.map(() => "?").join(",");
-  // «Вниз» — только где продукт сырьё, а не там, где его самого производят.
+  // «Вниз» — где продукт сырьё, а не там, где его самого производят. Кроме
+  // совмещённого производства: раздел «10.1 Поликарбонаты» описывает и
+  // бисфенол А, и поликарбонат из него — для бисфенола А он и «вверх», и
+  // «вниз». Признак — у раздела есть другой целевой продукт: название, ни
+  // один ключ которого не наш.
   const notProduced =
     dir === "down"
-      ? `AND s.id NOT IN (SELECT section_id FROM section_products
-                          WHERE direction = 'up' AND role = 'product' AND key IN (${marks}))`
+      ? `AND s.id NOT IN (
+           SELECT p.section_id FROM section_products p
+           WHERE p.direction = 'up' AND p.role = 'product' AND p.key IN (${marks})
+             AND NOT EXISTS (
+               SELECT 1 FROM section_products o
+               WHERE o.section_id = p.section_id AND o.direction = 'up' AND o.role = 'product'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM section_products o2
+                   WHERE o2.section_id = o.section_id AND o2.label = o.label
+                     AND o2.key IN (${marks}))))`
       : "";
-  const rows = getDb()
+  // Издание, вместо которого есть новее, не отдаём (supersededDocs).
+  const old = [...supersededDocs(conn).keys()];
+  const notOld = old.length ? `AND s.doc_id NOT IN (${old.map(() => "?").join(",")})` : "";
+  const rows = conn
     .prepare(
       `SELECT s.*, d.title AS doc_title, d.short_title, d.page_offset,
               MIN(CASE sp.role WHEN 'product' THEN 0 WHEN 'byproduct' THEN 1
@@ -863,11 +1013,11 @@ function sectionRows(keys, direction, limit = 0) {
        FROM section_products sp
        JOIN sections s ON s.id = sp.section_id
        JOIN documents d ON d.id = s.doc_id
-       WHERE sp.direction = ? AND sp.key IN (${marks}) ${notProduced}
+       WHERE sp.direction = ? AND sp.key IN (${marks}) ${notProduced} ${notOld}
        GROUP BY s.id
        ORDER BY rank, by_model DESC, d.id, s.ord`,
     )
-    .all(dir, ...keys, ...(dir === "down" ? keys : []));
+    .all(dir, ...keys, ...(dir === "down" ? [...keys, ...keys] : []), ...old);
   const want = new Set(keys);
   const named = (r) =>
     productsFromTitle(r.title).some((p) => nameKeys(p).some((k) => want.has(k)));
@@ -948,40 +1098,20 @@ function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3 } 
 }
 
 /**
- * Сколько источников у продукта: разделов документов (всего и по
- * направлениям) и сохранённых веб-источников. Для всего графа разом — как
- * опознание продуктов.
+ * Сколько разделов документов у продукта — всего и по направлениям; те же,
+ * что отдаст sourcesFor (без лимита). Для всего графа разом — как опознание
+ * продуктов. web — всегда нули: найденное моделью в базе больше не хранится
+ * (поле оставлено для клиента, ещё не обновлённого).
  */
 function countsFor(productName) {
-  const conn = getDb();
   const keys = productKeys(productName);
-  const localDir = { up: 0, down: 0 };
-  let local = 0;
-  if (keys.length) {
-    const marks = keys.map(() => "?").join(",");
-    for (const r of conn
-      .prepare(
-        `SELECT direction, COUNT(DISTINCT section_id) AS n FROM section_products
-         WHERE key IN (${marks}) GROUP BY direction`,
-      )
-      .all(...keys)) {
-      localDir[r.direction] = r.n;
-    }
-    local = conn
-      .prepare(
-        `SELECT COUNT(DISTINCT section_id) AS n FROM section_products WHERE key IN (${marks})`,
-      )
-      .get(...keys).n;
-  }
-  const web = { up: 0, down: 0 };
-  for (const r of conn
-    .prepare(
-      "SELECT direction, COUNT(*) AS n FROM web_sources WHERE product_key = ? GROUP BY direction",
-    )
-    .all(productKey(productName))) {
-    web[r.direction] = r.n;
-  }
-  return { local, localDir, web };
+  const up = sectionRows(keys, "up");
+  const down = sectionRows(keys, "down");
+  return {
+    local: new Set([...up, ...down].map((r) => r.id)).size,
+    localDir: { up: up.length, down: down.length },
+    web: { up: 0, down: 0 },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -989,88 +1119,18 @@ function countsFor(productName) {
 // ---------------------------------------------------------------------------
 
 /**
- * Сохранить источники, найденные моделью для продукта и направления.
- *
- * Повторно найденный URL обновляется (текст, модель, дата), новые
- * дописываются. Ошибку базы не пробрасываем: поиск уже удался, и
- * пользователь должен получить свои источники.
+ * Найденное моделью в интернете в базе больше не хранится (2026-10-29): база
+ * — только документы, загруженные людьми. Раньше каждый поиск через модель
+ * дописывал найденное в web_sources, и оно предлагалось потом «из базы» —
+ * без проверки, что страница есть (попадались выдуманные адреса). Новые
+ * записи не пишутся, старые не отдаются; удалить их — эта функция (скрипт
+ * import-pdf.js --purge-web). dryRun — только посчитать.
  */
-function saveWebSources(productName, direction, items, model) {
-  if (!Array.isArray(items) || !items.length) return 0;
-  try {
-    const conn = getDb();
-    const key = productKey(productName);
-    const stmt = conn.prepare(
-      `INSERT INTO web_sources (product_key, product_label, direction, url, title, access_hint,
-         technology_description, inputs_outputs_hint, evidence_snippets, model, found_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (product_key, direction, url) DO UPDATE SET
-         product_label = excluded.product_label,
-         title = excluded.title,
-         access_hint = excluded.access_hint,
-         technology_description = excluded.technology_description,
-         inputs_outputs_hint = excluded.inputs_outputs_hint,
-         evidence_snippets = excluded.evidence_snippets,
-         model = excluded.model,
-         found_at = excluded.found_at`,
-    );
-    const now = new Date().toISOString();
-    let saved = 0;
-    conn.transaction(() => {
-      for (const it of items) {
-        const url = String(it?.url || "").trim();
-        if (!/^https?:\/\//i.test(url)) continue;
-        stmt.run(
-          key,
-          String(productName),
-          direction === "up" ? "up" : "down",
-          url,
-          String(it.title || ""),
-          String(it.access_hint || ""),
-          String(it.technology_description || ""),
-          JSON.stringify(Array.isArray(it.inputs_outputs_hint) ? it.inputs_outputs_hint : []),
-          JSON.stringify(Array.isArray(it.evidence_snippets) ? it.evidence_snippets : []),
-          model || null,
-          now,
-        );
-        saved++;
-      }
-    })();
-    return saved;
-  } catch (e) {
-    console.error(`[local-sources] сохранение веб-источников «${productName}»: ${e.message}`);
-    return 0;
-  }
-}
-
-/**
- * Сохранённые веб-источники продукта в направлении: свежие поиски первыми,
- * внутри одного поиска — в том порядке, в каком их дала модель.
- */
-function webSourcesFor(productName, direction) {
-  return getDb()
-    .prepare(
-      `SELECT * FROM web_sources WHERE product_key = ? AND direction = ?
-       ORDER BY found_at DESC, id ASC`,
-    )
-    .all(productKey(productName), direction === "up" ? "up" : "down")
-    .map(webSource);
-}
-
-function webSource(r) {
-  return {
-    origin: "web",
-    title: r.title,
-    url: r.url,
-    access_hint: r.access_hint,
-    technology_description: r.technology_description,
-    inputs_outputs_hint: parseList(r.inputs_outputs_hint),
-    evidence_snippets: parseList(r.evidence_snippets),
-    savedAt: r.found_at,
-    model: r.model || undefined,
-    /** Для какого продукта графа модель искала («ИПБ» у «Кумола»). */
-    product: r.product_label,
-  };
+function purgeWebSources({ dryRun = false } = {}) {
+  const conn = getDb();
+  const n = conn.prepare("SELECT COUNT(*) AS n FROM web_sources").get().n;
+  if (!dryRun && n) conn.prepare("DELETE FROM web_sources").run();
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,10 +1184,15 @@ function casing(label) {
  */
 function listProducts(graphNames = []) {
   const conn = getDb();
+  // Разделы заменённых изданий (supersededDocs) — не в счёт, как и в sourcesFor.
+  const old = new Set(supersededDocs(conn).keys());
   const links = conn
-    .prepare("SELECT section_id, key, label, direction, role, origin FROM section_products")
-    .all();
-  const webRows = conn.prepare("SELECT product_label, direction FROM web_sources").all();
+    .prepare(
+      `SELECT sp.section_id, sp.key, sp.label, sp.direction, sp.role, sp.origin, s.doc_id
+       FROM section_products sp JOIN sections s ON s.id = sp.section_id`,
+    )
+    .all()
+    .filter((l) => !old.has(l.doc_id));
   // Разделы, где модель назвала получаемое: догадка по заголовку там уже не
   // нужна («Производство ацетатов» → «Метилацетат», «Бутилацетат»…).
   const namedByModel = new Set(
@@ -1155,11 +1220,6 @@ function listProducts(graphNames = []) {
     if (ra !== rb) parent.set(ra, rb);
   };
   for (const l of links) join(`n:${l.label}`, `k:${l.key}`);
-  const webKeys = new Map();
-  for (const w of webRows) {
-    if (!webKeys.has(w.product_label)) webKeys.set(w.product_label, nameKeys(w.product_label));
-    for (const k of webKeys.get(w.product_label)) join(`n:${w.product_label}`, `k:${k}`);
-  }
 
   const groups = new Map();
   const groupOf = (label) => {
@@ -1173,7 +1233,7 @@ function listProducts(graphNames = []) {
         down: new Set(),
         made: new Set(),
         roles: new Set(),
-        web: { up: 0, down: 0 },
+        root,
       };
       groups.set(root, g);
     }
@@ -1182,7 +1242,7 @@ function listProducts(graphNames = []) {
   const labelStat = (g, label) => {
     let c = g.labels.get(label);
     if (!c) {
-      c = { model: new Set(), title: new Set(), product: 0, web: 0 };
+      c = { model: new Set(), title: new Set(), product: 0 };
       g.labels.set(label, c);
     }
     return c;
@@ -1197,13 +1257,14 @@ function listProducts(graphNames = []) {
     c[l.origin === "model" ? "model" : "title"].add(l.section_id);
     if (l.role === "product") c.product++;
   }
-  for (const w of webRows) {
-    const keys = webKeys.get(w.product_label);
-    if (!keys.length) continue;
-    const g = groupOf(w.product_label);
-    for (const k of keys) g.keys.add(k);
-    g.web[w.direction === "up" ? "up" : "down"]++;
-    labelStat(g, w.product_label).web++;
+  // Целевые продукты раздела (группы): «вниз» засчитывается и там, где
+  // продукт производят, если раздел производит ещё что-то (совмещённое
+  // производство, как в sectionRows).
+  const targetsOf = new Map();
+  for (const l of links) {
+    if (l.direction !== "up" || l.role !== "product") continue;
+    if (!targetsOf.has(l.section_id)) targetsOf.set(l.section_id, new Set());
+    targetsOf.get(l.section_id).add(groupOf(l.label).root);
   }
 
   // Какие продукты графа каким ключам отвечают.
@@ -1218,12 +1279,11 @@ function listProducts(graphNames = []) {
   const products = [];
   let intermediates = 0;
   for (const g of groups.values()) {
-    const web = g.web.up + g.web.down;
-    if (!web && [...g.roles].every((r) => r === "intermediate")) {
+    if ([...g.roles].every((r) => r === "intermediate")) {
       intermediates++;
       continue;
     }
-    const named = [...g.labels.values()].some((c) => c.model.size || c.web);
+    const named = [...g.labels.values()].some((c) => c.model.size);
     // Только из заголовков, а модель в этих разделах назвала другое: это
     // группа веществ («ацетатов»), а не продукт.
     if (!named && [...g.up, ...g.down].every((id) => namedByModel.has(id))) continue;
@@ -1231,12 +1291,11 @@ function listProducts(graphNames = []) {
     // потом с заглавной и короче. Из заголовка («этилена») — только если
     // других нет, и тогда именем из справочника.
     const ranked = [...g.labels.entries()]
-      .filter(([, c]) => c.model.size || c.web)
+      .filter(([, c]) => c.model.size)
       .sort(
         ([a, ca], [b, cb]) =>
           cb.model.size - ca.model.size ||
           cb.product - ca.product ||
-          cb.web - ca.web ||
           casing(b) - casing(a) ||
           a.length - b.length ||
           a.localeCompare(b, "ru"),
@@ -1254,8 +1313,11 @@ function listProducts(graphNames = []) {
       names,
       keys,
       up: g.up.size,
-      down: [...g.down].filter((id) => !g.made.has(id)).length,
-      web: g.web,
+      down: [...g.down].filter(
+        (id) => !g.made.has(id) || [...(targetsOf.get(id) ?? [])].some((r) => r !== g.root),
+      ).length,
+      // Найденного моделью в базе больше нет; поле — для прежнего клиента.
+      web: { up: 0, down: 0 },
       onGraph: [...onGraph],
     });
   }
@@ -1283,24 +1345,13 @@ function sectionItem(r) {
 
 /**
  * Все источники продукта базы (его ключи — из listProducts): разделы вверх
- * и вниз и сохранённые веб-источники.
+ * и вниз. web — пустой: найденное моделью в базе больше не хранится.
  */
 function productSources(keys) {
-  const want = new Set(keys);
-  const web = { up: [], down: [] };
-  const cache = new Map();
-  for (const r of getDb()
-    .prepare("SELECT * FROM web_sources ORDER BY found_at DESC, id ASC")
-    .all()) {
-    if (!cache.has(r.product_label)) cache.set(r.product_label, nameKeys(r.product_label));
-    if (cache.get(r.product_label).some((k) => want.has(k))) {
-      web[r.direction === "up" ? "up" : "down"].push(webSource(r));
-    }
-  }
   return {
     up: sectionRows(keys, "up").map(sectionItem),
     down: sectionRows(keys, "down").map(sectionItem),
-    web,
+    web: { up: [], down: [] },
   };
 }
 
@@ -1314,6 +1365,8 @@ function stats() {
   return {
     documents: conn.prepare("SELECT COUNT(*) AS n FROM documents").get().n,
     sections: byStatus,
+    // Сколько найденного моделью ещё лежит в таблице (не отдаётся; удалить —
+    // import-pdf.js --purge-web).
     webSources: conn.prepare("SELECT COUNT(*) AS n FROM web_sources").get().n,
     dir: baseDir(),
   };
@@ -1330,6 +1383,7 @@ module.exports = {
   baseDir,
   addDocument,
   reparseLegacyDocuments,
+  reparseDocument,
   listDocuments,
   getDocument,
   deleteDocument,
@@ -1345,8 +1399,9 @@ module.exports = {
   countsFor,
   listProducts,
   productSources,
-  saveWebSources,
-  webSourcesFor,
+  purgeWebSources,
+  supersededDocs,
+  editionOf,
   productKeys,
   nameKeys,
   stats,

@@ -251,7 +251,8 @@ router.post("/local-sources/for-product", (req, res) => {
       product,
       direction,
       local: store.sourcesFor(product, direction),
-      web: store.webSourcesFor(product, direction),
+      // Найденное моделью в базе больше не хранится; поле — для прежнего клиента.
+      web: [],
     });
   } catch (e) {
     console.error("[local-sources] источники продукта:", e);

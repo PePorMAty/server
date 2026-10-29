@@ -9,7 +9,11 @@
 //   node scripts/import-pdf.js --list                    — документы и ход разбора
 //   node scripts/import-pdf.js --sections <номер>        — разделы документа и их продукты
 //   node scripts/import-pdf.js --decode <номер> [--all]  — разобрать заново: упавшие (или все) разделы
+//   node scripts/import-pdf.js --reparse <номер>         — заново разбить документ на разделы из файла
+//                                                          (после правки разметки) и разобрать их моделью
 //   node scripts/import-pdf.js --delete <номер>          — удалить документ
+//   node scripts/import-pdf.js --purge-web [--yes]       — удалить найденное моделью в интернете
+//                                                          (не отдаётся с 2026-10-29); без --yes — только счёт
 //   node scripts/import-pdf.js --find "Этилен"           — что база отдаст продукту вверх и вниз
 //   node scripts/import-pdf.js --products [запрос]       — продукты базы (как во вкладке «База источников»)
 //
@@ -158,13 +162,16 @@ function list() {
   const st = store.stats();
   const s = st.sections;
   console.log(
-    `В базе: ${st.documents} документов; разделов разобрано ${s.done || 0}, в очереди ${(s.pending || 0) + (s.working || 0)}, с ошибкой ${s.failed || 0}; веб-источников, найденных моделью: ${st.webSources}.\n${st.dir}\n`,
+    `В базе: ${st.documents} документов; разделов разобрано ${s.done || 0}, в очереди ${(s.pending || 0) + (s.working || 0)}, с ошибкой ${s.failed || 0}` +
+      (st.webSources ? `; найденного моделью (не отдаётся, --purge-web): ${st.webSources}` : "") +
+      `.\n${st.dir}\n`,
   );
   for (const d of store.listDocuments()) {
     console.log(
       `№${String(d.id).padEnd(4)} ${d.title}\n      ${d.fileName} — ${d.pages} стр., ${kb(d.bytes)}, ${d.addedAt.slice(0, 10)} (${d.addedVia === "script" ? "скрипт" : "интерфейс"})` +
         (d.textlessPages ? `, без текста: ${d.textlessPages} стр.` : "") +
-        `\n      разделов ${d.sections.total} (${STRUCTURE[d.structure] || d.structure}): разобрано ${d.sections.done}, в очереди ${d.sections.pending}, с ошибкой ${d.sections.failed}`,
+        `\n      разделов ${d.sections.total} (${STRUCTURE[d.structure] || d.structure}): разобрано ${d.sections.done}, в очереди ${d.sections.pending}, с ошибкой ${d.sections.failed}` +
+        (d.supersededBy ? `\n      не используется: есть издание новее — №${d.supersededBy.id} ${d.supersededBy.title}` : ""),
     );
   }
 }
@@ -185,13 +192,11 @@ function sections(id) {
 function find(product) {
   for (const dir of ["up", "down"]) {
     const local = store.sourcesFor(product, dir);
-    const web = store.webSourcesFor(product, dir);
-    console.log(`«${product}» ${dir === "up" ? "вверх (из чего делают)" : "вниз (что делают из него)"}: разделов ${local.length}, найдено моделью раньше ${web.length}`);
+    console.log(`«${product}» ${dir === "up" ? "вверх (из чего делают)" : "вниз (что делают из него)"}: разделов ${local.length}`);
     for (const s of local) {
       console.log(`  ${s.title} — ${s.access_hint}`);
       console.log(`    ${s.technology_description.replace(/\s+/g, " ").slice(0, 200)}…`);
     }
-    for (const s of web) console.log(`  веб: ${s.title} — ${s.url}`);
     console.log("");
   }
 }
@@ -204,10 +209,7 @@ function products(query) {
     ? all.filter((p) => [p.label, ...p.names].some((n) => n.toLowerCase().includes(q)))
     : all;
   for (const p of shown) {
-    const web = p.web.up + p.web.down;
-    console.log(
-      `${p.label}${p.names.length ? ` (${p.names.join(", ")})` : ""} — ↑${p.up} ↓${p.down}${web ? `, из интернета ${web}` : ""}`,
-    );
+    console.log(`${p.label}${p.names.length ? ` (${p.names.join(", ")})` : ""} — ↑${p.up} ↓${p.down}`);
   }
   console.log(
     `\nПродуктов: ${shown.length}${q ? ` из ${all.length}` : ""}; только промежуточных потоков, не показаны: ${hidden.intermediates}.`,
@@ -221,7 +223,7 @@ function products(query) {
         fs
           .readFileSync(__filename, "utf8")
           .split("\n")
-          .slice(2, 19)
+          .slice(2, 23)
           .map((l) => l.replace(/^\/\/ ?/, ""))
           .join("\n"),
       );
@@ -242,6 +244,25 @@ function products(query) {
         console.log(`В очередь разбора: ${n} разделов.`);
         await decodeQueue();
       }
+    } else if (flag("--reparse")) {
+      const id = Number(option("--reparse"));
+      const r = await store.reparseDocument(id);
+      if (!r) {
+        console.log(`Документа №${option("--reparse")} нет.`);
+      } else {
+        console.log(
+          `Документ №${id} разбит заново (${STRUCTURE[r.structure] || r.structure}): разделов было ${r.before}, стало ${r.after}; ` +
+            `разбор сохранён у ${r.kept}, модели разобрать ${r.after - r.kept} (по запросу на раздел).`,
+        );
+        if (!flag("--no-decode")) await decodeQueue();
+      }
+    } else if (flag("--purge-web")) {
+      const n = store.purgeWebSources({ dryRun: !flag("--yes") });
+      console.log(
+        flag("--yes")
+          ? `Удалено найденного моделью: ${n}.`
+          : `Найденного моделью в базе: ${n} (не отдаётся). Удалить: --purge-web --yes`,
+      );
     } else if (flag("--delete")) {
       const id = Number(option("--delete"));
       console.log(store.deleteDocument(id) ? `Документ №${id} удалён.` : `Документа №${option("--delete")} нет.`);
