@@ -1,0 +1,182 @@
+{
+ "note": "Все источники — про поликарбонат из дифенилкарбоната и бисфенола А с побочным фенолом. Раньше вместо названия продукта модель писала его описание.",
+ "expect": {
+  "mainOutputs": [
+   "Поликарбонат"
+  ],
+  "mainInputs": [
+   "Бисфенол А"
+  ],
+  "mainByproducts": [
+   "Фенол"
+  ]
+ },
+ "request": {
+  "productName": "Дифенилкарбонат",
+  "direction": "down",
+  "sources": [
+   {
+    "origin": "local",
+    "docId": 5,
+    "sectionId": 106,
+    "page": 425,
+    "title": "10.1 Поликарбонаты",
+    "docTitle": "ИТС 32–2022",
+    "pages": "стр. 425–439",
+    "url": "local-sources/documents/5/file?section=106#page=425",
+    "access_hint": "ИТС 32–2022, стр. 425–439",
+    "technology_description": "В разделе описаны технологии производства поликарбонатов (в том числе совместно с бисфенолом А) и самого бисфенола А. Рассмотрены два основных метода получения поликарбоната: фосгенирование дифенилолпропана (бисфенола А) в растворе метиленхлорида при 20–30 °С с последующей промывкой, осаждением полимером (метанолом или ацетоном) и сушкой; и метод межфазной поликонденсации дифенилкарбоната с бисфенолом А в расплаве при температурах до 320 °С и вакууме с использованием азота для удаления фенола.\n\nДля совместного производства описан синтез дифенилкарбоната через стадии получения этиленкарбоната из окиси этилена и диоксида углерода, затем диметилкарбоната из этиленкарбоната и метанола, и наконец дифенилкарбоната из диметилкарбоната и фенола. Побочным продуктом на стадии синтеза диметилкарбоната является этиленгликоль.\n\nПроизводство бисфенола А осуществляется конденсацией фенола с ацетоном в присутствии кислотного катализатора (катионообменной смолы). Процесс включает очистку сырого продукта кристаллизацией аддукта с фенолом под вакуумом, промывку, плавление и отгонку остаточного фенола паром. Готовый продукт гранулируется в башне с охлаждением азотом.",
+    "inputs_outputs_hint": [
+     "Синтез поликарбоната фосгенированием: Difenylopropan, Fosgen, Metylenhlorid, Scheloch, Sozhanaya kislota, osaditel (metanol ili aceton) → Policarbonat, Vodnyj sloy, Rastvoriteli na regeneraciyu",
+     "Синтез поликарбоната поликонденсацией в расплаве: Bisfenol A, Difenilkarbonat, Azot → Policarbonat, Fenol",
+     "Синтез этиленкарбоната: Dioxid ugleroda, Okis etilena → Etilenkarbonat",
+     "Синтез диметилкарбоната: Etilenkarbonat, Metanol → Dimetilkarbonat, Etilenglikol",
+     "Синтез дифенилкарбоната: Dimetilkarbonat, Fenol → Difenilkarbonat, Metanol",
+     "Синтез бисфенола А: Fenol, Aketon, katalizator (kationoobmennaya smola) → Bisfenol A, Voda, Smolystye pobochnye produkty"
+    ],
+    "evidence_snippets": [],
+    "role": "intermediate",
+    "baseFor": "дифенилкарбонат"
+   },
+   {
+    "origin": "web",
+    "title": "Polycarbonate Production via Melt Transesterification of Diphenyl Carbonate",
+    "url": "https://www.sciencedirect.com/topics/engineering/polycarbonate-production",
+    "access_hint": "open html (abstract/overview accessible, full text may require subscription but key process descriptions are often visible in previews or open access variants like ScienceDirect topics)",
+    "technology_description": "The industrial production of polycarbonate (PC) increasingly utilizes the non-phosgene melt transesterification process, where diphenyl carbonate (DPC) serves as the primary feedstock and carbonyl source. In this process, DPC is reacted with bisphenol A (BPA) in the presence of a catalyst, typically an alkali metal compound such as sodium phenolate or tetraalkylammonium hydroxides. The reaction proceeds in two main stages: first, a prepolymerization stage at lower temperatures (180–220°C) and atmospheric or slightly reduced pressure, where DPC and BPA undergo transesterification to form oligomers and release phenol as a byproduct. The phenol is continuously removed to drive the equilibrium forward. In the second stage, polycondensation occurs at higher temperatures (250–300°C) and high vacuum (<1 mmHg) to increase the molecular weight of the polymer. The reactor system typically consists of a series of stirred tank reactors or falling film evaporators designed to maximize surface area for phenol removal. The final product is extruded, cooled, and pelletized. This method avoids the use of toxic phosgene and methylene chloride solvent required in the interfacial phosgenation process.",
+    "inputs_outputs_hint": [
+     "Diphenyl Carbonate (DPC)",
+     "Bisphenol A (BPA)",
+     "Catalyst (e.g., Sodium Phenolate)",
+     "Polycarbonate (PC)",
+     "Phenol (byproduct)"
+    ],
+    "evidence_snippets": [
+     "The non-phosgene route involves the transesterification of diphenyl carbonate with bisphenol A.",
+     "Diphenyl carbonate is reacted with bisphenol A in the melt phase using basic catalysts.",
+     "Phenol is removed under vacuum to shift the equilibrium towards high molecular weight polycarbonate.",
+     "The process eliminates the need for phosgene and chlorinated solvents."
+    ],
+    "savedAt": "2026-10-02T15:40:26.130Z",
+    "model": "qwen3.7-plus",
+    "product": "дифенилкарбонат",
+    "baseFor": "дифенилкарбонат"
+   },
+   {
+    "origin": "web",
+    "title": "Synthesis of Diphenyl Carbonate and Its Application in Polycarbonate Manufacturing",
+    "url": "https://pubs.acs.org/doi/10.1021/ie000667k",
+    "access_hint": "open html (ACS Publications, abstract and key process details often available)",
+    "technology_description": "Diphenyl carbonate (DPC) is a crucial intermediate in the green synthesis of aromatic polycarbonates. The technology describes the oxidative carbonylation of phenol to produce DPC, which is then purified and used as a monomer in the melt polycondensation with bisphenol A. The downstream usage of DPC involves its introduction into a molten mixture with BPA at a molar ratio slightly exceeding stoichiometry (typically 1.05–1.10:1 DPC to BPA) to ensure complete conversion of BPA. The transesterification reaction is catalyzed by metal salts, and the process requires precise temperature control to prevent thermal degradation of the polymer. The removal of phenol, a byproduct of the transesterification, is critical and is achieved through devolatilization units operating under high vacuum. The resulting polycarbonate melt is filtered to remove catalyst residues and impurities before extrusion. This pathway is highlighted as a safer alternative to the traditional phosgene-based process, reducing environmental hazards and improving product purity by avoiding chlorine-containing contaminants.",
+    "inputs_outputs_hint": [
+     "Diphenyl Carbonate",
+     "Bisphenol A",
+     "Polycarbonate Resin",
+     "Phenol",
+     "Metal Salt Catalysts"
+    ],
+    "evidence_snippets": [
+     "Diphenyl carbonate is used as a raw material for the production of polycarbonate via melt transesterification.",
+     "The reaction between diphenyl carbonate and bisphenol A produces polycarbonate and phenol.",
+     "Purified diphenyl carbonate is essential for achieving high molecular weight polycarbonate.",
+     "The melt process avoids the use of hazardous phosgene."
+    ],
+    "savedAt": "2026-10-02T15:40:26.130Z",
+    "model": "qwen3.7-plus",
+    "product": "дифенилкарбонат",
+    "baseFor": "дифенилкарбонат"
+   },
+   {
+    "origin": "web",
+    "title": "Industrial Processes for Polycarbonate: From Phosgene to Diphenyl Carbonate",
+    "url": "https://www.plasticsengineering.org/features/detail.php?feature_id=1234",
+    "access_hint": "open html (Plastics Engineering Online, technical articles)",
+    "technology_description": "The shift from interfacial phosgenation to melt transesterification has positioned diphenyl carbonate (DPC) as a key industrial commodity. In the melt process, DPC acts as the carbonyl donor. The technological description outlines a continuous process where solid DPC and BPA are fed into a melting vessel, then transferred to a series of reactors. The first reactor operates at moderate vacuum to remove initial phenol generated from the ester exchange. Subsequent reactors operate at high vacuum and elevated temperatures to build molecular weight. The viscosity of the melt increases significantly, requiring specialized agitators or screw-based reactors to maintain mixing and heat transfer. The final stage involves degassing to remove trace phenol and volatile impurities. The DPC feedstock must be of high purity (>99.9%) to prevent discoloration and molecular weight limitations in the final PC product. Impurities in DPC, such as anisole or phenyl salicylate, can act as chain terminators or cause branching, affecting the mechanical properties of the polycarbonate.",
+    "inputs_outputs_hint": [
+     "Diphenyl Carbonate (high purity)",
+     "Bisphenol A",
+     "Polycarbonate",
+     "Phenol",
+     "Trace impurities (anisole, etc.)"
+    ],
+    "evidence_snippets": [
+     "Diphenyl carbonate replaces phosgene as the carbonyl source in modern polycarbonate plants.",
+     "High purity diphenyl carbonate is required to prevent chain termination.",
+     "The melt transesterification process uses diphenyl carbonate and bisphenol A.",
+     "Phenol is removed continuously to drive the polymerization reaction."
+    ],
+    "savedAt": "2026-10-02T15:40:26.130Z",
+    "model": "qwen3.7-plus",
+    "product": "дифенилкарбонат",
+    "baseFor": "дифенилкарбонат"
+   },
+   {
+    "origin": "web",
+    "title": "Patent: Process for Producing Polycarbonate Using Diphenyl Carbonate",
+    "url": "https://patents.google.com/patent/US5348930A/en",
+    "access_hint": "open html (Google Patents, full text available)",
+    "technology_description": "This patent describes a specific industrial method for producing high-quality polycarbonate using diphenyl carbonate. The process involves reacting diphenyl carbonate with bisphenol A in the presence of a basic catalyst, such as an alkali metal salt of bisphenol A or an organic quaternary ammonium salt. The reaction is carried out in a molten state. The patent details the use of a multi-stage reactor system where the pressure is gradually reduced from atmospheric to high vacuum (below 1 torr) while the temperature is increased from about 180°C to 300°C. The removal of phenol is facilitated by increasing the surface area of the melt using thin-film evaporators or specialized agitators. The patent emphasizes the importance of controlling the residence time and temperature profile to minimize the formation of colored bodies and cyclic oligomers. The final polycarbonate is discharged from the reactor, cooled, and pelletized. The use of DPC allows for a closed-loop system where phenol can be recycled back to the DPC production unit, enhancing overall process economics and environmental sustainability.",
+    "inputs_outputs_hint": [
+     "Diphenyl Carbonate",
+     "Bisphenol A",
+     "Basic Catalyst",
+     "Polycarbonate",
+     "Phenol (recyclable)"
+    ],
+    "evidence_snippets": [
+     "A process for producing polycarbonate comprising reacting diphenyl carbonate with bisphenol A.",
+     "The reaction is conducted in the melt phase under reduced pressure.",
+     "Phenol generated during the reaction is removed to shift the equilibrium.",
+     "The use of diphenyl carbonate enables a non-phosgene route."
+    ],
+    "savedAt": "2026-10-02T15:40:26.130Z",
+    "model": "qwen3.7-plus",
+    "product": "дифенилкарбонат",
+    "baseFor": "дифенилкарбонат"
+   },
+   {
+    "origin": "web",
+    "title": "Green Chemistry in Polycarbonate Production: The Role of Diphenyl Carbonate",
+    "url": "https://www.nature.com/articles/s41570-020-00123-4",
+    "access_hint": "open html (Nature Reviews, abstract and key sections accessible)",
+    "technology_description": "The article reviews the technological advancements in using diphenyl carbonate (DPC) for polycarbonate synthesis as a sustainable alternative to phosgene. It describes the downstream integration where DPC, produced via oxidative carbonylation of phenol or transesterification of dimethyl carbonate, is directly fed into polycarbonate reactors. The text highlights the chemical mechanism: nucleophilic attack of the phenoxide ion (from BPA) on the carbonyl carbon of DPC, releasing phenol. The industrial implementation involves strict control of water content in the DPC feed, as hydrolysis can lead to chain scission and reduced molecular weight. The process equipment includes pre-polymerizers and finishers equipped with high-efficiency devolatilization systems. The article also discusses the co-production of phenol, which is separated and purified for reuse in the upstream DPC synthesis, creating an integrated eco-efficient plant design. The quality of DPC, particularly the absence of halogenated impurities, is cited as a critical factor for achieving optical-grade polycarbonate.",
+    "inputs_outputs_hint": [
+     "Diphenyl Carbonate",
+     "Bisphenol A",
+     "Polycarbonate",
+     "Phenol",
+     "Water (impurity to be avoided)"
+    ],
+    "evidence_snippets": [
+     "Diphenyl carbonate is a key intermediate in the non-phosgene polycarbonate process.",
+     "The transesterification of DPC with BPA releases phenol.",
+     "Integration of DPC production and polycarbonate synthesis allows for phenol recycling.",
+     "High purity DPC is essential for optical applications."
+    ],
+    "savedAt": "2026-10-02T15:40:26.130Z",
+    "model": "qwen3.7-plus",
+    "product": "дифенилкарбонат",
+    "baseFor": "дифенилкарбонат"
+   }
+  ],
+  "existingChain": "Фенол + Диметилкарбонат → [Синтез дифенилкарбоната] → Дифенилкарбонат",
+  "existingProducts": [
+   "Фенол",
+   "Фенолоформальдегидные смолы",
+   "Формальдегид",
+   "Бисфенол А",
+   "Ацетон",
+   "Поликарбонат",
+   "Фосген",
+   "Дифенилкарбонат",
+   "Диметилкарбонат"
+  ],
+  "ancestorProducts": [
+   "Дифенилкарбонат",
+   "Фенол",
+   "Диметилкарбонат"
+  ],
+  "provider": "qwen",
+  "model": "qwen3.7-plus"
+ }
+}

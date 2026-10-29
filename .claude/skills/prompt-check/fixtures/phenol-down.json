@@ -1,0 +1,232 @@
+{
+ "note": "Источники описывают и фенол → циклогексанон → капролактам: выходом шага от фенола должен быть циклогексанон, не капролактам.",
+ "expect": {
+  "forbidOutputs": [
+   "Капролактам"
+  ]
+ },
+ "request": {
+  "productName": "Фенол",
+  "direction": "down",
+  "sources": [
+   {
+    "origin": "local",
+    "docId": 1,
+    "sectionId": 34,
+    "page": 346,
+    "title": "Раздел 6. Производство азотсодержащих органических веществ",
+    "docTitle": "ИТС 18—202_",
+    "pages": "стр. 336–369",
+    "url": "local-sources/documents/1/file?section=34#page=346",
+    "access_hint": "ИТС 18—202_, стр. 336–369",
+    "technology_description": "В разделе описаны технологии производства четырех основных азотсодержащих органических веществ: нитрила акриловой кислоты (акрилонитрила), высших алифатических аминов, меламина и капролактама, а также нитробензола.\n\n1. Акрилонитрил получают окислительным аммонолизом пропилена. Сырье: пропилен, аммиак, воздух. Процесс идет в реакторе с катализатором (кипящий или стационарный слой) при температуре >400 °С и давлении 51–118,8 кПа. Стадии: синтез, нейтрализация газов серной кислотой, абсорбция водой, десорбция и очистка. Побочные продукты: синильная кислота, ацетонитрил.\n\n2. Высшие алифатические амины синтезируют из синтетических жирных кислот, аммиака и азотоводородной фракции. Реакция проходит в реакторе на алюмокобальтмолибденовом катализаторе при 300–340 °С и давлении 15–22 МПа. Далее следует сепарация, отдувка водорода и ректификационная очистка аминов.\n\n3. Меламин производят из карбамида (плав карбамида) и аммиака. Описан метод низкого давления с псевдоожиженным слоем катализатора. Стадии: концентрирование раствора карбамида, синтез в реакторе, фильтрация от побочных продуктов (мелем, мелам), кристаллизация и выделение продукта.\n\n4. Капролактам получают по бензольной или фенольной схеме. Основные стадии: гидрирование бензола (или фенола) до циклогексана (циклогексанола), окисление до смеси циклогексанона и циклогексанола, дегидрирование до циклогексанона, оксимирование гидроксиламинсульфатом, перегруппировка оксима в среде олеума, нейтрализация и экстракция капролактама. Сырье включает бензол/фенол, водород, аммиак, серную кислоту/олеум, кислород.\n\n5. Нитробензол получают нитрованием бензола смесью азотной и серной кислот. Стадии: приготовление кислотной смеси, нитрование, многократная промывка (кислая, щелочная, водная), сушка. Отходящие газы очищают абсорбцией и каталитическим окислением.",
+    "inputs_outputs_hint": [
+     "Окислительный аммонолиз пропилена: Пропилен, Аммиак, Воздух → Нитрил акриловой кислоты, Синильная кислота, Ацетонитрил",
+     "Синтез высших алифатических аминов: Синтетические жирные кислоты, Аммиак, Азотоводородная фракция → Высшие алифатические амины",
+     "Производство меламина из карбамида: Карбамид, Аммиак → Меламин, Мелем, Мелам",
+     "Производство капролактама (бензольная/фенольная схема): Бензол, Фенол, Водород, Аммиак, Серная кислота, Олеум, Кислород → Капролактам, Сульфат аммония",
+     "Нитрование бензола: Бензол, Азотная кислота, Серная кислота → Нитробензол"
+    ],
+    "evidence_snippets": [],
+    "role": "raw",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "local",
+    "docId": 4,
+    "sectionId": 80,
+    "page": 372,
+    "title": "Раздел 6. Производство азотсодержащих органических веществ",
+    "docTitle": "ИТС 18—2023",
+    "pages": "стр. 336–369",
+    "url": "local-sources/documents/4/file?section=80#page=372",
+    "access_hint": "ИТС 18—2023, стр. 336–369",
+    "technology_description": "В разделе описаны технологии производства четырех видов азотсодержащих органических веществ: нитрила акриловой кислоты (акрилонитрила), высших алифатических аминов, меламина и капролактама, а также нитробензола.\n\n1. Акрилонитрил получают окислительным аммонолизом пропилена. Сырье: пропилен, аммиак, воздух. Процесс идет в реакторе с катализатором при >400 °С. Стадии: синтез, нейтрализация серной кислотой, абсорбция водой, десорбция и очистка. Побочные продукты: синильная кислота и ацетонитрил, которые выделяют как товарные продукты.\n\n2. Высшие алифатические амины производят из синтетических жирных кислот, аммиака и азотоводородной фракции. Реакция синтеза проходит на алюмокобальтмолибденовом катализаторе при 300–340 °С и давлении 15–22 МПа. Далее следует сепарация, отдувка водорода и ректификационная очистка аминов.\n\n3. Меламин получают из карбамида (плав карбамида) и аммиака при низком давлении в присутствии катализатора. Стадии: упаривание карбамида, синтез в реакторе с псевдоожиженным слоем, фильтрация от побочных продуктов (мелем, мелам), кристаллизация меламина из газового потока и сепарация.\n\n4. Капролактам производят по бензольной или фенольной схеме. Основные стадии: гидрирование бензола (или фенола) до циклогексана (циклогексанола), окисление до смеси спирта и кетона, разделение, дегидрирование циклогексанола в циклогексанон, получение гидроксиламинсульфата из аммиака, оксимирование циклогексанона, перегруппировка оксима в среде олеума, нейтрализация, экстракция и очистка капролактама. Сырье включает бензол/фенол, водород, воздух, аммиак, серную кислоту/олеум.\n\n5. Нитробензол получают нитрованием бензола смесью азотной и серной кислот. Стадии: приготовление кислотной смеси, нитрование, многократная промывка (кислая, щелочная, водная), сушка. Отходящие газы очищают абсорбцией и каталитическим окислением.",
+    "inputs_outputs_hint": [
+     "Синтез акрилонитрила: Пропилен, Аммиак, Воздух → Реакционный газ",
+     "Нейтрализация и отмывка: Реакционный газ, Серная кислота → Реакционный газ, Сточные воды",
+     "Абсорбция: Реакционный газ, Водный раствор → Водный раствор продуктов, Непоглощенные газы",
+     "Десорбция: Водный раствор продуктов → Акрилонитрил-сырец, Водный раствор ацетонитрила",
+     "Очистка акрилонитрила-сырца: Акрилонитрил-сырец → Акрилонитрил-сырец, Пары синильной кислоты",
+     "Получение товарной синильной кислоты: Пары синильной кислоты → Синильная кислота, Несконденсировавшиеся пары синильной кислоты",
+     "Получение товарного нитрила акриловой кислоты: Акрилонитрил-сырец → Нитрил акриловой кислоты, Отходящие газы",
+     "Получение ацетонитрила-сырца: Водный раствор ацетонитрила → Ацетонитрил-сырец",
+     "Цианирование: Ацетонитрил-сырец → Кондиционный ацетонитрил-сырец, Отходящие газы, Сточные воды",
+     "Очистка ацетонитрила-сырца: Кондиционный ацетонитрил-сырец → Ацетонитрил, Отходящие газы, Сточные воды"
+    ],
+    "evidence_snippets": [],
+    "role": "raw",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "local",
+    "docId": 5,
+    "sectionId": 106,
+    "page": 425,
+    "title": "10.1 Поликарбонаты",
+    "docTitle": "ИТС 32–2022",
+    "pages": "стр. 425–439",
+    "url": "local-sources/documents/5/file?section=106#page=425",
+    "access_hint": "ИТС 32–2022, стр. 425–439",
+    "technology_description": "В разделе описаны технологии производства поликарбонатов (в том числе совместно с бисфенолом А) и самого бисфенола А. Рассмотрены два основных метода получения поликарбоната: фосгенирование дифенилолпропана (бисфенола А) в растворе метиленхлорида при 20–30 °С с последующей промывкой, осаждением полимером (метанолом или ацетоном) и сушкой; и метод межфазной поликонденсации дифенилкарбоната с бисфенолом А в расплаве при температурах до 320 °С и вакууме с использованием азота для удаления фенола.\n\nДля совместного производства описан синтез дифенилкарбоната через стадии получения этиленкарбоната из окиси этилена и диоксида углерода, затем диметилкарбоната из этиленкарбоната и метанола, и наконец дифенилкарбоната из диметилкарбоната и фенола. Побочным продуктом на стадии синтеза диметилкарбоната является этиленгликоль.\n\nПроизводство бисфенола А осуществляется конденсацией фенола с ацетоном в присутствии кислотного катализатора (катионообменной смолы). Процесс включает очистку сырого продукта кристаллизацией аддукта с фенолом под вакуумом, промывку, плавление и отгонку остаточного фенола паром. Готовый продукт гранулируется в башне с охлаждением азотом.",
+    "inputs_outputs_hint": [
+     "Синтез поликарбоната фосгенированием: Difenylopropan, Fosgen, Metylenhlorid, Scheloch, Sozhanaya kislota, osaditel (metanol ili aceton) → Policarbonat, Vodnyj sloy, Rastvoriteli na regeneraciyu",
+     "Синтез поликарбоната поликонденсацией в расплаве: Bisfenol A, Difenilkarbonat, Azot → Policarbonat, Fenol",
+     "Синтез этиленкарбоната: Dioxid ugleroda, Okis etilena → Etilenkarbonat",
+     "Синтез диметилкарбоната: Etilenkarbonat, Metanol → Dimetilkarbonat, Etilenglikol",
+     "Синтез дифенилкарбоната: Dimetilkarbonat, Fenol → Difenilkarbonat, Metanol",
+     "Синтез бисфенола А: Fenol, Aketon, katalizator (kationoobmennaya smola) → Bisfenol A, Voda, Smolystye pobochnye produkty"
+    ],
+    "evidence_snippets": [],
+    "role": "raw",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "web",
+    "title": "Phenol Derivatives: Production and Applications",
+    "url": "https://www.sciencedirect.com/topics/chemistry/phenol-derivatives",
+    "access_hint": "open html",
+    "technology_description": "The industrial production of phenolic resins involves the reaction of phenol with formaldehyde. This process is typically carried out in two main stages: the formation of novolacs or resols, followed by curing. In the production of novolac resins, phenol is reacted with formaldehyde in a molar ratio of greater than 1 (excess phenol) under acidic conditions using catalysts such as oxalic acid or sulfuric acid. The reaction mixture is heated to temperatures between 90-100°C. The resulting prepolymer is a linear or branched thermoplastic that requires a cross-linking agent (hardener), usually hexamethylenetetramine, to cure. For resol resins, phenol is reacted with excess formaldehyde under alkaline conditions (using sodium hydroxide or ammonia) at lower temperatures (60-80°C). This produces a reactive intermediate containing methylol groups. Upon heating, these resols undergo condensation polymerization to form a highly cross-linked thermoset network. The process involves careful control of pH and temperature to manage the molecular weight distribution and gel time. Water produced during the condensation reaction is often removed under vacuum to drive the reaction forward and reduce voids in the final product.",
+    "inputs_outputs_hint": [
+     "Phenol",
+     "Formaldehyde",
+     "Acid catalysts (oxalic acid, sulfuric acid)",
+     "Alkaline catalysts (NaOH, ammonia)",
+     "Hexamethylenetetramine (hardener)",
+     "Phenolic resins (Novolacs, Resols)",
+     "Water (byproduct)"
+    ],
+    "evidence_snippets": [
+     "Phenol is reacted with formaldehyde in a molar ratio of greater than 1 (excess phenol) under acidic conditions",
+     "The reaction mixture is heated to temperatures between 90-100°C",
+     "For resol resins, phenol is reacted with excess formaldehyde under alkaline conditions",
+     "This produces a reactive intermediate containing methylol groups",
+     "Upon heating, these resols undergo condensation polymerization to form a highly cross-linked thermoset network"
+    ],
+    "savedAt": "2026-10-02T15:29:26.686Z",
+    "model": "qwen3.7-plus",
+    "product": "фенол",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "web",
+    "title": "Bisphenol A Production Process",
+    "url": "https://www.lookchem.com/ArtP/20235/Bisphenol-A-Production-Process.html",
+    "access_hint": "open html",
+    "technology_description": "Bisphenol A (BPA) is manufactured by the condensation of phenol with acetone in the presence of an acid catalyst, typically hydrogen chloride or a solid acid catalyst like sulfonated polystyrene resin. The reaction is exothermic and is conducted in a reactor maintained at temperatures between 40-60°C. To shift the equilibrium towards BPA formation and minimize side reactions, a large excess of phenol is used (molar ratio of phenol to acetone often exceeds 10:1). The crude reaction mixture contains BPA, unreacted phenol, acetone, and various impurities such as ortho-isomers and condensation byproducts. The separation process involves multiple distillation columns. First, unreacted acetone and water are removed. Then, the bulk of the unreacted phenol is recovered via distillation and recycled back to the reactor. The BPA-rich stream is further purified through crystallization steps, often using adduct formation with phenol itself (BPA-phenol adduct) to separate it from isomers. The adduct is then decomposed by heating to release pure BPA crystals and recycle phenol. The final product is dried and pelletized.",
+    "inputs_outputs_hint": [
+     "Phenol",
+     "Acetone",
+     "Acid catalyst (HCl or solid acid)",
+     "Bisphenol A (BPA)",
+     "Unreacted phenol (recycled)",
+     "Water",
+     "Impurities (ortho-isomers)"
+    ],
+    "evidence_snippets": [
+     "Bisphenol A (BPA) is manufactured by the condensation of phenol with acetone",
+     "A large excess of phenol is used (molar ratio of phenol to acetone often exceeds 10:1)",
+     "The crude reaction mixture contains BPA, unreacted phenol, acetone, and various impurities",
+     "The bulk of the unreacted phenol is recovered via distillation and recycled back to the reactor",
+     "Purified through crystallization steps, often using adduct formation with phenol itself"
+    ],
+    "savedAt": "2026-10-02T15:29:26.686Z",
+    "model": "qwen3.7-plus",
+    "product": "фенол",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "web",
+    "title": "Caprolactam Production via Phenol Route",
+    "url": "https://www.sciencedirect.com/science/article/pii/S0926860X0500369X",
+    "access_hint": "open html",
+    "technology_description": "An alternative route to caprolactam, the precursor for Nylon 6, involves the hydrogenation of phenol to cyclohexanone, followed by oximation and rearrangement. In the first step, phenol is hydrogenated over a palladium-based catalyst in a fixed-bed or slurry reactor at temperatures of 150-200°C and pressures of 1-5 bar. This yields cyclohexanone with high selectivity. The cyclohexanone is then reacted with hydroxylamine (NH2OH) to form cyclohexanone oxime. This oximation step can be performed using nitric oxide reduction processes or the ketone-hydroxylamine process. The resulting oxime is subjected to Beckmann rearrangement using oleum (sulfuric acid with dissolved SO3) or a zeolite catalyst in the gas phase. The liquid-phase rearrangement produces caprolactam sulfate, which is neutralized with ammonia to yield crude caprolactam and ammonium sulfate as a byproduct. The crude caprolactam is purified via extraction and distillation. The gas-phase rearrangement over zeolites avoids the formation of ammonium sulfate, offering an environmentally friendlier process.",
+    "inputs_outputs_hint": [
+     "Phenol",
+     "Hydrogen",
+     "Palladium catalyst",
+     "Cyclohexanone",
+     "Hydroxylamine",
+     "Cyclohexanone oxime",
+     "Sulfuric acid/Oleum or Zeolite catalyst",
+     "Caprolactam",
+     "Ammonium sulfate (byproduct in liquid phase)"
+    ],
+    "evidence_snippets": [
+     "Involves the hydrogenation of phenol to cyclohexanone",
+     "Phenol is hydrogenated over a palladium-based catalyst... yields cyclohexanone with high selectivity",
+     "Cyclohexanone is then reacted with hydroxylamine to form cyclohexanone oxime",
+     "The resulting oxime is subjected to Beckmann rearrangement using oleum... or a zeolite catalyst",
+     "The liquid-phase rearrangement produces caprolactam sulfate, which is neutralized with ammonia to yield crude caprolactam"
+    ],
+    "savedAt": "2026-10-02T15:29:26.686Z",
+    "model": "qwen3.7-plus",
+    "product": "фенол",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "web",
+    "title": "Production of Alkylphenols and Nonionic Surfactants",
+    "url": "https://pubs.acs.org/doi/10.1021/ie50567a016",
+    "access_hint": "open html",
+    "technology_description": "Alkylphenols are produced by the alkylation of phenol with olefins (such as propylene, butene, or nonene) in the presence of acidic catalysts like ion-exchange resins, aluminum chloride, or phosphoric acid. The reaction is typically carried out in a continuous stirred-tank reactor or a fixed-bed reactor at temperatures ranging from 100 to 250°C. The position of alkylation (ortho vs. para) depends on the catalyst and reaction conditions; solid acid catalysts tend to favor para-alkylphenols due to steric hindrance. For example, nonylphenol is produced by reacting phenol with nonene. The resulting alkylphenol is then ethoxylated to produce nonionic surfactants. In the ethoxylation process, alkylphenol is reacted with ethylene oxide in the presence of a basic catalyst (such as potassium hydroxide) at elevated temperatures (120-180°C) and pressure. The number of ethylene oxide units added determines the hydrophilic-lipophilic balance (HLB) of the surfactant. The reaction is exothermic and requires careful temperature control to prevent runaway reactions and ensure a narrow distribution of ethoxymers.",
+    "inputs_outputs_hint": [
+     "Phenol",
+     "Olefins (Propylene, Butene, Nonene)",
+     "Acidic catalysts (Ion-exchange resins, AlCl3)",
+     "Alkylphenols (e.g., Nonylphenol)",
+     "Ethylene Oxide",
+     "Basic catalyst (KOH)",
+     "Nonionic surfactants (Alkylphenol ethoxylates)"
+    ],
+    "evidence_snippets": [
+     "Alkylphenols are produced by the alkylation of phenol with olefins",
+     "Reaction is typically carried out... at temperatures ranging from 100 to 250°C",
+     "Nonylphenol is produced by reacting phenol with nonene",
+     "The resulting alkylphenol is then ethoxylated to produce nonionic surfactants",
+     "Alkylphenol is reacted with ethylene oxide in the presence of a basic catalyst"
+    ],
+    "savedAt": "2026-10-02T15:29:26.686Z",
+    "model": "qwen3.7-plus",
+    "product": "фенол",
+    "baseFor": "фенол"
+   },
+   {
+    "origin": "web",
+    "title": "Synthesis of Diphenyl Carbonate from Phenol",
+    "url": "https://www.researchgate.net/publication/229365678_Synthesis_of_Diphenyl_Carbonate_from_Phenol_and_Dimethyl_Carbonate",
+    "access_hint": "text pdf",
+    "technology_description": "Diphenyl carbonate (DPC) is a key intermediate in the non-phosgene route to polycarbonates. It is synthesized by the transesterification of phenol with dimethyl carbonate (DMC) or diethyl carbonate. The reaction is catalyzed by metal oxides or organotin compounds. In a typical process, phenol and DMC are fed into a reactor equipped with a distillation column to remove the methanol byproduct continuously, shifting the equilibrium towards DPC formation. The reaction proceeds in two stages: first, phenyl methyl carbonate (PMC) is formed, which then reacts with another molecule of phenol to form DPC. The process requires high purity phenol to avoid catalyst deactivation. Temperatures range from 150 to 200°C. The crude DPC is purified by distillation under reduced pressure to remove unreacted phenol and heavy byproducts. The purified DPC is then used in melt polycondensation with bisphenol A to produce polycarbonate resin, releasing phenol as a byproduct which is recycled.",
+    "inputs_outputs_hint": [
+     "Phenol",
+     "Dimethyl Carbonate (DMC)",
+     "Metal oxide/Tin catalysts",
+     "Diphenyl Carbonate (DPC)",
+     "Methanol (byproduct)",
+     "Phenyl Methyl Carbonate (intermediate)",
+     "Polycarbonate (final product via subsequent step)"
+    ],
+    "evidence_snippets": [
+     "Diphenyl carbonate (DPC) is synthesized by the transesterification of phenol with dimethyl carbonate",
+     "Phenol and DMC are fed into a reactor... to remove the methanol byproduct continuously",
+     "First, phenyl methyl carbonate (PMC) is formed, which then reacts with another molecule of phenol to form DPC",
+     "The crude DPC is purified by distillation under reduced pressure to remove unreacted phenol",
+     "Purified DPC is then used in melt polycondensation with bisphenol A to produce polycarbonate resin"
+    ],
+    "savedAt": "2026-10-02T15:29:26.686Z",
+    "model": "qwen3.7-plus",
+    "product": "фенол",
+    "baseFor": "фенол"
+   }
+  ],
+  "existingChain": "[]",
+  "existingProducts": [
+   "Фенол"
+  ],
+  "ancestorProducts": [
+   "Фенол"
+  ],
+  "provider": "qwen",
+  "model": "qwen3.7-plus"
+ }
+}

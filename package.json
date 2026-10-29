@@ -4,6 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test --test-reporter=spec \"test/**/*.test.js\"",
     "dev": "nodemon server.js",
     "db:create": "npx sequelize-cli db:create",
     "db:migrate": "npx sequelize-cli db:migrate",

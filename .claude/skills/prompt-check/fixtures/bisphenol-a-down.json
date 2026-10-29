@@ -1,0 +1,107 @@
+{
+ "note": "Поликарбонат из бисфенола А — расплавным путём (с дифенилкарбонатом, побочный фенол) и через фосген.",
+ "expect": {
+  "someOutputs": [
+   "Поликарбонат"
+  ]
+ },
+ "request": {
+  "productName": "Бисфенол А",
+  "direction": "down",
+  "sources": [
+   {
+    "origin": "local",
+    "docId": 5,
+    "sectionId": 111,
+    "page": 492,
+    "title": "10.6 Полиарилат ДВ-524",
+    "docTitle": "ИТС 32–2022",
+    "pages": "стр. 492–498",
+    "url": "local-sources/documents/5/file?section=111#page=492",
+    "access_hint": "ИТС 32–2022, стр. 492–498",
+    "technology_description": "Раздел описывает производство полиарилата ДВ-524 методом эмульсионной поликонденсации. Процесс включает синтез полиарилата ДВ из дифенилолпропана и дихлорангидридов изофталевой и терефталевой кислот, а также синтез полиарилата ФВ из фенолфталеина и изофталоилхлорида. Реакция проводится в реакторе в эмульсионной системе (тетрагидрофуран-вода-хлористый натрий) в присутствии гидроокиси натрия. Дихлорангидриды предварительно расплавляются в плавителе. Тетрагидрофуран регенерируется на ректификационной колонне для очистки от стабилизатора и примесей. После выдержки реакционную массу нейтрализуют ортофосфорной кислотой, затем проводят высаживание полимера дистиллированной водой. Полученную суспензию фильтруют на друк-фильтрах, промывают водой с отжимом сжатым азотом и сушат в сушильном шкафу. Для получения марки ДВ-524 порошкообразный полиарилат подвергают экструзии с последующей резкой на гранулирующем устройстве. Также описано смешение полиарилатов разных марок.",
+    "inputs_outputs_hint": [
+     "Регенерация тетрагидрофурана: Tетрагидрофуран регенерированный (сырье с примесями) → Tетрагидрофуран очищенный",
+     "Плавление дихлорангидридов: Iзофталоилхлорид, Tерефталоилхлорид → Pасплав дихлорангидридов",
+     "Синтез и высаживание полиарилата ДВ: Dифенилолпропан, Iзофталоилхлорид, Tерефталоилхлорид, Gидроокись натрия, Tетрагидрофуран, Bода дистиллированная, Hатрий хлористый → Pолиарилат ДВ эмульсионный, Sуспензия полиарилата",
+     "Синтез и высаживание полиарилата ФВ: Fенолфталеин, Iзофталоилхлорид, Gидроокись натрия, Tетрагидрофуран, Bода дистиллированная, Hатрий хлористый → Pолиарилат ФВ",
+     "Нейтрализация: Pеакционная масса, Lртофосфорная кислота → Nейтрализованная реакционная масса",
+     "Фильтрация и промывка: Sуспензия полиарилата, Bода дистиллированная, Aзот газообразный → Bлажный полиарилат, Pромывные воды",
+     "Сушка полиарилата: Bлажный полиарилат → Pолиарилат порошкообразный",
+     "Экструзия и грануляция: Pолиарилат ДВ порошкообразный → Pолиарилат ДВ-524 гранулированный",
+     "Смешение полиарилатов: Pолиарилаты разных марок → Cмесь полиарилатов"
+    ],
+    "evidence_snippets": [],
+    "role": "raw",
+    "baseFor": "бисфенол а"
+   },
+   {
+    "origin": "web",
+    "title": "Ullmann's Encyclopedia of Industrial Chemistry — Bisphenol A (via Wikipedia process summary)",
+    "url": "https://en.wikipedia.org/wiki/Bisphenol_A",
+    "access_hint": "open html",
+    "technology_description": "Bisphenol A is synthesized by the condensation of acetone with two equivalents of phenol. The reaction is catalyzed by a strong acid, such as hydrochloric acid (HCl) or a sulfonated polystyrene resin. Industrially, a large excess of phenol is used to ensure full condensation; typical molar ratios of phenol to acetone range from 6:1 to 30:1. The reaction mixture is maintained at elevated temperatures, and the product equilibrium favors the formation of the para,para-isomer. Ion-exchange resins are often used as the heterogeneous catalyst in modern plants, replacing older homogeneous HCl processes, which simplifies downstream separation. Numerous modifications to this basic process have been reported, for example, addition of thiols or thio-compounds as co-catalysts to enhance selectivity toward the p,p'-isomer.\n\nAfter the condensation reaction, the BPA/phenol/water mixture undergoes a series of separation and purification steps. Unreacted phenol is typically removed via distillation under vacuum and recycled back to the reactor feed. Water generated during the condensation is separated in a decanter or stripping column. The crude bisphenol A is then purified by crystallization, often using adduct crystallization where BPA forms a 1:1 molar adduct with phenol. This adduct is separated from impurities (such as ortho,para-isomers, chroman derivatives, and higher condensation products like trisphenols) via centrifugation or filtration. The purified adduct is subsequently melted and subjected to vacuum distillation or steam stripping to remove the remaining phenol, yielding high-purity molten BPA, which is then flaked or prilled for packaging and transport. The final product serves as a primary monomer feedstock for the production of polycarbonate plastics and epoxy resins.",
+    "inputs_outputs_hint": [
+     "In: Phenol",
+     "In: Acetone",
+     "In: Acid catalyst (HCl or sulfonated ion-exchange resin)",
+     "In: Thiol promoter (optional)",
+     "Out: Bisphenol A (purified monomer)",
+     "Out: Water (byproduct)",
+     "Out: Recovered/recycled phenol",
+     "Out: Impurities (o,p-isomer, chromans, trisphenols)"
+    ],
+    "evidence_snippets": [
+     "The reaction is catalyzed by a strong acid, such as hydrochloric acid (HCl) or a sulfonated polystyrene resin.",
+     "Industrially, a large excess of phenol is used to ensure full condensation",
+     "Ion-exchange resins are often used as the heterogeneous catalyst in modern plants, replacing older homogeneous HCl processes, which simplifies downstream separation.",
+     "Unreacted phenol is typically removed via distillation under vacuum and recycled back to the reactor feed.",
+     "The crude bisphenol A is then purified by crystallization, often using adduct crystallization where BPA forms a 1:1 molar adduct with phenol.",
+     "This adduct is separated from impurities (such as ortho,para-isomers, chroman derivatives, and higher condensation products like trisphenols) via centrifugation or filtration.",
+     "yielding high-purity molten BPA, which is then flaked or prilled for packaging and transport."
+    ],
+    "savedAt": "2026-10-03T19:57:37.894Z",
+    "model": "qwen3.8-max",
+    "product": "бисфенол А",
+    "baseFor": "бисфенол а"
+   },
+   {
+    "origin": "web",
+    "title": "Bisphenol A – Production, Uses, and Environmental Impact (NCBI Bookshelf / PubChem)",
+    "url": "https://pubchem.ncbi.nlm.nih.gov/compound/Bisphenol-A",
+    "access_hint": "open html",
+    "technology_description": "Bisphenol A (BPA) is a high-production-volume chemical used primarily as a monomer in the production of polycarbonate plastics and epoxy resins. The industrial downstream use of BPA begins with its role as a feedstock for interfacial or melt transesterification polymerization processes to yield polycarbonate, and as a reactant with epichlorohydrin to produce epoxy resins. In polycarbonate manufacturing via the interfacial process, BPA is dissolved in an aqueous sodium hydroxide solution to form the disodium salt of BPA. This aqueous phase is then contacted with an organic solvent phase, typically methylene chloride (dichloromethane), which contains phosgene (COCl2). A tertiary amine catalyst, such as triethylamine, is added to facilitate the reaction at the interface between the two phases. The polycondensation reaction occurs at the liquid-liquid interface, producing polycarbonate chains that dissolve into the organic phase while sodium chloride remains in the aqueous phase. Chain terminators, such as phenol or p-tert-butylphenol, are often added to control the molecular weight of the resulting polymer. After the reaction, the organic phase containing the dissolved polycarbonate is separated from the aqueous brine. The polymer solution undergoes multiple washing steps with water and dilute acid to remove residual catalyst, unreacted BPA, and salts. The purified polycarbonate is then precipitated by adding a non-solvent or recovered by evaporating the methylene chloride in a devolatilizing extruder, yielding polycarbonate pellets or flakes. In the melt transesterification route, BPA reacts directly with diphenyl carbonate (DPC) at elevated temperatures under vacuum without the use of phosgene or chlorinated solvents. The reaction proceeds through oligomeric intermediates, releasing phenol as a byproduct, which is continuously removed under vacuum to drive the equilibrium toward high-molecular-weight polycarbonate. For epoxy resin production, BPA acts as a core building block reacting with epichlorohydrin in the presence of a basic catalyst, typically sodium hydroxide. The initial reaction forms bisphenol A diglycidyl ether (BADGE) or higher molecular weight solid epoxy resins depending on the molar ratio of BPA to epichlorohydrin. When a stoichiometric excess of epichlorohydrin is used, liquid epoxy resins (primarily BADGE) are produced. The process involves dissolving BPA in epichlorohydrin, followed by the controlled addition of aqueous NaOH. The reaction generates sodium chloride and water as byproducts. The mixture is subsequently washed to remove salts, and excess epichlorohydrin is recovered via vacuum distillation and recycled back into the reactor. If a molar excess of BPA is used relative to epichlorohydrin, the advancement reaction produces solid epoxy resins of varying molecular weights, which are then dissolved in solvents like methyl ethyl ketone (MEK) or xylene for coating applications.",
+    "inputs_outputs_hint": [
+     "Inputs: Bisphenol A, Phosgene (or Diphenyl Carbonate), Sodium Hydroxide, Methylene Chloride, Triethylamine (catalyst), Phenol/p-tert-butylphenol (chain terminator)",
+     "Inputs for Epoxy: Bisphenol A, Epichlorohydrin, Sodium Hydroxide",
+     "Products: Polycarbonate plastic (pellets/flakes), Bisphenol A diglycidyl ether (BADGE) / Liquid Epoxy Resins, Solid Epoxy Resins",
+     "Byproducts/Waste: Sodium chloride (brine), Phenol (in melt process), Water, Recovered solvents"
+    ],
+    "evidence_snippets": [
+     "Bisphenol A (BPA) is used primarily as a monomer in the manufacture of polycarbonate plastics and epoxy resins.",
+     "In the interfacial process, BPA is dissolved in aqueous sodium hydroxide to form the disodium salt, which is reacted with phosgene in an organic solvent phase containing a tertiary amine catalyst.",
+     "For epoxy resins, BPA reacts with epichlorohydrin in the presence of sodium hydroxide to form bisphenol A diglycidyl ether (BADGE), with sodium chloride and water generated as byproducts."
+    ],
+    "savedAt": "2026-10-03T19:57:15.657Z",
+    "model": "qwen3.8-max",
+    "product": "бисфенол А",
+    "baseFor": "бисфенол а"
+   }
+  ],
+  "existingChain": "Фенол + Ацетон → [Конденсация фенола с ацетоном] → Бисфенол А",
+  "existingProducts": [
+   "Фенол",
+   "Фенолоформальдегидные смолы",
+   "Формальдегид",
+   "Бисфенол А",
+   "Ацетон"
+  ],
+  "ancestorProducts": [
+   "Бисфенол А",
+   "Фенол",
+   "Ацетон"
+  ],
+  "provider": "qwen",
+  "model": "qwen3.7-plus"
+ }
+}
