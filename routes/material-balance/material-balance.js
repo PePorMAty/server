@@ -44,7 +44,7 @@ const { productKey } = require("../local-sources/utils/query");
 const { parseAnswer, cleanAnswer } = require("./utils/parse");
 const { findLocalSources, localBlock, localChecks, localKey } = require("./utils/local");
 const { checkSources, applyChecks } = require("./utils/sources");
-const { missingRefs, filledCount, mismatches, followUpText } = require("./utils/followup");
+const { missingRefs, filledCount, mismatches, totalsGap, followUpText } = require("./utils/followup");
 const { searchMissing } = require("./utils/websearch");
 const store = require("./utils/store");
 const jobs = require("./utils/jobs");
@@ -236,7 +236,7 @@ const failedText = (n) =>
   `${n} ${plural(n, "источник не загрузился", "источника не загрузились", "источников не загрузились")}`;
 
 /** Этап второго запроса: с чем модель пересчитывает. */
-function retryStage(failedCount, missing, confirmed, mismatched = []) {
+function retryStage(failedCount, missing, confirmed, mismatched = [], gap = null) {
   const found = missing.length
     ? confirmed
       ? `найдено в интернете и подтверждено: ${confirmed} ${plural(confirmed, "источник", "источника", "источников")}`
@@ -245,9 +245,10 @@ function retryStage(failedCount, missing, confirmed, mismatched = []) {
   const apart = mismatched.length
     ? `в двух таблицах ответа разные массы: ${mismatched.map((m) => m.name).join(", ")}`
     : null;
+  const unbalanced = gap ? `выход отличается от входа на ${gap.gapPct > 0 ? "+" : ""}${gap.gapPct} %` : null;
   const what = failedCount
-    ? `${[failedText(failedCount), found, apart].filter(Boolean).join("; ")} — модель ищет замену и пересчитывает`
-    : `${[found, apart].filter(Boolean).join("; ")} — модель пересчитывает`;
+    ? `${[failedText(failedCount), found, apart, unbalanced].filter(Boolean).join("; ")} — модель ищет замену и пересчитывает`
+    : `${[found, apart, unbalanced].filter(Boolean).join("; ")} — модель пересчитывает`;
   return what.replace(/^./, (c) => c.toUpperCase());
 }
 
@@ -315,11 +316,14 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
     // Таблицы ответа противоречат друг другу — тот же второй запрос: иначе
     // сайт покажет массы из одной, а сходящийся баланс останется в другой.
     const mismatched = mismatches(parsed);
-    if ((failed.length || missing.length || mismatched.length) && RETRY) {
+    // Итоги не сходятся (выход ≠ вход больше 10 %) — тоже повод пересчитать.
+    const gap = totalsGap(parsed);
+    if ((failed.length || missing.length || mismatched.length || gap) && RETRY) {
       retry = {
         failed: failed.length,
         missing: missing.map((r) => r.name),
         ...(mismatched.length ? { mismatched: mismatched.map((m) => m.name) } : {}),
+        ...(gap ? { unbalanced: gap } : {}),
         used: false,
       };
       // Недостающее ищет сам сервер — коротким поисковым запросом; найденное
@@ -346,7 +350,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
           retry.search = { sources: 0, confirmed: 0, error: e.message };
         }
       }
-      setStage(retryStage(failed.length, missing, found.length, mismatched));
+      setStage(retryStage(failed.length, missing, found.length, mismatched, gap));
       const basisRef = refs.find((r) => r.role === "basis");
       const followUp = followUpText({
         transformation: input.transformation.name,
@@ -356,6 +360,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
         missing,
         found,
         mismatched,
+        gap,
         basis: `${input.basis.amount} ${input.basis.unit}${basisRef ? ` «${basisRef.name}»` : ""}`,
       });
       try {
@@ -373,9 +378,11 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
         // Масс стало меньше или расхождений таблиц больше — второй ответ
         // хуже: остаётся первый, а его неподтверждённые источники так и
         // помечены.
+        const gap2 = totalsGap(parsed2);
         const worse =
           filledCount(parsed2, refs) < filledCount(parsed, refs) ||
-          mismatches(parsed2).length > mismatched.length;
+          mismatches(parsed2).length > mismatched.length ||
+          (gap2 && (!gap || Math.abs(gap2.gapPct) > Math.abs(gap.gapPct)));
         if (parsed2.status !== "unknown" && checkable(parsed2) && !worse) {
           const previous = new Map([...checks, ...found.map((f) => f.check)].map((c) => [c.url, c]));
           checks = parsed2.sources.length
@@ -403,6 +410,16 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
     }
   }
   if (noSearch) parsed.searchOff = true;
+  // Итоги так и не сошлись, а модель пишет «Рассчитан» — это не так: статус
+  // «частично», расхождение — клиенту (предупреждение над таблицей).
+  const finalGap = checkable(parsed) ? totalsGap(parsed) : null;
+  if (finalGap) {
+    parsed.balanceGap = finalGap;
+    if (parsed.status === "calculated") {
+      parsed.status = "partial";
+      parsed.statusLabel = "Частично рассчитан (баланс не сходится)";
+    }
+  }
 
   const id = store.save({
     transformation: input.transformation.name,

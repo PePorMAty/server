@@ -14,7 +14,7 @@
 const { checkLines } = require("./sources");
 const { localChecks } = require("./local");
 const { foundText } = require("./websearch");
-const { refOf } = require("./parse");
+const { refOf, parseAmount } = require("./parse");
 
 /** Сырьё и выбранные продукты — то, чьи массы нужны человеку. Опорное задано им самим. */
 const wanted = (refs) => refs.filter((r) => r.role === "target" || r.role === "input");
@@ -64,6 +64,29 @@ function mismatches(parsed) {
     .filter(Boolean);
 }
 
+/** Допуск расхождения итогов «Всего на входе» и «Всего на выходе». */
+const TOTALS_TOLERANCE = 0.1;
+
+/**
+ * Итоги ответа не сходятся: выход отличается от входа больше чем на 10 %.
+ * Расчёт алкилирования фенола 2026-10-29: на входе 2426 кг, на выходе 4673
+ * (кубовый остаток и фенольно-водная фракция из ИТС «на тонну продукции»,
+ * с водой), а статус — «Рассчитан». Возвращает { input, output, gapPct } —
+ * тексты итогов и расхождение в % от входа; null — сходится или итогов нет.
+ */
+function totalsGap(parsed) {
+  const a = parseAmount(parsed?.totals?.input, { massKg: true });
+  const b = parseAmount(parsed?.totals?.output, { massKg: true });
+  if (!a || !b) return null;
+  const input = (a.min + a.max) / 2;
+  const output = (b.min + b.max) / 2;
+  if (!(input > 0)) return null;
+  const gap = (output - input) / input;
+  return Math.abs(gap) > TOTALS_TOLERANCE
+    ? { input: parsed.totals.input, output: parsed.totals.output, gapPct: Math.round(gap * 100) }
+    : null;
+}
+
 /** Сколько из нужных масс в ответе есть: второй ответ не должен быть хуже первого. */
 const filledCount = (parsed, refs) => wanted(refs).length - missingRefs(parsed, refs).length;
 
@@ -75,7 +98,7 @@ const describe = (r) =>
  * failed — незагрузившиеся из них, missing — refs без массы, found —
  * найденное сервером в интернете и подтверждённое ([{ source, check }]).
  */
-function followUpText({ transformation, local = [], checks = [], failed = [], missing = [], found = [], mismatched = [], basis = "" }) {
+function followUpText({ transformation, local = [], checks = [], failed = [], missing = [], found = [], mismatched = [], gap = null, basis = "" }) {
   const lines = [];
   if (checks.some((c) => c.status !== "local")) {
     lines.push("# Результаты серверной проверки источников", ...localChecks(local), ...checkLines(checks), "");
@@ -108,8 +131,16 @@ function followUpText({ transformation, local = [], checks = [], failed = [], mi
       "",
     );
   }
+  if (gap) {
+    lines.push(
+      "# Баланс не сходится",
+      `В «Общем балансе участка» всего на входе — ${gap.input}, на выходе — ${gap.output} (${gap.gapPct > 0 ? "+" : ""}${gap.gapPct} % от входа). В установившемся процессе выход равен входу.`,
+      "Проверь потоки, взятые из удельных показателей «на тонну продукции» (кубовые остатки, водные фракции, сточные воды): не включают ли они воду, растворители или другие внешние входы, которых нет на входе, и пересчитаны ли они на заданный базис. Добавь недостающие входы или исправь выходы. Необъяснённую невязку не прячь в «потери»: укажи её в «Невязке» и поставь статус «Частично рассчитан».",
+      "",
+    );
+  }
   lines.push("Верни ответ заново, целиком, по тому же шаблону.");
   return lines.join("\n");
 }
 
-module.exports = { missingRefs, filledCount, mismatches, followUpText };
+module.exports = { missingRefs, filledCount, mismatches, totalsGap, followUpText };

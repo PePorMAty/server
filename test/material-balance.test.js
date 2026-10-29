@@ -79,3 +79,22 @@ test("второй запрос называет расхождения и ба�
   assert.match(text, /\(1000 кг «Фенол»\)/);
   assert.match(text, /Верни ответ заново, целиком/);
 });
+
+// Итоги «Всего на входе / на выходе» — расчёт алкилирования фенола
+// 2026-10-29: 2426 кг на входе, 4673 на выходе, а статус «Рассчитан».
+const { totalsGap } = require("../routes/material-balance/utils/followup");
+
+test("выход отличается от входа больше чем на 10 % — баланс не сходится", () => {
+  const gap = totalsGap({ totals: { input: "2426,08 кг (Сырье + Катализатор)", output: "4673 кг (Продукт + Учтенные отходы)" } });
+  assert.deepEqual(gap, { input: "2426,08 кг (Сырье + Катализатор)", output: "4673 кг (Продукт + Учтенные отходы)", gapPct: 93 });
+  // В пределах 10 % и без итогов — не повод.
+  assert.equal(totalsGap({ totals: { input: "2194 кг (основные 2164 + вспомогательные ~30)", output: "2194 кг" } }), null);
+  assert.equal(totalsGap({ totals: { input: "1000 кг", output: "1080 кг" } }), null);
+  assert.equal(totalsGap({ totals: { input: "Не определено", output: "4673 кг" } }), null);
+});
+
+test("второй запрос называет расхождение итогов", () => {
+  const text = followUpText({ transformation: "Алкилирование", gap: { input: "2426 кг", output: "4673 кг", gapPct: 93 } });
+  assert.match(text, /# Баланс не сходится/);
+  assert.match(text, /на входе — 2426 кг, на выходе — 4673 кг \(\+93 % от входа\)/);
+});
