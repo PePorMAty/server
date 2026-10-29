@@ -89,6 +89,26 @@ test("выход, потерянный разборщиком, возвраща�
   assert.deepEqual(names(r.body.step.outputProducts), ["Диолы поликарбоната", "Бисфенол А"]);
 });
 
+test("выход с переставленными словами — тот же продукт, второй не добавляется", async () => {
+  // Живой прогон «Полиамид-6 → нити»: обобщение «Полиамидные технические
+  // нити», разборщик «Нити полиамидные технические» — было два выхода.
+  const r = await build(
+    { productName: "Полиамид-6", direction: "down", existingProducts: ["Полиамид-6"],
+      techText: text({ out: "[Полиамидные технические нити]", inp: "[Полиамид-6, стабилизаторы]" }) },
+    step(["Полиамид-6", "Стабилизаторы"], ["Нити полиамидные технические"]),
+  );
+  assert.deepEqual(names(r.body.step.outputProducts), ["Нити полиамидные технические"]);
+  // И узел графа с тем же набором слов берётся как есть, без нового узла.
+  const g = await build(
+    { productName: "Полиамид-6", direction: "down",
+      existingProducts: ["Полиамид-6", "Полиамидные технические нити"],
+      techText: text({ out: "[Полиамидные технические нити]", inp: "[Полиамид-6]" }) },
+    step(["Полиамид-6"], ["Нити полиамидные технические"]),
+  );
+  assert.deepEqual(names(g.body.step.outputProducts), ["Полиамидные технические нити"]);
+  assert.equal(g.body.step.outputProducts[0].isExisting, true);
+});
+
 test("пустое «Что производят» — шаг не строится, модель не вызывается", async () => {
   const r = await build({ productName: "Фенол", direction: "down", existingProducts: ["Фенол"],
     techText: text({ out: "[]", inp: "[Фенол]" }) });

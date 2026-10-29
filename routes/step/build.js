@@ -581,6 +581,15 @@ router.post("/gpt/step/build", async (req, res) => {
         .replace(/\s*\([^)]*\)\s*/g, "")
         .trim();
 
+    // Те же слова в другом порядке — тот же продукт: обобщение пишет
+    // «Полиамидные технические нити», разборщик — «Нити полиамидные
+    // технические», и без этого шаг получал два одинаковых выхода.
+    const wordsKey = (s) => baseName(s).split(/[\s-]+/).filter(Boolean).sort().join(" ");
+    const sameWordSet = (a, b) => {
+      const x = wordsKey(a);
+      return x.length >= 3 && x === wordsKey(b);
+    };
+
     const findExistingMatch = (name) => {
       const norm = normalize(name);
       const base = baseName(name);
@@ -589,6 +598,9 @@ router.post("/gpt/step/build", async (req, res) => {
       }
       for (const ep of existingProducts) {
         if (baseName(ep) === base && base.length >= 3) return ep;
+      }
+      for (const ep of existingProducts) {
+        if (sameWordSet(ep, name)) return ep;
       }
       return null;
     };
@@ -639,7 +651,8 @@ router.post("/gpt/step/build", async (req, res) => {
       const x = baseName(a);
       const y = baseName(b);
       if (!x || !y) return false;
-      return x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x)));
+      if (x === y || sameWordSet(a, b)) return true;
+      return Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x));
     };
     const restored = [];
     for (const name of farSideListed(techText, direction)) {
@@ -672,7 +685,7 @@ router.post("/gpt/step/build", async (req, res) => {
     const sameWords = (a, b) => {
       const [x, y] = [baseName(a), baseName(b)].sort((p, q) => p.length - q.length);
       if (!x) return false;
-      if (x === y) return true;
+      if (x === y || sameWordSet(a, b)) return true;
       const escaped = x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return x.length >= 4 && new RegExp(`(^|[\\s-])${escaped}($|[\\s-])`).test(y);
     };
@@ -695,7 +708,8 @@ router.post("/gpt/step/build", async (req, res) => {
     // выход. Сравнение строгое (без уточнения в скобках): нестрогое sameProduct
     // сочло бы «Фенол» тем же, что «Бисфенол А», и побочный фенол
     // поликонденсации пропал бы как «уже есть во входах».
-    const sameName = (a, b) => !!baseName(a) && baseName(a) === baseName(b);
+    const sameName = (a, b) =>
+      !!baseName(a) && (baseName(a) === baseName(b) || sameWordSet(a, b));
     const listedOutputs = listedInMain(techText, "Что производят");
     const listedByproducts = listedInMain(techText, "Побочные продукты");
     const byproducts = [];
