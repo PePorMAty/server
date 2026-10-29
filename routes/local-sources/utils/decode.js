@@ -44,8 +44,9 @@ const SYSTEM = `Ты — инженер-технолог химической п
 - processes — процессы раздела: название, входы, выходы.
 Каждое вещество — в одном списке. Если раздел описывает очистку или переработку отходов, то, что перерабатывают, — это raw_materials.
 
-Правила для названий веществ:
+Правила для названий веществ (и в списках, и во входах и выходах processes):
 - в именительном падеже, как их называют в промышленности: «Этилен», «Оксид этилена», «Пропан-пропиленовая фракция», «Сжиженные углеводородные газы»;
+- по-русски, кириллицей, как в тексте раздела: «Фенол», «Фосген», а не «Fenol», «Fosgen». Латиницей — только то, что латиницей написано в самом тексте (название процесса, марка);
 - без формул, концентраций и марок в названии;
 - только вещества, которые реально есть в тексте. Ничего не добавляй от себя.
 Верни СТРОГО JSON по схеме, без текста вокруг.`;
@@ -149,6 +150,27 @@ function normalizeResult(parsed) {
   };
 }
 
+/**
+ * Латинские слова разбора, которых нет в тексте раздела, — транслитерация
+ * («Difenylopropan, Fosgen» вместо «Дифенилолпропан, Фосген» в разделе
+ * «10.1 Поликарбонаты» ИТС 32). Латиница из самого текста (название
+ * процесса, марка) — не в счёт.
+ */
+function transliterated(result, text) {
+  const own = new Set((String(text).match(/[A-Za-z]{4,}/g) || []).map((w) => w.toLowerCase()));
+  const all = [
+    ...result.products,
+    ...result.byproducts,
+    ...result.intermediates,
+    ...result.raw,
+    ...result.auxiliaries,
+    ...result.wastes,
+    ...result.io,
+  ].join(" ");
+  const words = (all.match(/[A-Za-z]{4,}/g) || []).filter((w) => !own.has(w.toLowerCase()));
+  return [...new Set(words)];
+}
+
 /** Разобрать один раздел. Бросает Error с понятной причиной. */
 async function decodeSection({ section, document }) {
   const provider = document.provider || defaultProvider();
@@ -168,23 +190,25 @@ async function decodeSection({ section, document }) {
 ${text}${cut}
 >>>`;
 
-  const resp = await callOpenAIResponsesRaw({
-    payload: {
-      model: "gpt-5-mini",
-      instructions: SYSTEM,
-      input,
-      truncation: "auto",
-      max_output_tokens: 6000,
-      text: {
-        format: { type: "json_schema", name: "section_decode", strict: true, schema: SCHEMA },
+  const ask = (content) =>
+    callOpenAIResponsesRaw({
+      payload: {
+        model: "gpt-5-mini",
+        instructions: SYSTEM,
+        input: content,
+        truncation: "auto",
+        max_output_tokens: 6000,
+        text: {
+          format: { type: "json_schema", name: "section_decode", strict: true, schema: SCHEMA },
+        },
       },
-    },
-    timeoutMs: 10 * 60 * 1000,
-    provider,
-    model,
-  });
+      timeoutMs: 10 * 60 * 1000,
+      provider,
+      model,
+    });
+  const resp = await ask(input);
   const out = extractOutputText(resp);
-  const result = normalizeResult(safeJsonParse(out));
+  let result = normalizeResult(safeJsonParse(out));
   if (!result) {
     const who = resp?.ai?.model || model || "по умолчанию";
     throw new Error(
@@ -192,6 +216,26 @@ ${text}${cut}
         ? `Модель «${who}» ответила не по схеме${resp?.status === "incomplete" ? " (ответ оборвался)" : ""}.`
         : `Модель «${who}» вернула пустой ответ.`,
     );
+  }
+  // Названия транслитом — раздел не свяжется с продуктами графа по-русски.
+  // Один повтор с замечанием; не лучше — остаётся первый ответ.
+  const latin = transliterated(result, text);
+  if (latin.length) {
+    console.warn(`[local-sources] ${where}: названия латиницей (${latin.slice(0, 5).join(", ")}) — разбираем ещё раз`);
+    try {
+      const again = normalizeResult(
+        safeJsonParse(
+          extractOutputText(
+            await ask(
+              `${input}\n\nВ прошлом разборе этого раздела названия были латиницей (транслитерацией): ${latin.slice(0, 10).join(", ")}. Пиши все названия по-русски, кириллицей, как в тексте раздела.`,
+            ),
+          ),
+        ),
+      );
+      if (again && transliterated(again, text).length < latin.length) result = again;
+    } catch (e) {
+      console.warn(`[local-sources] ${where}: повторный разбор не удался: ${e.message}`);
+    }
   }
   return { result, model: resp?.ai?.model || model || null };
 }
@@ -281,4 +325,4 @@ function stop() {
   started = false;
 }
 
-module.exports = { start, stop, kick, onProgress, decodeSection, normalizeResult, SCHEMA };
+module.exports = { start, stop, kick, onProgress, decodeSection, normalizeResult, transliterated, SCHEMA };
