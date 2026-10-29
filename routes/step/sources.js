@@ -6,6 +6,7 @@
 // Совместимость: существующий /gpt/sources НЕ трогаем. Этот роут параллельный.
 
 const express = require("express");
+const { verifyStepSources } = require("./utils/verifySources");
 const router = express.Router();
 
 // reuse OpenAI utils from existing sources module
@@ -150,7 +151,7 @@ router.post("/gpt/step/sources", async (req, res) => {
       text,
       parsed,
       rawItems,
-      items,
+      items: found,
     } = await searchSources({
       prompt,
       maxItems,
@@ -161,6 +162,20 @@ router.post("/gpt/step/sources", async (req, res) => {
       filter: (xs) => filterItemsByAllowedDomains(xs, allowedDomains),
       isAborted: () => stream.aborted,
     });
+
+    // Найденное моделью — проверить, пока идёт heartbeat: выдуманные и
+    // несуществующие страницы и заглушки «источников нет» отбрасываются
+    // (utils/verifySources.js), закрытые для сервера — с пометкой.
+    let items = found;
+    let dropped = [];
+    if (found.length) {
+      ({ kept: items, dropped } = await verifyStepSources(found));
+      if (dropped.length) {
+        console.log(
+          `[step/sources] «${productName}» (${direction}): отброшено ${dropped.length} — ${dropped.map((d) => d.reason).join("; ")}`,
+        );
+      }
+    }
 
     stream.stop();
     if (stream.aborted) return;
@@ -199,6 +214,10 @@ router.post("/gpt/step/sources", async (req, res) => {
           blocks_preview: [],
           sources: existingUrls.size > 0 ? existingSources : [],
           exhausted: true,
+          // Необязательное: что отброшено проверкой и почему. Заглушка модели
+          // «источников нет» — её объяснение пригодится проверке конечного
+          // продукта.
+          ...(dropped.length ? { dropped_sources: dropped } : {}),
           ai: openaiResp?.ai,
           // Что модель ответила на самом деле: пустой список, источники без
           // ссылок или вовсе текст — по «ничего не нашлось» не различить.
@@ -244,6 +263,7 @@ router.post("/gpt/step/sources", async (req, res) => {
         blocks_preview,
         sources: picked,
         exhausted,
+        ...(dropped.length ? { dropped_sources: dropped } : {}),
         ai: openaiResp?.ai,
         took_ms: Date.now() - t0,
       }),
