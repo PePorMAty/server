@@ -1033,6 +1033,37 @@ function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT }
   return sectionRows(productKeys(productName), direction, limit).map(sectionSource);
 }
 
+/** Больше стольких промежуточных в строку блока не берём: это подсказка, а не перечень. */
+const MAX_INTERMEDIATES_HINT = 20;
+
+/**
+ * Промежуточные продукты разделов (от модели разбора): id раздела → названия.
+ *
+ * Для обобщения шага: в описании раздела схема бывает изложена целиком
+ * («фенол → … → капролактам»), и модель брала выходом конечный продукт
+ * схемы, пропуская циклогексанон, — хотя разбор раздела его знает. Базы
+ * нет (сервер без источников, проверки без базы) — пусто, и файл базы ради
+ * этого не создаём.
+ */
+function sectionIntermediates(sectionIds) {
+  const ids = [...new Set((sectionIds || []).map(Number).filter(Number.isInteger))];
+  const out = new Map();
+  if (!ids.length || !fs.existsSync(path.join(baseDir(), "sources.sqlite"))) return out;
+  const rows = getDb()
+    .prepare(
+      `SELECT section_id, label FROM section_products
+       WHERE role = 'intermediate' AND origin = 'model' AND section_id IN (${ids.map(() => "?").join(",")})
+       ORDER BY rowid`,
+    )
+    .all(...ids);
+  for (const r of rows) {
+    const list = out.get(r.section_id) ?? [];
+    if (list.length < MAX_INTERMEDIATES_HINT && !list.includes(r.label)) list.push(r.label);
+    out.set(r.section_id, list);
+  }
+  return out;
+}
+
 /**
  * Разделы о преобразовании — для материального баланса: где получают его
  * продукты («вверх», целевой или попутный продукт раздела) и где его сырьё —
@@ -1395,6 +1426,7 @@ module.exports = {
   requeue,
   resetStale,
   sourcesFor,
+  sectionIntermediates,
   sectionsForTransformation,
   countsFor,
   listProducts,

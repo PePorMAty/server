@@ -4,7 +4,8 @@
 //   node .claude/skills/prompt-check/scripts/replay.cjs [флаги] [кейс…]
 //
 // Без флагов — ЖИВАЯ модель: каждый кейс = один запрос обобщения на сервер
-// (по умолчанию боевой) с промптами из ЭТОГО репозитория (как из окна
+// (по умолчанию боевой; +1, если ответ перепрыгнул уровень и сервер ветки
+// переспросил бы модель) с промптами из ЭТОГО репозитория (как из окна
 // «Редактировать промпт»), так что проверяется код ветки, даже если на
 // сервере старый. Флаги:
 //   --dry            без модели: собрать промпт локальным обработчиком
@@ -80,10 +81,46 @@ function localAggregate() {
     });
 }
 
+/**
+ * Блоки — как их соберёт сервер ветки. Промежуточные продукты раздела сервер
+ * берёт из своей базы и ставит строкой в начало блока (aggregate.js,
+ * withIntermediates); в фикстуре они лежат у источника полем intermediates.
+ * Боевой сервер может быть старее и строку не добавит — добавляем сами.
+ */
+function asBranchServer(body) {
+  const sources = (body.sources || []).map(({ intermediates, ...s }) =>
+    intermediates?.length
+      ? { ...s, technology_description: `Промежуточные продукты раздела: ${intermediates.join(", ")}.\n${s.technology_description}` }
+      : s,
+  );
+  return { ...body, sources };
+}
+
+/**
+ * Ответ — как его вернёт сервер ветки: если основной шаг перепрыгнул через
+ * промежуточные продукты раздела, сервер переспрашивает модель в той же
+ * переписке (aggregate.js, utils/levelSkip.js). Боевой сервер переписку в
+ * обобщение не принимает — её текст уходит продолжением шаблона. Второй
+ * запрос — только в этом случае. Возвращает { md, followUp }.
+ */
 async function live(body) {
+  const first = await ask(body);
+  if (body.direction === "up") return { md: first, followUp: null };
+  const { skippedIntermediates, levelFollowUp, mainStep } = require(path.join(REPO, "routes/step/utils/levelSkip.js"));
+  const mid = (body.sources || []).flatMap((s) => s.intermediates || []);
+  const skipped = skippedIntermediates(first, body.productName, mid);
+  if (!skipped.length) return { md: first, followUp: null };
+  const outputs = mainStep(first).outputs;
+  const tail = `\n\n---\nТвой предыдущий ответ на это задание:\n\n${first}\n\n---\n${levelFollowUp(body.productName, outputs, skipped)}`;
+  const second = await ask(body, tail);
+  const fixed = mainStep(second)?.outputs.length ? second : first;
+  return { md: fixed, followUp: `${outputs.join(", ")} мимо ${skipped.join(", ")} → ${mainStep(fixed)?.outputs.join(", ")}` };
+}
+
+async function ask(body, tail = "") {
   const { stepAggregateDefaults } = require(path.join(REPO, "routes/step/utils/prompts.js"));
   const d = stepAggregateDefaults(body.direction === "up" ? "up" : "down");
-  const payload = { ...body, customSystemPrompt: d.system, customUserPrompt: d.template };
+  const payload = { ...asBranchServer(body), customSystemPrompt: d.system, customUserPrompt: d.template + tail };
   for (let attempt = 1; ; attempt++) {
     try {
       const r = await fetch(`${opts.api}/api/graphs/gpt/step/aggregate`, {
@@ -103,7 +140,7 @@ async function live(body) {
 
 (async () => {
   const mode = opts.dry ? "без модели: сборка промпта" : opts.answers ? `без модели: ответы из ${opts.answers}` : `ЖИВАЯ модель через ${opts.api}`;
-  console.log(`prompt-check — ${mode}; кейсов: ${cases.length}${!opts.dry && !opts.answers ? ` (= ${cases.length} запросов к модели)` : ""}`);
+  console.log(`prompt-check — ${mode}; кейсов: ${cases.length}${!opts.dry && !opts.answers ? ` (= ${cases.length} запросов к модели, +1 на кейс с дозапросом)` : ""}`);
   if (!opts.dry && !opts.answers) fs.mkdirSync(opts.out, { recursive: true });
   const aggregate = opts.dry ? localAggregate() : null;
   let failed = 0, broken = 0;
@@ -114,17 +151,19 @@ async function live(body) {
       const add = (ok, title, detail = "") => { if (!ok) failed++; lines.push(`  ${ok ? "✔" : "✘"} ${title}${detail ? ` — ${detail}` : ""}`); };
       try {
         if (opts.dry) {
-          const r = await aggregate(fx.request);
+          const r = await aggregate(asBranchServer(fx.request));
           const input = captured?.input || "";
           add(r.status === 200 && !!captured, "обработчик принял запрос и позвал модель", `HTTP ${r.status}`);
           add(!/<<<[A-Z_]+>>>/.test(input + (captured?.instructions || "")), "все подстановки заполнены");
           add(["<lineage>", "<target_product>", "<existing_chain>", "<blocks>"].every((t) => input.includes(t)) && input.includes(fx.request.productName),
             "данные отделены от шаблона метками", `промпт ${input.length} симв., инструкция ${(captured?.instructions || "").length} симв.`);
         } else {
-          const md = opts.answers
-            ? fs.readFileSync(path.join(opts.answers, `${name}.md`), "utf8")
+          const got = opts.answers
+            ? { md: fs.readFileSync(path.join(opts.answers, `${name}.md`), "utf8"), followUp: null }
             : await live(fx.request);
+          const md = got.md;
           if (!opts.answers) fs.writeFileSync(path.join(opts.out, `${name}.md`), md);
+          if (got.followUp) lines.push(`  ↻ дозапрос о перепрыгивании уровня (+1 запрос): ${got.followUp}`);
           for (const c of checkAnswer(md, fx.request, fx.expect)) add(c.ok, c.title, c.ok ? "" : c.detail.slice(0, 200));
         }
       } catch (e) {

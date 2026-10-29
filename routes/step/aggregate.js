@@ -21,6 +21,30 @@ const {
   stepAggregateDefaults,
 } = require("./utils/prompts");
 const { withoutProspective } = require("../local-sources/utils/prospective");
+const localStore = require("../local-sources/utils/store");
+const { skippedIntermediates, levelFollowUp, mainStep } = require("./utils/levelSkip");
+
+/**
+ * Промежуточные продукты раздела базы — строкой в начале его блока. В конце
+ * её срезала бы обрезка блока (описание раздела — до 2500 знаков, как и
+ * блок). Правило промпта о перепрыгивании уровня ссылается на эту строку.
+ * База недоступна — блоки как были: подсказка, а не условие обобщения.
+ */
+function intermediatesOf(picked) {
+  try {
+    return localStore.sectionIntermediates(picked.map((s) => s?.sectionId));
+  } catch (e) {
+    console.warn("[step/aggregate] промежуточные продукты разделов недоступны:", e.message);
+    return new Map();
+  }
+}
+
+function withIntermediates(picked, blocks, mid) {
+  return blocks.map((b, i) => {
+    const list = mid.get(Number(picked[i]?.sectionId));
+    return list?.length ? `Промежуточные продукты раздела: ${list.join(", ")}.\n${b}` : b;
+  });
+}
 
 // ---------- heartbeat ----------
 function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
@@ -148,7 +172,10 @@ router.post("/gpt/step/aggregate", async (req, res) => {
     sources,
     10,
   );
-  const blocks = rawBlocks.map((b) => clip(b, maxBlockChars)).filter(Boolean);
+  const mid = intermediatesOf(picked);
+  const blocks = withIntermediates(picked, rawBlocks, mid)
+    .map((b) => clip(b, maxBlockChars))
+    .filter(Boolean);
 
   if (blocks.length < 1) {
     return res.status(400).json({
@@ -231,12 +258,54 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       });
     }
 
+    // Перепрыгивание уровня (utils/levelSkip.js): один дозапрос в той же
+    // переписке. Не вышло — отдаём первый ответ: он хотя бы правдив в
+    // остальном, а шаг человек увидит в превью.
+    let finalMarkdown = markdown;
+    let levelCheck;
+    const skipped =
+      direction === "down"
+        ? skippedIntermediates(markdown, productName, [...mid.values()].flat())
+        : [];
+    if (skipped.length) {
+      const outputs = mainStep(markdown)?.outputs ?? [];
+      console.log(
+        `[step/aggregate] «${productName}»: выход ${outputs.join(", ")} — мимо промежуточных ${skipped.join(", ")}; переспрашиваем`,
+      );
+      levelCheck = { skipped, outputs, changed: false };
+      try {
+        const again = await callOpenAIResponsesRaw({
+          payload: {
+            ...payload,
+            input: [
+              { role: "user", content: effectiveUser },
+              { role: "assistant", content: markdown },
+              { role: "user", content: levelFollowUp(productName, outputs, skipped) },
+            ],
+          },
+          timeoutMs: 10 * 60 * 1000,
+          provider,
+          model,
+        });
+        const fixed = (extractOutputText(again) || "").trim();
+        if (again?.status === "completed" && !parseNeedsSources(fixed) && mainStep(fixed)?.outputs.length) {
+          finalMarkdown = fixed;
+          levelCheck.changed = true;
+          levelCheck.outputsAfter = mainStep(fixed).outputs;
+        }
+      } catch (e) {
+        console.warn(`[step/aggregate] дозапрос о перепрыгивании уровня не удался: ${e.message}`);
+      }
+    }
+
     return reply(200, {
       success: true,
       product: productName,
       direction,
-      aggregated_markdown: markdown,
+      aggregated_markdown: finalMarkdown,
       sources: picked,
+      // Необязательное: был ли дозапрос о перепрыгивании уровня и что дал.
+      ...(levelCheck ? { levelCheck } : {}),
     });
   } catch (err) {
     return reply(500, {

@@ -33,7 +33,11 @@
     ],
     "evidence_snippets": [],
     "role": "raw",
-    "baseFor": "бисфенол а"
+    "baseFor": "бисфенол а",
+    "intermediates": [
+     "Полиарилат ДВ эмульсионный",
+     "Реакционная масса"
+    ]
    },
    {
     "origin": "web",
