@@ -200,3 +200,26 @@ test("выход — сама ступень или схема без проме
   await aggregate({ productName: "Фенол", direction: "down", sources: [{ technology_description: "Капролактам из фенола." }] }, [SKIP]);
   assert.equal(calls.length, 1);
 });
+
+test("ответ на дозапрос — поток, которого сервер не называл, — остаётся первый ответ", async () => {
+  process.env.LOCAL_SOURCES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "step-aggregate-reject-"));
+  store.close();
+  const sectionId = capro();
+  const ALKYLATE = answer("Алкилат", "Фенол, водород", "Алкилат — реакционная масса.");
+  await aggregate(
+    { productName: "Фенол", direction: "down", sources: [{ origin: "local", sectionId, technology_description: "Капролактам из фенола." }] },
+    [SKIP, ALKYLATE],
+  );
+  assert.equal(calls.length, 2);
+  assert.match(lastBody.aggregated_markdown, /\*\*Что производят:\*\* \[Капролактам\]/);
+  assert.equal(lastBody.levelCheck.changed, false);
+  assert.deepEqual(lastBody.levelCheck.outputsOffered, ["Алкилат"]);
+});
+
+test("потоки раздела (масло, смесь) в строку промежуточных не попадают", async () => {
+  process.env.LOCAL_SOURCES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "step-aggregate-streams-"));
+  store.close();
+  const sectionId = addSection(["Алкилат", "Лактамное масло", "Циклогексанон"]);
+  await aggregate({ productName: "Фенол", direction: "down", sources: [{ origin: "local", sectionId, technology_description: "Фенол." }] });
+  assert.match(captured.input, /Промежуточные продукты раздела: Циклогексанон\.\n/);
+});

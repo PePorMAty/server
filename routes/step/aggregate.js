@@ -22,7 +22,7 @@ const {
 } = require("./utils/prompts");
 const { withoutProspective } = require("../local-sources/utils/prospective");
 const localStore = require("../local-sources/utils/store");
-const { skippedIntermediates, levelFollowUp, mainStep } = require("./utils/levelSkip");
+const { skippedIntermediates, levelFollowUp, acceptFollowUp, mainStep, isStream } = require("./utils/levelSkip");
 
 /**
  * Промежуточные продукты раздела базы — строкой в начале его блока. В конце
@@ -41,7 +41,9 @@ function intermediatesOf(picked) {
 
 function withIntermediates(picked, blocks, mid) {
   return blocks.map((b, i) => {
-    const list = mid.get(Number(picked[i]?.sectionId));
+    // Потоки (алкилат, реакционная масса, масло) — не продукты: увидев
+    // «Алкилат» в списке, модель брала его выходом шага.
+    const list = (mid.get(Number(picked[i]?.sectionId)) ?? []).filter((p) => !isStream(p));
     return list?.length ? `Промежуточные продукты раздела: ${list.join(", ")}.\n${b}` : b;
   });
 }
@@ -288,7 +290,8 @@ router.post("/gpt/step/aggregate", async (req, res) => {
           model,
         });
         const fixed = (extractOutputText(again) || "").trim();
-        if (again?.status === "completed" && !parseNeedsSources(fixed) && mainStep(fixed)?.outputs.length) {
+        levelCheck.outputsOffered = mainStep(fixed)?.outputs ?? [];
+        if (again?.status === "completed" && !parseNeedsSources(fixed) && acceptFollowUp(fixed, skipped)) {
           finalMarkdown = fixed;
           levelCheck.changed = true;
           levelCheck.outputsAfter = mainStep(fixed).outputs;

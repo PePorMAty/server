@@ -49,19 +49,38 @@ function mainStep(markdown) {
 /** Падежные окончания: «циклогексанон» → «циклогексанона», но не «циклогексан» → «циклогексанол». */
 const ENDING = "(?:а|я|у|ю|ом|ем|ой|ей|е|и|ы|ов|ев|ам|ям|ами|ями|ах|ях|ого|его|ому|ему|ым|им|ых|их|ую|юю|ая|яя|ое|ее|ые|ие|ий|ый)?";
 
+const words = (name) => norm(name).split(/[\s-]+/).filter(Boolean);
+const stemOf = (w) => w.replace(/[аеиоуыэюяйь]{1,2}$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
- * Назван ли продукт в тексте — с поправкой на падежи: каждое слово названия
- * (от 4 букв) — основой без конечной гласной и с падежным окончанием
- * («серная кислота» находит «серной кислотой»), целым словом.
+ * Назван ли продукт в тексте — с поправкой на падежи: слова названия подряд,
+ * каждое — основой без конечной гласной и с падежным окончанием («серная
+ * кислота» находит «серной кислотой»). Именно фразой: по отдельным словам
+ * «Целевой алкилфенол» находился в «выделяется целевой продукт — алкилфенол»
+ * (живой прогон 2026-10-29) — и сервер переспросил модель зря.
  */
 function mentions(text, name) {
-  const words = norm(name).split(/[\s-]+/).filter((w) => w.length >= 4);
-  if (!words.length) return false;
-  return words.every((w) => {
-    const stem = w.replace(/[аеиоуыэюяйь]{1,2}$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(^|[^а-яё])${stem}${ENDING}(?![а-яё])`).test(text);
+  const ws = words(name);
+  if (!ws.some((w) => w.length >= 4)) return false;
+  const phrase = ws.map((w) => `${stemOf(w)}${ENDING}`).join("[\\s-]+");
+  return new RegExp(`(^|[^а-яё])${phrase}(?![а-яё])`).test(text);
+}
+
+/**
+ * Тот же продукт с уточнением — не ступень: «Целевой алкилфенол», «Сырой
+ * алкилфенол» при выходе «Алкилфенол». Сравниваем слова названий: все слова
+ * выхода есть в названии промежуточного.
+ */
+function refinesOutput(mid, outputs) {
+  const m = words(mid).map(stemOf);
+  return outputs.some((o) => {
+    const ow = words(o).map(stemOf).filter((w) => w.length >= 4);
+    return ow.length > 0 && ow.every((w) => m.includes(w));
   });
 }
+
+/** Поток (алкилат, реакционная масса, сырец) — не продукт шага. */
+const isStream = (name) => STREAM.test(norm(name));
 
 /**
  * Промежуточные продукты, через которые основной шаг перепрыгнул: названы в
@@ -82,9 +101,10 @@ function skippedIntermediates(markdown, productName, intermediates) {
   const target = norm(productName);
   return list.filter(
     (p) =>
-      !STREAM.test(p) &&
+      !isStream(p) &&
       norm(p) !== target &&
       !main.outputs.some((o) => norm(o) === norm(p)) &&
+      !refinesOutput(p, main.outputs) &&
       // Второе сырьё шага (дифенилкарбонат при бисфеноле А) — не ступень.
       !main.inputs.some((i) => norm(i) === norm(p)) &&
       mentions(desc, p),
@@ -96,10 +116,23 @@ function levelFollowUp(productName, outputs, skipped) {
   return [
     "Проверка сервера: шаг перепрыгивает уровень.",
     `В «Описании» основного шага названы промежуточные продукты, которые получают из «${productName}» по пути к «${outputs.join(", ")}»: ${skipped.join(", ")}.`,
-    `По правилу «Не перепрыгивай через уровень» выход шага от «${productName}» — первый из них по ходу процесса, а «${outputs.join(", ")}» — уже следующий шаг, от него.`,
+    `По правилу «Не перепрыгивай через уровень» выход шага от «${productName}» — первый из них по ходу процесса, а «${outputs.join(", ")}» — уже следующий шаг, от него. Выход — только один из названных здесь продуктов; технологический поток (реакционная масса, алкилат, сырец) выходом не бывает.`,
     "Верни ответ целиком заново по тому же шаблону: исправь «Что производят» основного шага, его «Из чего производят» (то, что подают на эту ступень), «Краткую формулу шага», «Описание» и строку в «Контроле шага». Альтернативы и остальное оставь как было.",
     `Если ни один из названных продуктов не получают из «${productName}» на первой ступени этого процесса, верни прежний ответ без изменений и объясни это в «Примечаниях».`,
   ].join("\n");
 }
 
-module.exports = { skippedIntermediates, levelFollowUp, mainStep };
+/**
+ * Принять ли ответ на дозапрос: новый выход основного шага — один из
+ * названных сервером промежуточных и не поток. Иначе остаётся первый ответ:
+ * в живом прогоне 2026-10-29 модель на дозапрос ответила «Алкилат»
+ * (реакционной массой), которого сервер вовсе не называл.
+ */
+function acceptFollowUp(markdown, skipped) {
+  const main = mainStep(markdown);
+  if (!main?.outputs.length) return false;
+  const named = new Set(skipped.map(norm));
+  return main.outputs.every((o) => !isStream(o)) && main.outputs.some((o) => named.has(norm(o)));
+}
+
+module.exports = { skippedIntermediates, levelFollowUp, acceptFollowUp, mainStep, isStream };

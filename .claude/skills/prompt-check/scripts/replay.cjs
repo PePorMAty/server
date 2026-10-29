@@ -88,11 +88,13 @@ function localAggregate() {
  * Боевой сервер может быть старее и строку не добавит — добавляем сами.
  */
 function asBranchServer(body) {
-  const sources = (body.sources || []).map(({ intermediates, ...s }) =>
-    intermediates?.length
-      ? { ...s, technology_description: `Промежуточные продукты раздела: ${intermediates.join(", ")}.\n${s.technology_description}` }
-      : s,
-  );
+  const { isStream } = require(path.join(REPO, "routes/step/utils/levelSkip.js"));
+  const sources = (body.sources || []).map(({ intermediates, ...s }) => {
+    const list = (intermediates || []).filter((p) => !isStream(p));
+    return list.length
+      ? { ...s, technology_description: `Промежуточные продукты раздела: ${list.join(", ")}.\n${s.technology_description}` }
+      : s;
+  });
   return { ...body, sources };
 }
 
@@ -103,24 +105,53 @@ function asBranchServer(body) {
  * обобщение не принимает — её текст уходит продолжением шаблона. Второй
  * запрос — только в этом случае. Возвращает { md, followUp }.
  */
+/**
+ * Сервер сам ставит строку промежуточных и переспрашивает (aggregate.js с
+ * ef8a114) — тогда повторять это здесь нельзя: строка задвоится, а дозапрос
+ * уйдёт дважды. Узнаём по его промпту по умолчанию.
+ */
+let serverDoesIt = null;
+async function serverHandlesLevel() {
+  if (serverDoesIt !== null) return serverDoesIt;
+  try {
+    const r = await fetch(`${opts.api}/api/graphs/gpt/step/aggregate/prompt?direction=down`);
+    const j = await r.json();
+    serverDoesIt = /Промежуточные продукты раздела/.test(`${j.system}${j.template}`);
+  } catch {
+    serverDoesIt = false;
+  }
+  return serverDoesIt;
+}
+
 async function live(body) {
-  const first = await ask(body);
+  const fmt = (lc) =>
+    `${lc.outputs.join(", ")} мимо ${lc.skipped.join(", ")} → ${(lc.changed ? lc.outputsAfter : lc.outputs).join(", ")}${lc.changed ? "" : ` (предложено «${(lc.outputsOffered || []).join(", ")}» — не принято)`}`;
+  if (await serverHandlesLevel()) {
+    const json = await ask({ ...body, sources: (body.sources || []).map(({ intermediates, ...s }) => s) }, "", { raw: true });
+    return { md: json.aggregated_markdown, followUp: json.levelCheck ? `сервер: ${fmt(json.levelCheck)}` : null };
+  }
+  const first = await ask(asBranchServer(body));
   if (body.direction === "up") return { md: first, followUp: null };
-  const { skippedIntermediates, levelFollowUp, mainStep } = require(path.join(REPO, "routes/step/utils/levelSkip.js"));
-  const mid = (body.sources || []).flatMap((s) => s.intermediates || []);
+  const { skippedIntermediates, levelFollowUp, acceptFollowUp, mainStep, isStream } = require(path.join(REPO, "routes/step/utils/levelSkip.js"));
+  const mid = (body.sources || []).flatMap((s) => s.intermediates || []).filter((p) => !isStream(p));
   const skipped = skippedIntermediates(first, body.productName, mid);
   if (!skipped.length) return { md: first, followUp: null };
   const outputs = mainStep(first).outputs;
   const tail = `\n\n---\nТвой предыдущий ответ на это задание:\n\n${first}\n\n---\n${levelFollowUp(body.productName, outputs, skipped)}`;
-  const second = await ask(body, tail);
-  const fixed = mainStep(second)?.outputs.length ? second : first;
-  return { md: fixed, followUp: `${outputs.join(", ")} мимо ${skipped.join(", ")} → ${mainStep(fixed)?.outputs.join(", ")}` };
+  const second = await ask(asBranchServer(body), tail);
+  // Как сервер: ответ на дозапрос — только если выход стал названным продуктом.
+  const changed = acceptFollowUp(second, skipped);
+  const fixed = changed ? second : first;
+  return {
+    md: fixed,
+    followUp: fmt({ outputs, skipped, changed, outputsAfter: mainStep(fixed)?.outputs ?? [], outputsOffered: mainStep(second)?.outputs ?? [] }),
+  };
 }
 
-async function ask(body, tail = "") {
+async function ask(body, tail = "", { raw = false } = {}) {
   const { stepAggregateDefaults } = require(path.join(REPO, "routes/step/utils/prompts.js"));
   const d = stepAggregateDefaults(body.direction === "up" ? "up" : "down");
-  const payload = { ...asBranchServer(body), customSystemPrompt: d.system, customUserPrompt: d.template + tail };
+  const payload = { ...body, customSystemPrompt: d.system, customUserPrompt: d.template + tail };
   for (let attempt = 1; ; attempt++) {
     try {
       const r = await fetch(`${opts.api}/api/graphs/gpt/step/aggregate`, {
@@ -130,7 +161,7 @@ async function ask(body, tail = "") {
       });
       const json = JSON.parse((await r.text()).trim());
       if (!json.success) throw new Error(json.error || `HTTP ${r.status}`);
-      return json.aggregated_markdown;
+      return raw ? json : json.aggregated_markdown;
     } catch (e) {
       if (attempt >= 2) throw e;
       await new Promise((ok) => setTimeout(ok, 3000));
