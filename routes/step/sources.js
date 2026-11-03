@@ -169,7 +169,7 @@ router.post("/gpt/step/sources", async (req, res) => {
     let items = found;
     let dropped = [];
     if (found.length) {
-      ({ kept: items, dropped } = await verifyStepSources(found));
+      ({ kept: items, dropped } = await verifyStepSources(found, { productName }));
       if (dropped.length) {
         console.log(
           `[step/sources] «${productName}» (${direction}): отброшено ${dropped.length} — ${dropped.map((d) => d.reason).join("; ")}`,

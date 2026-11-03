@@ -14,9 +14,16 @@
 //   • страница есть, но не о том (в ней нет ключевых слов названия
 //     источника) — выбрасывается;
 //   • сайт не пускает сервер (403, капча, таймаут) — источник остаётся с
-//     пометкой «не проверен»: закрытые журналы бывают и настоящими.
+//     пометкой «не проверен»: закрытые журналы бывают и настоящими;
+//   • источник не о продукте — выбрасывается. Живой прогон 2026-11-03: на
+//     поиск «что делают из алкилсалицилатных присадок» модель вернула
+//     репозиторий GitHub, страницу NVIDIA и данные Всемирного банка — и сама
+//     честно описала их как веб-технологии и машинное обучение. Страницы
+//     настоящие и своим заголовкам соответствуют, так что проверка страницы
+//     их пропускала, а обобщение потратило запрос впустую.
 
 const { fetchSource } = require("../../material-balance/utils/fetch-source");
+const { nameKeys } = require("../../local-sources/utils/store");
 
 /** Сколько страниц грузим одновременно и сколько всего ждём. */
 const CONCURRENCY = 4;
@@ -36,8 +43,76 @@ function isPlaceholder(item) {
   const title = String(item?.title || "").trim();
   return (
     /no_?valid|not_?found|no_?source|нет\s+источник/i.test(hint) ||
-    /^(отсутстви|нет\s|не\s+найден|источник(и|ов)?\s+не\s+найден|no\s+(valid\s+)?sources?)/i.test(title)
+    /^(отсутстви|нет\s|не\s+найден|источник(и|ов)?\s+не\s+найден|no\s+(valid\s+)?sources?)/i.test(title) ||
+    // «Общий обзор отсутствия данных…», «Заключение о невозможности…»,
+    // «Неприменимость предоставленных материалов к задаче» — тоже ответы
+    // модели о том, что источников нет, а не источники.
+    /отсутстви[а-яё]*\s+(данных|источник|информац|патент)|невозможност|неприменимост/i.test(title)
   );
+}
+
+// ---------- о продукте ли источник ----------
+
+const RU = { а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ж: "zh", з: "z", и: "i", й: "i", к: "k", л: "l", м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "kh", ц: "s", ч: "ch", ш: "sh", щ: "sh", ъ: "", ы: "i", ь: "", э: "e", ю: "iu", я: "ia" };
+
+/**
+ * Название вещества по-русски и по-английски — к одной записи латиницей:
+ * «фенол» и «phenol» → fenol, «ацетон» и «acetone» → aset…, «гексан» и
+ * «hexane» → geksan…. Модель описывает источники то по-русски, то
+ * по-английски («Alkylphenol Ethoxylates: Production…»), поэтому русские
+ * основы названия в английском описании не нашлись бы.
+ */
+function skeleton(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[а-я]/g, (c) => RU[c] ?? c)
+    .replace(/ph/g, "f")
+    .replace(/th/g, "t")
+    .replace(/ch/g, "kh")
+    .replace(/ck/g, "k")
+    .replace(/c(?=[eiy])/g, "s")
+    .replace(/c/g, "k")
+    .replace(/x/g, "ks")
+    .replace(/qu/g, "kv")
+    .replace(/w/g, "v")
+    .replace(/y/g, "i")
+    .replace(/h/g, "g")
+    .replace(/kg/g, "kh")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+const consonants = (s) => s.replace(/[aeiou]/g, "");
+
+/** Общие слова названия продукта: по ним «о том ли источник» не понять. */
+const GENERIC = /^(продукт|веществ|смес|сырь|отход|материал|техническ|товарн|раствор)/;
+
+/**
+ * Назван ли продукт в том, что модель сама написала об источнике (название,
+ * адрес, описание, подсказки, цитаты). Каждое слово названия и его
+ * синонимов из справочника — началом записи латиницей. У длинных слов —
+ * ещё и согласными: «хлорбензол» и «chlorobenzene», «этиленгликоль» и
+ * «ethylene glycol» различаются только гласными на стыке. Короткое название
+ * (короче четырёх букв) не проверяем — по нему ничего не понять.
+ */
+function aboutProduct(item, productName) {
+  const hay = skeleton(
+    [item?.title, item?.url, item?.technology_description, ...(item?.inputs_outputs_hint || []), ...(item?.evidence_snippets || [])].join(" "),
+  );
+  const hayC = consonants(hay);
+  // [где искать, что искать]: начало слова в записи — и его согласные.
+  const probes = [];
+  for (const key of nameKeys(productName)) {
+    for (const w of key.split(" ")) {
+      if (GENERIC.test(w)) continue;
+      const s = skeleton(w);
+      if (s.length < 4 || /^\d+$/.test(s)) continue;
+      probes.push([hay, s.slice(0, s.length <= 6 ? Math.max(4, s.length - 2) : Math.max(6, s.length - 3))]);
+      const c = consonants(s);
+      if (c.length >= 5) probes.push([hayC, c.slice(0, c.length - 1)]);
+    }
+  }
+  return !probes.length || probes.some(([where, what]) => where.includes(what));
 }
 
 /** Общие слова названий источников: по ним «о том ли страница» не понять. */
@@ -90,10 +165,11 @@ async function checkOne(item, { signal, fetchPage }) {
 /**
  * Проверить источники. Возвращает { kept, dropped }: kept — с полем
  * server_check { status: "ok" | "unchecked", reason? }; dropped — заглушки,
- * несуществующие и чужие страницы, с причиной. Источники из базы документов
- * (origin: local) не трогаем: их загрузил человек.
+ * источники не о продукте (если назван productName), несуществующие и чужие
+ * страницы, с причиной. Источники из базы документов (origin: local) не
+ * трогаем: их загрузил человек.
  */
-async function verifyStepSources(items, { signal, fetchPage = fetchSource } = {}) {
+async function verifyStepSources(items, { productName, signal, fetchPage = fetchSource } = {}) {
   const list = Array.isArray(items) ? items : [];
   const dropped = [];
   const todo = [];
@@ -101,6 +177,12 @@ async function verifyStepSources(items, { signal, fetchPage = fetchSource } = {}
     if (it?.origin === "local") continue;
     if (isPlaceholder(it)) {
       dropped.push({ title: it?.title || "", url: it?.url || "", reason: "заглушка «источников нет», а не источник" });
+    } else if (productName && !aboutProduct(it, productName)) {
+      dropped.push({
+        title: it?.title || "",
+        url: it?.url || "",
+        reason: `не о «${productName}»: ни в названии, ни в описании источника продукт не назван`,
+      });
     } else {
       todo.push(it);
     }
@@ -130,7 +212,7 @@ async function verifyStepSources(items, { signal, fetchPage = fetchSource } = {}
       continue;
     }
     const r = results.get(it);
-    if (!r) continue; // заглушка
+    if (!r) continue; // заглушка или не о продукте
     if (r.status === "missing" || r.status === "unrelated") {
       dropped.push({ title: it.title || "", url: it.url || "", reason: r.reason });
     } else {
@@ -140,4 +222,4 @@ async function verifyStepSources(items, { signal, fetchPage = fetchSource } = {}
   return { kept, dropped };
 }
 
-module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant };
+module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, skeleton };

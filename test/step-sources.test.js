@@ -58,3 +58,56 @@ test("чужая страница, 404 и несуществующий сайт 
   assert.match(dropped.find((d) => /US4560176A/.test(d.title)).reason, /другая страница: «US4560176A - Inverted cone stuffing box»/);
   assert.match(dropped.find((d) => /Textile/.test(d.title)).reason, /404/);
 });
+
+// Живой прогон 2026-11-03: на поиск вниз от «Алкилсалицилатные присадки»
+// модель вернула страницы о веб-технологиях и машинном обучении. Страницы
+// настоящие — проверка страницы их пропускала.
+const { aboutProduct } = require("../routes/step/utils/verifySources");
+
+test("источник не о продукте — отброшен ещё до загрузки страницы", async () => {
+  let fetched = 0;
+  const { kept, dropped } = await verifyStepSources(
+    [
+      src("GitHub: mattpocock/skills", "https://github.com/mattpocock/skills", {
+        technology_description: "Репозиторий содержит набор навыков и упражнений для изучения современных веб-технологий.",
+        evidence_snippets: ["2026年5月GitHub最受欢迎的十大开源AI项目全解析"],
+      }),
+      src("World Bank Data360", "https://data.worldbank.org/", {
+        technology_description: "Data360 — это платформа Всемирного банка, предоставляющая доступ к данным.",
+      }),
+      src("Overbased calcium alkyl salicylate detergents for marine engine oils", "https://lubes.example.net/salicylates", {
+        technology_description: "Алкилсалицилаты кальция вводят в судовые моторные масла.",
+      }),
+    ],
+    { productName: "Алкилсалицилатные присадки", fetchPage: async () => (fetched++, { title: "Overbased calcium alkyl salicylate detergents", text: "x" }) },
+  );
+  assert.deepEqual(kept.map((k) => k.title.slice(0, 15)), ["Overbased calci"]);
+  assert.equal(fetched, 1);
+  assert.match(dropped[0].reason, /не о «Алкилсалицилатные присадки»/);
+});
+
+test("продукт назван по-английски — источник о нём", () => {
+  const about = (product, title) => aboutProduct({ title, technology_description: "" }, product);
+  for (const [product, title] of [
+    ["Оксиэтилированный алкилфенол", "Alkylphenol Ethoxylates: Production, Properties and Applications"],
+    ["Фенол", "Caprolactam Production via Phenol Route"],
+    ["Хлорбензол", "Nitration of chlorobenzene"],
+    ["Этиленгликоль", "Ethylene glycol to polyester fibres"],
+    ["Стирол", "Styrene polymerization"],
+    ["Ацетон", "Acetone cyanohydrin route to MMA"],
+    ["Гексан", "Hexane as extraction solvent"],
+  ]) {
+    assert.equal(about(product, title), true, `${product} ~ ${title}`);
+  }
+  assert.equal(about("Фенол", "NVIDIA Open Source Projects"), false);
+});
+
+test("ответы модели «данных нет» в виде источника — заглушки", () => {
+  for (const title of [
+    "Общий обзор отсутствия данных по конкретному веществу в открытых базах",
+    "Заключение о невозможности выполнения задачи в заданном формате с текущими данными",
+    "Неприменимость предоставленных материалов к задаче",
+  ]) {
+    assert.equal(isPlaceholder(src(title, "https://www.example-science.org/x")), true, title);
+  }
+});
