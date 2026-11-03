@@ -15,7 +15,7 @@
 //     источника) — выбрасывается;
 //   • сайт не пускает сервер (403, капча, таймаут) — источник остаётся с
 //     пометкой «не проверен»: закрытые журналы бывают и настоящими;
-//   • источник не о продукте — выбрасывается. Живой прогон 2026-11-03: на
+//   • источник не о продукте и вообще не о химии — выбрасывается. Живой прогон 2026-11-03: на
 //     поиск «что делают из алкилсалицилатных присадок» модель вернула
 //     репозиторий GitHub, страницу NVIDIA и данные Всемирного банка — и сама
 //     честно описала их как веб-технологии и машинное обучение. Страницы
@@ -115,6 +115,22 @@ function aboutProduct(item, productName) {
   return !probes.length || probes.some(([where, what]) => where.includes(what));
 }
 
+/**
+ * Слова химии и производства — по-русски и по-английски. Продукт часто
+ * называют сокращением («LDPE», «ПЭНП», «PVC»), которого в справочнике нет:
+ * в живом прогоне 2026-11-03 так выпали источники «Hydrocracking of LDPE…»
+ * у «Полиэтилена низкой плотности». Поэтому источник без названия продукта
+ * выбрасываем, только если он и вовсе не о химии — как репозиторий GitHub
+ * или данные Всемирного банка. («Технолог…» нет нарочно: «веб-технологии».)
+ */
+const CHEMISTRY =
+  /реакц|синтез|катализ|полимер|мономер|сырь|химич|производств|окисл|гидрир|гидрокрек|алкилир|пиролиз|крекинг|ректифик|дистилл|экстракц|нейтрализ|этерифик|сульфир|нитрова|хлориров|кислот|щелоч|олефин|углеводород|растворител|смол|пластик|reaction|synthes|catal|polymer|monomer|feedstock|chemical|oxidat|hydrogenat|alkylat|pyroly|cracking|distill|extract|esterif|sulfon|nitrat|chlorinat|acid|olefin|hydrocarbon|solvent|resin|plastic|refin/i;
+
+function aboutChemistry(item) {
+  const text = [item?.title, item?.technology_description, ...(item?.inputs_outputs_hint || []), ...(item?.evidence_snippets || [])].join(" ");
+  return CHEMISTRY.test(text);
+}
+
 /** Общие слова названий источников: по ним «о том ли страница» не понять. */
 const STOP = new Set(
   (
@@ -177,11 +193,11 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
     if (it?.origin === "local") continue;
     if (isPlaceholder(it)) {
       dropped.push({ title: it?.title || "", url: it?.url || "", reason: "заглушка «источников нет», а не источник" });
-    } else if (productName && !aboutProduct(it, productName)) {
+    } else if (productName && !aboutProduct(it, productName) && !aboutChemistry(it)) {
       dropped.push({
         title: it?.title || "",
         url: it?.url || "",
-        reason: `не о «${productName}»: ни в названии, ни в описании источника продукт не назван`,
+        reason: `не о «${productName}» и вообще не о химии: ни продукта, ни процессов в названии и описании источника`,
       });
     } else {
       todo.push(it);
@@ -222,4 +238,4 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
   return { kept, dropped };
 }
 
-module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, skeleton };
+module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutChemistry, skeleton };

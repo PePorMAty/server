@@ -83,7 +83,22 @@ test("источник не о продукте — отброшен ещё до
   );
   assert.deepEqual(kept.map((k) => k.title.slice(0, 15)), ["Overbased calci"]);
   assert.equal(fetched, 1);
-  assert.match(dropped[0].reason, /не о «Алкилсалицилатные присадки»/);
+  assert.match(dropped[0].reason, /не о «Алкилсалицилатные присадки» и вообще не о химии/);
+});
+
+// Тот же день: у «Полиэтилена низкой плотности» источники звали его LDPE —
+// сокращения в справочнике нет, но это химия, и источник остаётся.
+test("продукт назван сокращением — источник о химии остаётся", async () => {
+  const { kept, dropped } = await verifyStepSources(
+    [
+      src("Hydrocracking of LDPE to Produce Lubricant Base Oils", "https://www.mdpi.com/2073-4344/12/5/512", {
+        technology_description: "Гидрокрекинг ПЭНП на бифункциональных катализаторах даёт базовые масла.",
+      }),
+    ],
+    { productName: "Полиэтилен низкой плотности", fetchPage: async () => ({ title: "Hydrocracking of LDPE to Produce Lubricant Base Oils", text: "x" }) },
+  );
+  assert.equal(kept.length, 1);
+  assert.equal(dropped.length, 0);
 });
 
 test("продукт назван по-английски — источник о нём", () => {
