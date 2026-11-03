@@ -197,18 +197,27 @@ Postgres может через `COPY … PROGRAM` выполнить любую 
 к базе. Поэтому:
 
 ```bash
-sudo -u postgres psql -d gpt_graphs <<'SQL'
-CREATE ROLE graph_app LOGIN PASSWORD 'длинный-случайный-пароль';
+cd ~/server
+PASS=$(openssl rand -hex 24)          # пароль — случайный, руками не набираем
+sudo -u postgres psql -d gpt_graphs -v ON_ERROR_STOP=1 -v pass="$PASS" <<'SQL'
+CREATE ROLE graph_app LOGIN PASSWORD :'pass';
 ALTER DATABASE gpt_graphs OWNER TO graph_app;
--- старые пустые таблицы Sequelize остаются за anton; серверу — доступ к ним
-GRANT ALL ON ALL TABLES IN SCHEMA public TO graph_app;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO graph_app;
+-- старые пустые таблицы Sequelize — тоже ему: сервер создаёт их при запуске
+DO $$ DECLARE t text; BEGIN
+  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I OWNER TO graph_app', t);
+  END LOOP;
+END $$;
 SQL
+cp .env .env.bak-$(date +%F)          # откат: вернуть этот файл и pm2 restart all
+sed -i "s/^DB_USER=.*/DB_USER=graph_app/; s/^DB_PASSWORD=.*/DB_PASSWORD=$PASS/" .env
+node scripts/db-info.js               # «пользователь «graph_app»», без «(суперпользователь)»
+pm2 restart all
+curl -s https://sorangptgraph.xyz/api/health   # database: connected
 ```
 
-В `.env`: `DB_USER=graph_app`, `DB_PASSWORD=…`, затем `pm2 restart all`.
-Проверка: `/api/health` → `database: connected`, а `node scripts/db-info.js`
-показывает пользователя `graph_app` без пометки «суперпользователь».
+Проверено на временном PostgreSQL 16: `graph_app` создаёт схему `app`,
+пишет в старые таблицы, суперпользователем не является.
 
 - Владелец базы может создавать в ней схемы и таблицы — этого хватает для
   миграций.
