@@ -13,7 +13,7 @@
 | База источников `sources.sqlite` и расчёты баланса `material-balance.sqlite` | в том же архиве, снимком (сервер в это время может писать) | так же |
 | PostgreSQL (`pg_dump`, если в `.env` есть `DB_NAME`) | в том же архиве, `postgres.dump` | так же |
 | PDF документов базы | `pdf/<sha256>.pdf.age`, каждый один раз | все |
-| `data/gisp.sqlite` | **не копируется**: справочник, его целиком пересобирает `scripts/import-gisp.js` из выгрузки реестра | — |
+| `data/gisp.sqlite` и выгрузки для него в `data/data-base/` (`production.xlsx`, 138 МБ) | **не копируются**: справочник целиком пересобирает `scripts/import-gisp.js`, а выгрузку при нужде скачивают с ГИСП заново | — |
 
 Всё зашифровано открытым ключом [age](https://age-encryption.org): на сервере
 лежит только он. Прочитать копию можно лишь закрытым ключом, а он есть только
@@ -23,6 +23,11 @@
 уходят вместе с прежним коммитом, поэтому репозиторий не растёт с каждым днём.
 Это нормально для репозитория копий, но **не** для обычного: туда никто,
 кроме сервера, не пишет.
+
+На сервере файлы копии лежат только внутри git в `~/graph-backups/.git`,
+без рабочей копии рядом: так каждый занимает место на диске один раз. Если
+свободного места меньше 300 МБ, скрипт копию не делает — серверу место
+нужнее. В конце он пишет, сколько свободно.
 
 ## Настройка (один раз, ~15 минут)
 
@@ -86,8 +91,8 @@ BACKUP_AGE_RECIPIENT=age1…        # открытый ключ из шага 1
 npm run backup
 ```
 
-Ожидаемый вывод — три строки («Копия …: графов 17; SQLite: …», «PDF
-документов: …», «В папке копий …») и «Отправлено в репозиторий копий.»
+Ожидаемый вывод — «Копия …: графов …; SQLite: …», «PDF документов: …»,
+«В копии: …», «Отправлено в репозиторий копий.» и «На диске свободно …».
 Строки с «⚠» — проблемы: копия при этом сделана из того, что удалось
 собрать, а код выхода 1.
 
@@ -104,13 +109,21 @@ npm run backup
 
 ## Восстановление
 
-На своём компьютере или на сервере, где лежит закрытый ключ:
+На своём компьютере, где лежит закрытый ключ:
 
 ```bash
 git clone git@github.com:PePorMAty/graph-backups.git
 cd graph-backups
 age -d -i ~/graph-backup-key.txt daily/2026-10-30.tar.gz.age | tar xz
 cat snapshot/manifest.json        # дата, число графов, коммит сервера
+```
+
+На сервере копия есть и без GitHub — внутри git (ключ на время положить в
+файл: `cat > ~/graph-backup-key.txt`, вставить, Ctrl+D; потом `shred -u`):
+
+```bash
+git -C ~/graph-backups show main:daily/2026-10-30.tar.gz.age | age -d -i ~/graph-backup-key.txt | tar xz
+git -C ~/graph-backups ls-files          # какие копии есть
 ```
 
 В `snapshot/` лежат:
@@ -129,6 +142,7 @@ cp snapshot/sqlite/sources.sqlite /путь/к/server/data/local-sources/
 cp snapshot/sqlite/material-balance.sqlite /путь/к/server/data/
 # PDF документов базы:
 mkdir -p /путь/к/server/data/local-sources/files
+# (из клона на своём компьютере; на сервере — git show main:pdf/<файл> | age -d …)
 for f in pdf/*.age; do age -d -i ~/graph-backup-key.txt -o "/путь/к/server/data/local-sources/files/$(basename "$f" .age)" "$f"; done
 # PostgreSQL, если нужен:
 pg_restore --clean --if-exists --no-owner -d <база> snapshot/postgres.dump

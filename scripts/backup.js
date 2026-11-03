@@ -19,11 +19,18 @@
 // репозитория не копится: каждая отправка — один коммит с текущим набором
 // файлов, а git досылает только то, чего на GitHub ещё нет.
 //
+// Файлы копии живут только внутри git (индекс и объекты), без рабочей копии
+// рядом: так каждый лежит на диске сервера один раз, а не дважды. Первый
+// запуск 2026-11-03 держал 344 МБ PDF и файлами, и в git — на диске, где
+// свободно несколько сотен мегабайт, это опасно для самого сервера.
+//
 // Что в копии: data/ (графы и всё рядом с ними, ссылки «Поделиться»), снимки
 // баз SQLite источников и балансов, дамп PostgreSQL — ежедневным архивом
 // (хранятся 7 последних и по одному на месяц за полгода); PDF документов
-// базы — каждый один раз, под своим sha256. Не копируется data/gisp.sqlite:
-// это справочник, который целиком пересобирает scripts/import-gisp.js.
+// базы — каждый один раз, под своим sha256. Не копируются справочник ГИСП
+// data/gisp.sqlite и выгрузки для него в data/data-base/ (production.xlsx —
+// 138 МБ): справочник целиком пересобирает scripts/import-gisp.js, а выгрузку
+// при нужде скачивают с ГИСП заново.
 
 const fs = require("fs");
 const os = require("os");
@@ -42,10 +49,19 @@ const REPO = path.resolve(process.env.BACKUP_DIR || path.join(os.homedir(), "gra
 const RECIPIENT = String(process.env.BACKUP_AGE_RECIPIENT || "").trim();
 const PUSH = !process.argv.includes("--no-push");
 
+/** Папки data/, которые в копию не идут (см. шапку). */
+const SKIP_DIRS = new Set(["data-base"]);
+
 const KEEP_DAILY = 7;
 const KEEP_MONTHLY = 6;
 /** GitHub не принимает файлы больше 100 МБ. */
 const MAX_FILE = 95 * 1024 * 1024;
+/**
+ * Столько должно остаться свободным на диске после копии. Сервер пишет
+ * базы SQLite и журналы pm2; забитый диск остановит его, а это хуже, чем
+ * пропущенная копия.
+ */
+const MIN_FREE = Number(process.env.BACKUP_MIN_FREE_MB || 300) * 1024 * 1024;
 
 // Дата по часам сервера: копия «за 30-е» — та, что снята 30-го.
 const today = new Date().toLocaleDateString("sv-SE");
@@ -55,12 +71,15 @@ const problems = [];
 
 function sh(cmd, args, opts = {}) {
   try {
-    return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts });
+    return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, ...opts });
   } catch (e) {
     const why = String(e.stderr || e.message).trim().split("\n").slice(-3).join(" ");
     throw new Error(`${cmd}: ${why}`);
   }
 }
+
+const git = (...args) =>
+  sh("git", ["-C", REPO, "-c", "user.name=graph-backup", "-c", "user.email=graph-backup@localhost", ...args]).trim();
 
 function stop(message) {
   console.error(`Копию не сделал: ${message}`);
@@ -68,6 +87,10 @@ function stop(message) {
 }
 
 const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(1).replace(".", ",")} МБ`;
+const freeBytes = () => {
+  const s = fs.statfsSync(REPO);
+  return s.bavail * s.bsize;
+};
 
 function checkSetup() {
   if (!/^age1[0-9a-z]{58}$/.test(RECIPIENT)) {
@@ -83,10 +106,17 @@ function checkSetup() {
   if (!fs.existsSync(path.join(DATA, "saved-graphs"))) {
     stop(`в ${DATA} нет saved-graphs — это не папка данных сервера.`);
   }
-  if (PUSH && !fs.existsSync(path.join(REPO, ".git"))) {
-    stop(`${REPO} — не клон репозитория копий (BACKUP.md, шаг 3). Только локально — с --no-push.`);
+  if (!fs.existsSync(path.join(REPO, ".git"))) {
+    if (PUSH) stop(`${REPO} — не клон репозитория копий (BACKUP.md, шаг 3). Только локально — с --no-push.`);
+    fs.mkdirSync(REPO, { recursive: true });
+    git("init", "-q");
   }
-  for (const sub of ["daily", "monthly", "pdf", "local"]) fs.mkdirSync(path.join(REPO, sub), { recursive: true });
+  if (freeBytes() < MIN_FREE) {
+    stop(`на диске свободно ${mb(freeBytes())} — меньше запаса ${mb(MIN_FREE)}, который нужен серверу.`);
+  }
+  // Первый запуск держал файлы копии ещё и рабочей копией — они уже в git,
+  // а на диске занимают столько же ещё раз.
+  for (const sub of ["daily", "monthly", "pdf"]) fs.rmSync(path.join(REPO, sub), { recursive: true, force: true });
 }
 
 /** Снимок данных в dir: data/, базы SQLite, дамп PostgreSQL. Возвращает манифест. */
@@ -95,8 +125,15 @@ async function snapshot(dir) {
   // и копия посреди записи битая. Их снимает backup() ниже.
   fs.cpSync(DATA, path.join(dir, "data"), {
     recursive: true,
-    filter: (src) =>
-      path.resolve(src) !== SOURCES_DIR && path.resolve(src) !== REPO && !/\.sqlite(-wal|-shm|-journal)?$/.test(src),
+    filter: (src) => {
+      const p = path.resolve(src);
+      return (
+        p !== SOURCES_DIR &&
+        p !== REPO &&
+        !(path.dirname(p) === DATA && SKIP_DIRS.has(path.basename(p))) &&
+        !/\.sqlite(-wal|-shm|-journal)?$/.test(p)
+      );
+    },
   });
 
   const sqlite = {};
@@ -154,84 +191,89 @@ async function snapshot(dir) {
   return manifest;
 }
 
+const tracked = (prefix) => git("ls-files", "--", prefix).split("\n").filter(Boolean);
+
 /**
- * Готовый файл — в репозиторий, если GitHub его примет; иначе в local/
- * (в git не попадает) и в список проблем.
+ * Готовый зашифрованный файл — в git под именем target (без рабочей копии).
+ * Больше, чем примет GitHub, — в local/ (в git не попадает) и в список
+ * проблем. Возвращает sha объекта или null.
  */
-function place(tmp, target) {
+function store(tmp, target) {
   const size = fs.statSync(tmp).size;
   if (size > MAX_FILE) {
+    fs.mkdirSync(path.join(REPO, "local"), { recursive: true });
     const kept = path.join(REPO, "local", path.basename(target));
     fs.renameSync(tmp, kept);
-    problems.push(
-      `${path.relative(REPO, target)} — ${mb(size)}, GitHub такой файл не примет; лежит только на сервере (${kept}). Пора переносить копии в объектное хранилище (BACKUP.md).`,
-    );
-    return false;
+    problems.push(`${target} — ${mb(size)}, GitHub такой файл не примет; лежит только на сервере (${kept}).`);
+    return null;
   }
-  fs.renameSync(tmp, target);
-  return true;
+  const sha = git("hash-object", "-w", tmp);
+  git("update-index", "--add", "--cacheinfo", `100644,${sha},${target}`);
+  fs.rmSync(tmp);
+  return sha;
 }
 
 function archive(stage) {
-  const target = path.join(REPO, "daily", `${today}.tar.gz.age`);
-  const tmp = `${target}.part`;
+  const tmp = path.join(stage, "daily.tar.gz.age");
   // tar сразу в age: незашифрованного архива на диске не бывает.
   sh("bash", ["-c", 'set -o pipefail; tar -C "$1" -czf - snapshot | age -r "$2" -o "$3"', "backup", stage, RECIPIENT, tmp]);
   const size = fs.statSync(tmp).size;
-  if (!place(tmp, target)) return size;
-  const monthly = path.join(REPO, "monthly", `${month}.tar.gz.age`);
-  if (!fs.existsSync(monthly)) fs.copyFileSync(target, monthly);
+  const sha = store(tmp, `daily/${today}.tar.gz.age`);
+  // Помесячная — тот же объект git: места не занимает.
+  const monthly = `monthly/${month}.tar.gz.age`;
+  if (sha && !tracked(monthly).length) git("update-index", "--add", "--cacheinfo", `100644,${sha},${monthly}`);
   return size;
 }
 
 /** PDF документов базы — каждый один раз: файл назван по sha256, он не меняется. */
-function pdfs() {
+function pdfs(stage) {
   const dir = path.join(SOURCES_DIR, "files");
   if (!fs.existsSync(dir)) return { added: 0, total: 0 };
+  const have = new Set(tracked("pdf/"));
   let added = 0;
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".pdf"));
   for (const f of files) {
-    const target = path.join(REPO, "pdf", `${f}.age`);
-    if (fs.existsSync(target) || fs.existsSync(path.join(REPO, "local", `${f}.age`))) continue;
-    sh("age", ["-r", RECIPIENT, "-o", `${target}.part`, path.join(dir, f)]);
-    if (place(`${target}.part`, target)) added++;
+    const target = `pdf/${f}.age`;
+    if (have.has(target) || fs.existsSync(path.join(REPO, "local", `${f}.age`))) continue;
+    const size = fs.statSync(path.join(dir, f)).size;
+    if (freeBytes() - size * 2 < MIN_FREE) {
+      problems.push(`на диске мало места — PDF без копии пропущены (свободно ${mb(freeBytes())}).`);
+      break;
+    }
+    const tmp = path.join(stage, `${f}.age`);
+    sh("age", ["-r", RECIPIENT, "-o", tmp, path.join(dir, f)]);
+    if (store(tmp, target)) added++;
   }
   return { added, total: files.length };
 }
 
 function rotate(sub, keep) {
-  const dir = path.join(REPO, sub);
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".tar.gz.age")).sort();
-  for (const f of files.slice(0, Math.max(0, files.length - keep))) fs.rmSync(path.join(dir, f));
+  const files = tracked(`${sub}/`).filter((f) => f.endsWith(".tar.gz.age")).sort();
+  for (const f of files.slice(0, Math.max(0, files.length - keep))) git("rm", "-q", "--cached", "--", f);
   return Math.min(files.length, keep);
 }
 
 /**
- * Один коммит без родителя с текущим набором файлов — и на GitHub с заменой.
- * Старые копии уходят из репозитория вместе с прежним коммитом, поэтому он не
- * растёт с каждым днём; досылаются только новые файлы.
+ * Один коммит без родителя с текущим набором файлов. Старые копии уходят
+ * из репозитория вместе с прежним коммитом, поэтому он не растёт с каждым
+ * днём; на GitHub досылаются только новые файлы.
  */
-function publish() {
-  const git = (...args) =>
-    sh("git", ["-C", REPO, "-c", "user.name=graph-backup", "-c", "user.email=graph-backup@localhost", ...args]).trim();
-  fs.writeFileSync(path.join(REPO, ".gitignore"), "local/\n*.part\n");
-  git("add", "-A");
+function commit() {
   const tree = git("write-tree");
-  const commit = git("commit-tree", tree, "-m", `Копия ${today}`);
-  git("update-ref", "refs/heads/main", commit);
+  const sha = git("commit-tree", tree, "-m", `Копия ${today}`);
+  git("update-ref", "refs/heads/main", sha);
   git("symbolic-ref", "HEAD", "refs/heads/main");
-  git("push", "-q", "--force", "origin", "main");
-  // Прежние коммиты больше ни на что не нужны — и место на диске тоже.
-  git("reflog", "expire", "--expire=now", "--all");
-  git("prune", "--expire=now");
+  const size = git("ls-tree", "-r", "-l", tree)
+    .split("\n")
+    .reduce((sum, line) => sum + (Number(line.split(/\s+/)[3]) || 0), 0);
+  return size;
 }
 
-function repoSize() {
-  let total = 0;
-  for (const sub of ["daily", "monthly", "pdf"]) {
-    for (const f of fs.readdirSync(path.join(REPO, sub))) total += fs.statSync(path.join(REPO, sub, f)).size;
-  }
-  return total;
+function cleanUp() {
+  // Прежние коммиты и вытесненные копии больше ни на что не нужны — и место
+  // на диске тоже.
+  git("reflog", "expire", "--expire=now", "--all");
+  git("prune", "--expire=now");
 }
 
 async function main() {
@@ -240,25 +282,29 @@ async function main() {
   try {
     const manifest = await snapshot(path.join(stage, "snapshot"));
     const size = archive(stage);
-    const pdf = pdfs();
+    fs.rmSync(path.join(stage, "snapshot"), { recursive: true, force: true });
+    const pdf = pdfs(stage);
     const daily = rotate("daily", KEEP_DAILY);
     const monthly = rotate("monthly", KEEP_MONTHLY);
+    const total = commit();
 
     const dbs = Object.entries(manifest.sqlite).map(([n, s]) => `${n.replace(".sqlite", "")} ${mb(s)}`);
     console.log(
       `Копия ${today}: графов ${manifest.graphs}; SQLite: ${dbs.join(", ") || "нет"}; PostgreSQL: ${manifest.postgres}; архив ${mb(size)}.`,
     );
     console.log(`PDF документов: ${pdf.total}, новых в копии ${pdf.added}.`);
-    console.log(`В папке копий ${REPO}: ежедневных ${daily}, помесячных ${monthly}, всего ${mb(repoSize())}.`);
+    console.log(`В копии: ежедневных ${daily}, помесячных ${monthly}, всего ${mb(total)}.`);
 
     if (PUSH) {
       try {
-        publish();
+        git("push", "-q", "--force", "origin", "main");
         console.log("Отправлено в репозиторий копий.");
       } catch (e) {
         problems.push(`не отправилось на GitHub — ${e.message}`);
       }
     }
+    cleanUp();
+    console.log(`На диске свободно ${mb(freeBytes())}.`);
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
   }
