@@ -8,12 +8,14 @@ Node.js, Express 5, CommonJS.
 ## Владелец и порядок работы
 - Общаемся по-русски, дружелюбно, с объяснением, что и зачем делаем.
 - **Ничего не мержить без подтверждения владельца.** PR — только по просьбе.
-- Ветки устроены не так, как в клиенте: какая ветка сейчас на боевом
-  сервере, уточняй у владельца. Общая рабочая ветка —
-  `claude/combined-testing` (в ней слиты `claude/cloud-product-testing-cg98tm`
-  и `claude/beautiful-hamilton-4whfax`); новую работу начинай от неё.
+- Ветки (с 2026-11-09): `develop` — то, что на боевом сервере. Работа идёт
+  в своей ветке от `develop`; владелец сливает её в `develop` и выкладывает.
+  В `develop` пушить нельзя. Прежние общие ветки (`claude/combined-testing`,
+  `claude/cloud-product-testing-cg98tm`, `claude/beautiful-hamilton-4whfax`)
+  в него влиты; `main` — старая, не трогать.
 - Боевой сервер — https://sorangptgraph.xyz/api (pm2 за nginx), выкладывает
-  владелец. `ecosystem.config.js` — шаблон pm2, не настоящая конфигурация.
+  владелец: `git checkout develop && git pull && pm2 restart all`.
+  `ecosystem.config.js` — шаблон pm2, не настоящая конфигурация.
 
 ## Запуск и проверки
 - `node server.js` (порт `PORT`, по умолчанию 3001; проверка — `/api/health`).
