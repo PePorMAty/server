@@ -1,0 +1,50 @@
+{
+ "note": "Полиэтилен низкой плотности вниз (живой прогон этилена 2026-11-03): в базе переработки нет, поиск нашёл только вторичную переработку отходов LDPE; модель выдала «Пиролиз → Пиролизная жидкость», и цепочка ушла в бионефть. Переработка отходов — не следующий шаг: продолжения нет, клиент предложит проверку «что из него делают».",
+ "expect": {
+  "mainEmpty": true,
+  "forbidOutputs": [
+   "Пиролизная жидкость",
+   "Жидкие продукты пиролиза",
+   "Пиролизное масло"
+  ]
+ },
+ "request": {
+  "productName": "Полиэтилен низкой плотности",
+  "direction": "down",
+  "sources": [
+   {
+    "title": "LDPE Recycling and Chemical Conversion Technologies",
+    "url": "https://www.sciencedirect.com/science/article/pii/S0016236121005678",
+    "access_hint": "text pdf",
+    "technology_description": "The document details the chemical recycling of Low-Density Polyethylene (LDPE) via pyrolysis and catalytic cracking to produce liquid fuels and chemical feedstocks. LDPE is introduced as the primary feedstock into a fluidized bed reactor. The process involves thermal degradation at temperatures between 450-550°C in an inert atmosphere. The polymer chains undergo random scission, producing a mixture of alkanes, alkenes, and dienes. Catalytic upgrading using Zeolite ZSM-5 is described to enhance the selectivity towards light olefins (ethylene, propylene) and aromatics (benzene, toluene, xylene). The output stream is condensed and fractionated into naphtha, diesel, and wax fractions. The naphtha fraction is explicitly identified as a potential feedstock for steam crackers to regenerate ethylene monomer, closing the loop. The text specifies that LDPE's branched structure facilitates lower activation energy for cracking compared to HDPE, resulting in higher yields of liquid products at lower temperatures. Impurities such as chlorine from contaminants are removed via caustic scrubbing of the off-gas before condensation.",
+    "inputs_outputs_hint": [
+     "Input: Waste LDPE pellets/flakes",
+     "Reagents/Catalysts: Zeolite ZSM-5, Nitrogen (inert gas)",
+     "Output: Pyrolysis oil (naphtha/diesel range), Light gases (C1-C4), Wax",
+     "By-products: Char, non-condensable gases"
+    ],
+    "evidence_snippets": [
+     "LDPE was fed into the fluidized bed reactor at a rate of 5 kg/h.",
+     "The branched structure of LDPE allows for easier chain scission compared to linear polyethylenes.",
+     "Catalytic cracking over ZSM-5 significantly increased the yield of aromatic hydrocarbons in the liquid product.",
+     "The resulting pyrolysis oil can be used as a substitute for fossil naphtha in steam crackers."
+    ],
+    "server_check": {
+     "status": "unchecked",
+     "reason": "доступ закрыт (HTTP 403): нужен вход или сайт не пускает сервер"
+    }
+   }
+  ],
+  "existingChain": "Как «Полиэтилен низкой плотности» попал в цепочку (уже построенные шаги):\n- «Этилен» → [Полимеризация этилена] → «Полиэтилен низкой плотности»",
+  "existingProducts": [
+   "Этилен",
+   "Полиэтилен низкой плотности"
+  ],
+  "ancestorProducts": [
+   "Полиэтилен низкой плотности",
+   "Этилен"
+  ],
+  "provider": "qwen",
+  "model": "qwen3.7-plus"
+ }
+}

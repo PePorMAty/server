@@ -101,14 +101,19 @@ function checkAnswer(md, request, expect = {}) {
   const mainNew = down ? a.main.outputs : a.main.inputs;
   const mainRow = a.control.find((c) => (down ? c.outputs : c.inputs).some((x) => mainNew.some((y) => same(x, y))));
   const maxTotal = Math.max(0, ...a.control.map((c) => c.total));
-  add("в «Контроле шага» посчитаны блоки", a.control.length > 0, `${a.control.length} строк`);
-  if (a.control.length)
-    add("основной шаг — самый подтверждённый", mainRow && mainRow.total === maxTotal,
-      `основной: ${mainNew.join(", ")} (всего ${mainRow?.total ?? "?"}), максимум ${maxTotal}`);
+  if (expect.mainEmpty) {
+    // Тупик — правильный ответ: продолжения в блоках нет, считать нечего.
+    add("продолжения нет — «Что производят» пусто", !a.main.outputs.length, a.main.outputs.join(", ") || "[]");
+  } else {
+    add("в «Контроле шага» посчитаны блоки", a.control.length > 0, `${a.control.length} строк`);
+    if (a.control.length)
+      add("основной шаг — самый подтверждённый", mainRow && mainRow.total === maxTotal,
+        `основной: ${mainNew.join(", ")} (всего ${mainRow?.total ?? "?"}), максимум ${maxTotal}`);
+  }
 
   if (expect.forbidOutputs) {
     const bad = allOutputs.filter((x) => expect.forbidOutputs.some((f) => same(x, f)));
-    add(`нет перепрыгивания уровня (не выход: ${expect.forbidOutputs.join(", ")})`, !bad.length,
+    add(`нет недопустимых выходов (${expect.forbidOutputs.join(", ")})`, !bad.length,
       bad.length ? `выход: ${bad.join(", ")}` : `выходы: ${allOutputs.join(", ")}`);
   }
   if (expect.someOutputs)
@@ -117,6 +122,10 @@ function checkAnswer(md, request, expect = {}) {
     add(`основной выход: ${expect.mainOutputs.join(", ")}`, expect.mainOutputs.every((x) => a.main.outputs.some((y) => same(x, y))), a.main.outputs.join(", "));
   if (expect.mainInputs)
     add(`второе сырьё основного шага: ${expect.mainInputs.join(", ")}`, expect.mainInputs.every((x) => a.main.inputs.some((y) => same(x, y))), a.main.inputs.join(", "));
+  if (expect.forbidMainInputs) {
+    const bad = a.main.inputs.filter((x) => expect.forbidMainInputs.some((f) => same(x, f)));
+    add(`нет чужого сырья во входах основного шага (${expect.forbidMainInputs.join(", ")})`, !bad.length, a.main.inputs.join(", "));
+  }
   if (expect.mainByproducts)
     add(`побочные основного шага: ${expect.mainByproducts.join(", ")}`, expect.mainByproducts.every((x) => a.main.byproducts.some((y) => same(x, y))), a.main.byproducts.join(", ") || "[]");
   return out;

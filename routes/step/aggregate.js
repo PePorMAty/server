@@ -23,6 +23,7 @@ const {
 const { withoutProspective } = require("../local-sources/utils/prospective");
 const localStore = require("../local-sources/utils/store");
 const { skippedIntermediates, levelFollowUp, acceptFollowUp, mainStep, isStream } = require("./utils/levelSkip");
+const { outputProblem, outputFollowUp, acceptOutputFollowUp } = require("./utils/outputCheck");
 
 /**
  * Промежуточные продукты раздела базы — строкой в начале его блока. В конце
@@ -301,6 +302,42 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       }
     }
 
+    // Выход — не продукт (utils/outputCheck.js): класс веществ или
+    // переработка отходов. Тоже один дозапрос в той же переписке; не вышло —
+    // отдаём что есть.
+    let outputCheck;
+    const problem = direction === "down" ? outputProblem(finalMarkdown, picked) : null;
+    if (problem) {
+      console.log(
+        `[step/aggregate] «${productName}»: выход ${problem.outputs.join(", ")} — ${{ waste: "переработка отходов", generic: "не продукт", mixture: "смесь одной строкой" }[problem.kind]}; переспрашиваем`,
+      );
+      outputCheck = { kind: problem.kind, outputs: problem.outputs, changed: false };
+      try {
+        const again = await callOpenAIResponsesRaw({
+          payload: {
+            ...payload,
+            input: [
+              { role: "user", content: effectiveUser },
+              { role: "assistant", content: finalMarkdown },
+              { role: "user", content: outputFollowUp(productName, problem) },
+            ],
+          },
+          timeoutMs: 10 * 60 * 1000,
+          provider,
+          model,
+        });
+        const fixed = (extractOutputText(again) || "").trim();
+        outputCheck.outputsOffered = mainStep(fixed)?.outputs ?? [];
+        if (again?.status === "completed" && !parseNeedsSources(fixed) && acceptOutputFollowUp(fixed, problem)) {
+          finalMarkdown = fixed;
+          outputCheck.changed = true;
+          outputCheck.outputsAfter = mainStep(fixed).outputs;
+        }
+      } catch (e) {
+        console.warn(`[step/aggregate] дозапрос о выходе шага не удался: ${e.message}`);
+      }
+    }
+
     return reply(200, {
       success: true,
       product: productName,
@@ -309,6 +346,8 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       sources: picked,
       // Необязательное: был ли дозапрос о перепрыгивании уровня и что дал.
       ...(levelCheck ? { levelCheck } : {}),
+      // Необязательное: был ли дозапрос о выходе-не-продукте и что дал.
+      ...(outputCheck ? { outputCheck } : {}),
     });
   } catch (err) {
     return reply(500, {

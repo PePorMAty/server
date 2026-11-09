@@ -223,3 +223,63 @@ test("потоки раздела (масло, смесь) в строку пр�
   await aggregate({ productName: "Фенол", direction: "down", sources: [{ origin: "local", sectionId, technology_description: "Фенол." }] });
   assert.match(captured.input, /Промежуточные продукты раздела: Циклогексанон\.\n/);
 });
+
+// ---------- выход — не продукт: дозапрос (utils/outputCheck.js) ----------
+// Живые прогоны 2026-11-03: «Пиролизная жидкость» → «Углеводороды»; ПЭНП →
+// пиролиз отходов по единственному источнику «LDPE Recycling…».
+const web = (title) => ({ title, url: "https://www.sciencedirect.com/x", technology_description: "Побочные/отходы: газ, кокс." });
+
+test("выход — класс веществ: один дозапрос; названный продукт в ответе принимается", async () => {
+  const HC = answer("Углеводороды", "Пиролизная жидкость, водород", "Гидродеоксигенация даёт смесь углеводородов.");
+  const OK = answer("Дизельное топливо", "Пиролизная жидкость, водород", "Гидроочищенную жидкость фракционируют.");
+  await aggregate({ productName: "Пиролизная жидкость", direction: "down", sources: [web("Upgrading of pyrolysis oil by hydrodeoxygenation")] }, [HC, OK]);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].input[2].content, /«Углеводороды» — класс веществ/);
+  assert.match(lastBody.aggregated_markdown, /\[Дизельное топливо\]/);
+  assert.deepEqual(lastBody.outputCheck, { kind: "generic", outputs: ["Углеводороды"], changed: true, outputsOffered: ["Дизельное топливо"], outputsAfter: ["Дизельное топливо"] });
+});
+
+test("все источники — о переработке отходов: дозапрос; принимается только пустой выход", async () => {
+  const NAPHTHA = answer("Нафта", "Полиэтилен низкой плотности", "Термический крекинг полиэтилена.");
+  const EMPTY = answer("", "Полиэтилен низкой плотности", "Описана только переработка отходов.");
+  await aggregate({ productName: "Полиэтилен низкой плотности", direction: "down", sources: [web("LDPE Recycling and Chemical Conversion Technologies")] }, [NAPHTHA, EMPTY]);
+  assert.match(calls[1].input[2].content, /переработка отходов/);
+  assert.match(lastBody.aggregated_markdown, /\*\*Что производят:\*\* \[\]/);
+  assert.equal(lastBody.outputCheck.kind, "waste");
+  assert.equal(lastBody.outputCheck.changed, true);
+
+  // Модель настаивает на продукте — остаётся первый ответ, но видно, что спрашивали.
+  await aggregate({ productName: "Полиэтилен низкой плотности", direction: "down", sources: [web("LDPE Recycling and Chemical Conversion Technologies")] }, [NAPHTHA, NAPHTHA]);
+  assert.match(lastBody.aggregated_markdown, /\[Нафта\]/);
+  assert.equal(lastBody.outputCheck.changed, false);
+});
+
+test("отходы только в описании, товарная фракция, разделы базы — без дозапроса", async () => {
+  // «Побочные/отходы» есть в описании любого источника — смотрим только название.
+  await aggregate({ productName: "Этилен", direction: "down", sources: [web("Production of LDPE by high-pressure polymerization")] }, [
+    answer("Полиэтилен низкой плотности", "Этилен", "Полимеризация при высоком давлении."),
+  ]);
+  assert.equal(calls.length, 1);
+  assert.equal(lastBody.outputCheck, undefined);
+  // «Смола пиролиза», «Фракция C4» — продукты; «углеводороды C5–C6» — с составом.
+  await aggregate({ productName: "Пиролизный бензин", direction: "down", sources: [web("Pygas hydrotreating")] }, [
+    answer("Смола пиролиза, Фракция C4, Углеводороды C5–C6", "Пиролизный бензин", "Разделение."),
+  ]);
+  assert.equal(calls.length, 1);
+  // Раздел базы — о производстве, даже если в названии «утилизация».
+  await aggregate({ productName: "Полиэтилен низкой плотности", direction: "down", sources: [{ origin: "local", sectionId: 999, title: "Утилизация отходов полиэтилена", technology_description: "…" }] }, [
+    answer("Нафта", "Полиэтилен низкой плотности", "Крекинг."),
+  ]);
+  assert.equal(calls.length, 1);
+});
+
+test("«Смесь X и Y» — дозапрос; продукты по отдельности принимаются", async () => {
+  const MIX = answer("Смесь циклогексанола и циклогексанона", "Циклогексан, кислород", "Окисление до смеси спирта и кетона.");
+  const SPLIT = answer("Циклогексанол, Циклогексанон", "Циклогексан, кислород", "Окисление до смеси спирта и кетона.");
+  await aggregate({ productName: "Циклогексан", direction: "down", sources: [web("Cyclohexane oxidation to KA oil")] }, [MIX, SPLIT]);
+  assert.match(calls[1].input[2].content, /запиши каждый продукт отдельно/);
+  assert.deepEqual(lastBody.outputCheck.outputsAfter, ["Циклогексанол", "Циклогексанон"]);
+  // Товарная смесь без «и» («Смесь пропан-бутановая») — не повод переспрашивать.
+  await aggregate({ productName: "Пропан", direction: "down", sources: [web("LPG blending")] }, [answer("Смесь пропан-бутановая", "Пропан, бутан", "Смешение.")]);
+  assert.equal(calls.length, 1);
+});

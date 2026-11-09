@@ -123,12 +123,53 @@ async function serverHandlesLevel() {
   return serverDoesIt;
 }
 
+/** Сервер сам переспрашивает о выходе-не-продукте (outputCheck.js) — с тем же выкладом, что и правило в промпте. */
+let serverChecksOutput = null;
+async function serverHandlesOutput() {
+  if (serverChecksOutput !== null) return serverChecksOutput;
+  try {
+    const r = await fetch(`${opts.api}/api/graphs/gpt/step/aggregate/prompt?direction=down`);
+    const j = await r.json();
+    serverChecksOutput = /Переработка ОТХОДОВ продукта/.test(`${j.system}${j.template}`);
+  } catch {
+    serverChecksOutput = false;
+  }
+  return serverChecksOutput;
+}
+
+const fmtOutput = (oc) =>
+  `${oc.outputs.join(", ")} — ${{ waste: "переработка отходов", generic: "не продукт", mixture: "смесь одной строкой" }[oc.kind]} → ${(oc.changed ? oc.outputsAfter : oc.outputs).join(", ") || "[]"}${oc.changed ? "" : ` (предложено «${(oc.outputsOffered || []).join(", ")}» — не принято)`}`;
+
+/**
+ * Выход — не продукт (класс веществ, переработка отходов): дозапрос, как у
+ * сервера ветки (aggregate.js, utils/outputCheck.js), если боевой сервер
+ * этого ещё не умеет. +1 запрос на такой кейс.
+ */
+async function withOutputCheck(body, { md, followUp }) {
+  if (body.direction === "up" || (await serverHandlesOutput())) return { md, followUp };
+  const { outputProblem, outputFollowUp, acceptOutputFollowUp } = require(path.join(REPO, "routes/step/utils/outputCheck.js"));
+  const { mainStep } = require(path.join(REPO, "routes/step/utils/levelSkip.js"));
+  const problem = outputProblem(md, body.sources);
+  if (!problem) return { md, followUp };
+  const tail = `\n\n---\nТвой предыдущий ответ на это задание:\n\n${md}\n\n---\n${outputFollowUp(body.productName, problem)}`;
+  const second = await ask(asBranchServer(body), tail);
+  const changed = acceptOutputFollowUp(second, problem);
+  const fixed = changed ? second : md;
+  const note = fmtOutput({ ...problem, changed, outputsAfter: mainStep(fixed)?.outputs ?? [], outputsOffered: mainStep(second)?.outputs ?? [] });
+  return { md: fixed, followUp: [followUp, note].filter(Boolean).join("; ") };
+}
+
 async function live(body) {
+  return withOutputCheck(body, await liveLevel(body));
+}
+
+async function liveLevel(body) {
   const fmt = (lc) =>
     `${lc.outputs.join(", ")} мимо ${lc.skipped.join(", ")} → ${(lc.changed ? lc.outputsAfter : lc.outputs).join(", ")}${lc.changed ? "" : ` (предложено «${(lc.outputsOffered || []).join(", ")}» — не принято)`}`;
   if (await serverHandlesLevel()) {
     const json = await ask({ ...body, sources: (body.sources || []).map(({ intermediates, ...s }) => s) }, "", { raw: true });
-    return { md: json.aggregated_markdown, followUp: json.levelCheck ? `сервер: ${fmt(json.levelCheck)}` : null };
+    const notes = [json.levelCheck ? `сервер: ${fmt(json.levelCheck)}` : null, json.outputCheck ? `сервер: ${fmtOutput(json.outputCheck)}` : null];
+    return { md: json.aggregated_markdown, followUp: notes.filter(Boolean).join("; ") || null };
   }
   const first = await ask(asBranchServer(body));
   if (body.direction === "up") return { md: first, followUp: null };
@@ -194,7 +235,7 @@ async function ask(body, tail = "", { raw = false } = {}) {
             : await live(fx.request);
           const md = got.md;
           if (!opts.answers) fs.writeFileSync(path.join(opts.out, `${name}.md`), md);
-          if (got.followUp) lines.push(`  ↻ дозапрос о перепрыгивании уровня (+1 запрос): ${got.followUp}`);
+          if (got.followUp) lines.push(`  ↻ дозапрос (+1 запрос): ${got.followUp}`);
           for (const c of checkAnswer(md, fx.request, fx.expect)) add(c.ok, c.title, c.ok ? "" : c.detail.slice(0, 200));
         }
       } catch (e) {
