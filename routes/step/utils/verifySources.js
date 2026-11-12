@@ -13,8 +13,10 @@
 //   • страницы нет (404, нет такого сайта) — источник выбрасывается;
 //   • страница есть, но не о том (в ней нет ключевых слов названия
 //     источника) — выбрасывается;
-//   • сайт не пускает сервер (403, капча, таймаут) — источник остаётся с
-//     пометкой «не проверен»: закрытые журналы бывают и настоящими;
+//   • сайт не пускает сервер (403, капча, таймаут): научную статью сверяем
+//     с Crossref (utils/crossref.js) — по DOI или по названию; выдуманная
+//     выбрасывается, а у настоящей с не тем адресом он исправляется. Прочее
+//     остаётся с пометкой «не проверен»: закрытые сайты бывают и настоящими;
 //   • источник не о продукте и вообще не о химии — выбрасывается. Живой прогон 2026-11-03: на
 //     поиск «что делают из алкилсалицилатных присадок» модель вернула
 //     репозиторий GitHub, страницу NVIDIA и данные Всемирного банка — и сама
@@ -23,6 +25,7 @@
 //     их пропускала, а обобщение потратило запрос впустую.
 
 const { fetchSource } = require("../../material-balance/utils/fetch-source");
+const { crossrefCheck } = require("./crossref");
 const { nameKeys } = require("../../local-sources/utils/store");
 
 /** Сколько страниц грузим одновременно и сколько всего ждём. */
@@ -166,7 +169,8 @@ function relevant(item, page) {
 /** Причина отказа загрузчика → нет страницы (выбросить) или не проверить. */
 const GONE = /страницы нет|неверный адрес|адрес не http|адрес сайта не найден|сайт недоступен \((ENOTFOUND|EAI_AGAIN)/;
 
-async function checkOne(item, { signal, fetchPage }) {
+async function checkOne(item, { signal, fetchPage, crossref }) {
+  let unchecked;
   try {
     const page = await fetchPage(item.url, { signal });
     return relevant(item, page)
@@ -174,7 +178,16 @@ async function checkOne(item, { signal, fetchPage }) {
       : { status: "unrelated", reason: `по адресу — другая страница${page.title ? `: «${String(page.title).slice(0, 120)}»` : ""}` };
   } catch (e) {
     const reason = String(e?.message || e);
-    return GONE.test(reason) ? { status: "missing", reason } : { status: "unchecked", reason };
+    if (GONE.test(reason)) return { status: "missing", reason };
+    unchecked = { status: "unchecked", reason };
+  }
+  // Сайт не пустил сервер. Научную статью проверит Crossref (utils/crossref.js):
+  // выдуманные модели статьи сидят как раз на закрытых сайтах издательств.
+  try {
+    return (await crossref(item, { signal })) ?? unchecked;
+  } catch (e) {
+    console.warn(`[step/sources] Crossref недоступен: ${e.message}`);
+    return unchecked;
   }
 }
 
@@ -185,7 +198,7 @@ async function checkOne(item, { signal, fetchPage }) {
  * страницы, с причиной. Источники из базы документов (origin: local) не
  * трогаем: их загрузил человек.
  */
-async function verifyStepSources(items, { productName, signal, fetchPage = fetchSource } = {}) {
+async function verifyStepSources(items, { productName, signal, fetchPage = fetchSource, crossref = crossrefCheck } = {}) {
   const list = Array.isArray(items) ? items : [];
   const dropped = [];
   const todo = [];
@@ -213,7 +226,7 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
     const worker = async () => {
       while (next < todo.length) {
         const it = todo[next++];
-        results.set(it, await checkOne(it, { signal: deadline.signal, fetchPage }));
+        results.set(it, await checkOne(it, { signal: deadline.signal, fetchPage, crossref }));
       }
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker));
@@ -232,7 +245,14 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
     if (r.status === "missing" || r.status === "unrelated") {
       dropped.push({ title: it.title || "", url: it.url || "", reason: r.reason });
     } else {
-      kept.push({ ...it, server_check: r.status === "ok" ? { status: "ok" } : { status: "unchecked", reason: r.reason } });
+      // Статью нашёл Crossref по названию, а адрес модель дала не тот — ставим
+      // настоящий (doi.org), прежний — рядом.
+      const fixed = r.url && r.url !== it.url ? { url: r.url, model_url: it.url } : {};
+      kept.push({
+        ...it,
+        ...fixed,
+        server_check: r.status === "ok" ? { status: "ok", ...(r.reason ? { reason: r.reason } : {}) } : { status: "unchecked", reason: r.reason },
+      });
     }
   }
   return { kept, dropped };

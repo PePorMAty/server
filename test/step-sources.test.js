@@ -44,7 +44,8 @@ test("чужая страница, 404 и несуществующий сайт 
       src("Отсутствие источников", "https://N/A", { access_hint: "no_valid_source_found" }),
       { origin: "local", title: "Раздел 10 ИТС 31", url: "local-sources/documents/3/file?section=127", technology_description: "…" },
     ],
-    { fetchPage },
+    // Crossref здесь не спрашиваем: закрытый сайт остаётся «не проверен».
+    { fetchPage, crossref: async () => null },
   );
   assert.deepEqual(
     kept.map((k) => [k.title.slice(0, 20), k.server_check?.status ?? "local"]),
@@ -125,4 +126,97 @@ test("ответы модели «данных нет» в виде источн
   ]) {
     assert.equal(isPlaceholder(src(title, "https://www.example-science.org/x")), true, title);
   }
+});
+
+// ---------- сверка научных ссылок с Crossref (utils/crossref.js) ----------
+// DOI из ответов модели 2026-11-03 и что за ними на самом деле (Crossref).
+const { crossrefCheck, doiFromUrl, sameTitle } = require("../routes/step/utils/crossref");
+
+const crossrefWorks = {
+  "10.1021/bk-2005-0906.ch001": "Semiochemicals in Pest and Weed Control: An Introduction",
+  "10.1038/s41598-021-98765-4": "Predictors for depressive symptoms by four types of disability",
+  "10.1021/ie00045a001": "Liquid-phase oxidation of cyclohexane to cyclohexanol and cyclohexanone",
+};
+const crossrefSearch = {
+  "Hydrocracking of polyethylene waste to lubricant base oils": [{ DOI: "10.1016/j.fuel.2020.118000", title: ["Hydrocracking of polyethylene waste into lubricant base oils"] }],
+};
+/** Подменённый Crossref: ответ по DOI или поиск по названию. */
+const fakeCrossref = async (url) => {
+  const u = new URL(url);
+  const doi = decodeURIComponent(u.pathname.replace(/^\/works\/?/, ""));
+  if (doi) {
+    const title = crossrefWorks[doi];
+    return title ? { ok: true, status: 200, json: async () => ({ message: { title: [title] } }) } : { ok: false, status: 404 };
+  }
+  const items = crossrefSearch[u.searchParams.get("query.bibliographic")] || [{ DOI: "10.1/other", title: ["Something else entirely"] }];
+  return { ok: true, status: 200, json: async () => ({ message: { items } }) };
+};
+const check = (item) => crossrefCheck(item, { fetchImpl: fakeCrossref });
+
+test("DOI из адреса статьи: /doi/, doi.org, Springer, Nature", () => {
+  assert.equal(doiFromUrl("https://pubs.acs.org/doi/10.1021/bk-2005-0906.ch001"), "10.1021/bk-2005-0906.ch001");
+  assert.equal(doiFromUrl("https://onlinelibrary.wiley.com/doi/full/10.1002/app.56789"), "10.1002/app.56789");
+  assert.equal(doiFromUrl("https://link.springer.com/chapter/10.1007/978-1-4615-1759-3_10"), "10.1007/978-1-4615-1759-3_10");
+  assert.equal(doiFromUrl("https://www.nature.com/articles/s41598-021-98765-4"), "10.1038/s41598-021-98765-4");
+  assert.equal(doiFromUrl("https://www.sciencedirect.com/science/article/pii/S0016236121005678"), null);
+});
+
+test("названия сравниваются по словам, без окончаний и разметки", () => {
+  assert.equal(sameTitle("Alkylphenol Ethoxylates in Textile Processing", "Alkylphenol ethoxylate in <i>textile</i> processing"), true);
+  assert.equal(sameTitle("Surfactants in Pesticide Formulations: Role of Alkylphenol Ethoxylates", "Semiochemicals in Pest and Weed Control: An Introduction"), false);
+  // «hydrocracking» ≠ «hydrocarbon»: по 6 буквам совпадали (живой Crossref 2026-11-12).
+  assert.equal(sameTitle("Hydrocracking of LDPE to Produce Lubricant Base Oils", "Guide for Characterizing Hydrocarbon Lubricant Base Oils"), false);
+});
+
+test("DOI ведёт на чужую статью или его нет — выдумана; совпал — настоящая", async () => {
+  const acs = await check({ title: "Surfactants in Pesticide Formulations: Role of Alkylphenol Ethoxylates", url: "https://pubs.acs.org/doi/10.1021/bk-2005-0906.ch001" });
+  assert.equal(acs.status, "unrelated");
+  assert.match(acs.reason, /другая статья: «Semiochemicals in Pest and Weed Control/);
+  assert.equal((await check({ title: "Solvent-Free Functionalization of LDPE", url: "https://onlinelibrary.wiley.com/doi/10.1002/app.56789" })).status, "missing");
+  assert.deepEqual(await check({ title: "Liquid-phase oxidation of cyclohexane", url: "https://pubs.acs.org/doi/10.1021/ie00045a001" }), { status: "ok" });
+});
+
+test("статья без DOI в адресе: Crossref ищет по названию; не нашёл — выдумана; сайт не научный — не наш вопрос", async () => {
+  const real = await check({ title: "Hydrocracking of polyethylene waste to lubricant base oils", url: "https://www.sciencedirect.com/science/article/pii/S0016236120301234" });
+  assert.deepEqual(real, { status: "ok", url: "https://doi.org/10.1016/j.fuel.2020.118000", reason: "адрес исправлен по Crossref" });
+  const fake = await check({ title: "Пиролизная жидкость как сырье для производства топлив и химикатов", url: "https://www.sciencedirect.com/science/article/pii/S0360544221001234" });
+  assert.equal(fake.status, "unrelated");
+  assert.equal(await check({ title: "LDPE film market", url: "https://www.plasticsnews.com/ldpe" }), null);
+  // Подборка ScienceDirect — настоящая страница, а не статья: в Crossref её нет.
+  assert.equal(await check({ title: "Alkylphenol Ethoxylate — an overview", url: "https://www.sciencedirect.com/topics/chemistry/alkylphenol-ethoxylate" }), null);
+});
+
+test("закрытый сайт издательства: выдумка выброшена, настоящая статья — с исправленным адресом", async () => {
+  const closed = async () => {
+    throw new SourceError("доступ закрыт (HTTP 403): нужен вход или сайт не пускает сервер");
+  };
+  const { kept, dropped } = await verifyStepSources(
+    [
+      src("Surfactants in Pesticide Formulations: Role of Alkylphenol Ethoxylates", "https://pubs.acs.org/doi/10.1021/bk-2005-0906.ch001"),
+      src("Hydrocracking of polyethylene waste to lubricant base oils", "https://www.sciencedirect.com/science/article/pii/S0016236120301234"),
+      src("Alkylphenol ethoxylates market report", "https://www.marketsandmarkets.com/ape"),
+    ],
+    { fetchPage: closed, crossref: (item, o) => crossrefCheck(item, { ...o, fetchImpl: fakeCrossref }) },
+  );
+  assert.deepEqual(
+    kept.map((k) => [k.url, k.server_check.status]),
+    [
+      ["https://doi.org/10.1016/j.fuel.2020.118000", "ok"],
+      ["https://www.marketsandmarkets.com/ape", "unchecked"],
+    ],
+  );
+  assert.equal(kept[0].model_url, "https://www.sciencedirect.com/science/article/pii/S0016236120301234");
+  assert.match(dropped[0].reason, /другая статья/);
+});
+
+test("Crossref недоступен — источник остаётся «не проверен»", async () => {
+  const { kept } = await verifyStepSources([src("Liquid-phase oxidation of cyclohexane", "https://pubs.acs.org/doi/10.1021/ie00045a001")], {
+    fetchPage: async () => {
+      throw new SourceError("доступ закрыт (HTTP 403)");
+    },
+    crossref: async () => {
+      throw new Error("Crossref: HTTP 503");
+    },
+  });
+  assert.equal(kept[0].server_check.status, "unchecked");
 });
