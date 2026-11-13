@@ -224,3 +224,20 @@ test("старый текст без «Побочных продуктов» —
   assert.deepEqual(names(r.body.step.outputProducts), ["Бисфенол А"]);
   assert.deepEqual(names(r.body.step.byproducts), []);
 });
+
+// ---------- общие названия узлов (2026-11-13) ----------
+test("шаг «вверх» от изделия: общие названия узлов уточняются изделием", async () => {
+  const r = await build(
+    { productName: "Автомобиль", direction: "up", existingProducts: ["Автомобиль", "Шасси"],
+      techText: text({ out: "Автомобиль", inp: "[Кузов автомобиля в сборе, Двигатель, Электроника и авионика, Шасси]" }) },
+    step(["Кузов автомобиля в сборе", "Двигатель", "Электроника и авионика", "Шасси"], ["Автомобиль"]),
+  );
+  // «Шасси» уже стоит на графе — берём его как есть.
+  assert.deepEqual(names(r.body.step.inputProducts), ["Кузов автомобиля в сборе", "Двигатель (Автомобиль)", "Электроника и авионика (Автомобиль)", "Шасси"]);
+  const r2 = await build(
+    { productName: "Кузов (BIW)", direction: "up", existingProducts: ["Кузов (BIW)"],
+      techText: text({ out: "Кузов (BIW)", inp: "[Рама, Листовая сталь]" }) },
+    step(["Рама", "Листовая сталь"], ["Кузов (BIW)"]),
+  );
+  assert.deepEqual(names(r2.body.step.inputProducts), ["Рама (Кузов)", "Листовая сталь"]);
+});
