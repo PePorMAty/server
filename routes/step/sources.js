@@ -25,6 +25,7 @@ const SOURCES_ANSWER = { acc: "список источников", gen: "спи�
 const {
   buildStepSourcesPromptDown,
   buildStepSourcesPromptUp,
+  stepSearchQuery,
 } = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
@@ -154,6 +155,7 @@ router.post("/gpt/step/sources", async (req, res) => {
       items: found,
     } = await searchSources({
       prompt,
+      query: stepSearchQuery(productName, direction),
       maxItems,
       timeoutMs: 35 * 60 * 1000,
       provider,
@@ -169,7 +171,7 @@ router.post("/gpt/step/sources", async (req, res) => {
     let items = found;
     let dropped = [];
     if (found.length) {
-      ({ kept: items, dropped } = await verifyStepSources(found, { productName }));
+      ({ kept: items, dropped } = await verifyStepSources(found, { productName, searched: openaiResp?.searched_urls }));
       if (dropped.length) {
         console.log(
           `[step/sources] «${productName}» (${direction}): отброшено ${dropped.length} — ${dropped.map((d) => d.reason).join("; ")}`,

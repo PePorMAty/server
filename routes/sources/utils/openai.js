@@ -770,8 +770,104 @@ function extractApiError(err) {
   return String(err);
 }
 
+/**
+ * Поиск источников Qwen через Responses API с инструментом web_search.
+ *
+ * Почему не chat completions с enable_search. Пробы на шлюзе тарифа (Token
+ * Plan) 2026-11-13: там поиск подмешивает модели найденный текст, но не
+ * адреса страниц, и списка найденного (search_info) шлюз не отдаёт — модель
+ * писала адреса сама, отсюда выдуманные DOI и example.com. Responses API с
+ * web_search отдаёт список найденных страниц (web_search_call.action.sources),
+ * модель видит их адреса и сама строит поисковые запросы, в том числе
+ * по-английски: «Самолёт» вверх — Britannica, Airbus, учебник МАИ;
+ * «Автомобиль» — Toyota, HowStuffWorks, auto.mail.ru.
+ *
+ * Потоком — потому что шлюз рвёт ответ через ~30 с (502 «upstream request
+ * failed»), а поиск с описаниями идёт 1–3 минуты. Размышления выключены: с
+ * ними flash-модель тратила весь лимит ответа на рассуждения.
+ *
+ * Возвращает ответ в виде Responses API + searched_urls — адреса всех
+ * страниц, найденных поиском: по ним сервер выбрасывает источники с
+ * выдуманными адресами (routes/step/utils/verifySources.js).
+ */
+async function qwenResponsesSearch({ client, model, prompt, query, maxItems, timeoutMs, name }) {
+  const t0 = Date.now();
+  const schema = buildSourcesSchema(maxItems);
+  const instructions = [
+    prompt,
+    "ПОИСК. Сделай не больше 3–5 поисковых запросов, по-русски и по-английски. Описание источника пиши по тому, что уже нашёл: не ищи заново ради дословного текста страницы. URL — только страниц, найденных поиском в этом запросе.",
+    "ФОРМАТ ОТВЕТА. Ниже — JSON Schema: описание формата, а НЕ ответ. Верни один JSON-объект с данными, заполненный по ней, без пояснений вне JSON.\n" +
+      JSON.stringify(schema),
+  ].join("\n\n");
+  const stream = await client.responses.create(
+    {
+      model,
+      instructions,
+      input: query,
+      tools: [{ type: "web_search" }],
+      // Искать обязательно: без этого qwen3.7-plus без размышлений
+      // (2026-11-13) отвечала по памяти, и адреса снова были выдуманы.
+      tool_choice: "required",
+      text: { format: { type: "json_schema", name: "technology_sources", strict: true, schema } },
+      max_output_tokens: 16000,
+      enable_thinking: false,
+      stream: true,
+    },
+    { timeout: timeoutMs },
+  );
+  let final = null;
+  for await (const ev of stream) {
+    if (/^response\.(completed|incomplete|failed)$/.test(ev?.type)) final = ev.response;
+  }
+  if (!final) throw new Error("поиск не вернул итог");
+  if (final.status === "failed") throw new Error(final.error?.message || "поиск не удался");
+  const searched = [];
+  const queries = [];
+  for (const it of final.output || []) {
+    if (it?.type !== "web_search_call") continue;
+    if (it.action?.query) queries.push(it.action.query);
+    for (const src of it.action?.sources || []) if (src?.url) searched.push(src.url);
+  }
+  // Текст — только из сообщения модели: в размышлениях бывают свои скобки.
+  const text = (final.output || [])
+    .filter((it) => it?.type === "message")
+    .flatMap((it) => it.content || [])
+    .map((c) => c?.text || "")
+    .join("");
+  // Поиска не было — адреса из ответа модель взяла из памяти; пусть лучше
+  // сработает прежний поиск со всеми его проверками.
+  if (!searched.length) throw new Error("модель не выполнила поиск");
+  const ms = Date.now() - t0;
+  console.log(
+    `[${name}] model=${model}: поиск (Responses API) за ${(ms / 1000).toFixed(1)} с, запросов ${queries.length}, найдено страниц ${searched.length}`,
+  );
+  return {
+    ...final,
+    output_text: text,
+    searched_urls: searched,
+    ai: {
+      model,
+      ms,
+      fixes: [],
+      searchQueries: queries,
+      usage: final.usage ?? null,
+    },
+  };
+}
+
+/**
+ * Поиск источников с веб-поиском модели.
+ *
+ * query — короткий поисковый запрос о продукте. Если он есть, инструкции
+ * (prompt) уходят системным сообщением, а запрос — сообщением пользователя.
+ * Почему: DashScope строит поисковые запросы из сообщения пользователя, и
+ * когда туда уходил весь промпт на 9 тысяч знаков, поиск искал по нашим
+ * правилам («LLM-readable», «open html», «без логина»): на «Самолёт» вверх
+ * 2026-11-13 он нашёл AOSP, ядро Linux и GitHub Trending.
+ */
 async function callOpenAIResponses({
   prompt,
+  query,
   maxItems,
   provider,
   model,
@@ -783,6 +879,20 @@ async function callOpenAIResponses({
 
   const effectiveModel = model || defaultModel;
 
+  // Поиск шага (есть query) — через Responses API с web_search; не вышло —
+  // прежний поиск chat completions ниже. QWEN_SEARCH_MODE=chat — сразу он.
+  const searchFixes = [];
+  if (isQwen && query && String(process.env.QWEN_SEARCH_MODE || "responses").toLowerCase() !== "chat") {
+    const searchModel = process.env.QWEN_SEARCH_MODEL || effectiveModel;
+    try {
+      return await qwenResponsesSearch({ client, model: searchModel, prompt, query, maxItems, timeoutMs, name });
+    } catch (err) {
+      const why = apiErrorText(err) || err?.message || String(err);
+      console.warn(`[${name}] поиск через Responses API не удался (${why}) — обычный поиск`);
+      searchFixes.push(`поиск со списком найденных страниц не удался (${String(why).slice(0, 120)}) — обычный поиск`);
+    }
+  }
+
   if (isQwen) {
     if (allowedDomains?.length) {
       console.log(
@@ -793,7 +903,14 @@ async function callOpenAIResponses({
     const chatParams = withThinking({
       model: effectiveModel,
       messages: withSchemaNote(
-        ensureJsonMention([{ role: "user", content: prompt }]),
+        ensureJsonMention(
+          query
+            ? [
+                { role: "system", content: prompt },
+                { role: "user", content: query },
+              ]
+            : [{ role: "user", content: prompt }],
+        ),
         buildSourcesSchema(maxItems),
       ),
       max_tokens: 16000,
@@ -819,8 +936,9 @@ async function callOpenAIResponses({
         name,
         searchRequired: true,
       });
-      const out = chatToResponsesFormat(resp, { model: effectiveModel, fixes, ms });
-      logDone(name, effectiveModel, { fixes, ms }, out);
+      const allFixes = [...searchFixes, ...fixes];
+      const out = chatToResponsesFormat(resp, { model: effectiveModel, fixes: allFixes, ms });
+      logDone(name, effectiveModel, { fixes: allFixes, ms }, out);
       return out;
     } catch (err) {
       extractApiError(err);
@@ -834,7 +952,7 @@ async function callOpenAIResponses({
   // OpenAI — Responses API
   const params = {
     model: effectiveModel,
-    input: prompt,
+    ...(query ? { instructions: prompt, input: query } : { input: prompt }),
     tools: [
       {
         type: "web_search",
@@ -985,20 +1103,21 @@ function normalizeUrl(raw) {
 function normalizeAndFilterItems(items) {
   if (!Array.isArray(items)) return [];
 
+  // Поле под другим именем: в потоковом режиме Responses API схема
+  // соблюдается нестрого — qwen3.7-plus 2026-11-13 написала
+  // «technological_description» вместо «technology_description».
+  const field = (x, ...keys) => keys.map((k) => x?.[k]).find((v) => v != null && v !== "");
+  const strings = (v) => (Array.isArray(v) ? v.map((s) => String(s || "").trim()).filter(Boolean) : []);
   return items
     .map((x) => ({
       title: String(x?.title || "").trim(),
       url: normalizeUrl(x?.url),
       access_hint: String(x?.access_hint || "").trim(),
-      technology_description: String(x?.technology_description || "").trim(),
-      inputs_outputs_hint: Array.isArray(x?.inputs_outputs_hint)
-        ? x.inputs_outputs_hint
-            .map((s) => String(s || "").trim())
-            .filter(Boolean)
-        : [],
-      evidence_snippets: Array.isArray(x?.evidence_snippets)
-        ? x.evidence_snippets.map((s) => String(s || "").trim()).filter(Boolean)
-        : [],
+      technology_description: String(
+        field(x, "technology_description", "technological_description", "description") || "",
+      ).trim(),
+      inputs_outputs_hint: strings(field(x, "inputs_outputs_hint", "inputs_outputs")),
+      evidence_snippets: strings(field(x, "evidence_snippets", "evidence")),
     }))
     .filter(
       (x) => x.url.startsWith("http") && x.title && x.technology_description,

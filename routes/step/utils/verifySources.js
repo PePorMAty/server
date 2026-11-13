@@ -10,12 +10,15 @@
 // с адресом https://N/A и текстом «источников нет» — и обобщение строило по
 // нему шаг «X → X». Поэтому:
 //   • заглушки «источников нет» — не источники;
+//   • поиск отдал список найденных страниц — адрес не из него выдуман;
 //   • страницы нет (404, нет такого сайта) — источник выбрасывается;
 //   • страница есть, но не о том (в ней нет ключевых слов названия
 //     источника) — выбрасывается;
-//   • сайт не пускает сервер (403, капча, таймаут) — источник остаётся с
-//     пометкой «не проверен»: закрытые журналы бывают и настоящими;
-//   • источник не о продукте и вообще не о химии — выбрасывается. Живой прогон 2026-11-03: на
+//   • сайт не пускает сервер (403, капча, таймаут): научную статью сверяем
+//     с Crossref (utils/crossref.js) — по DOI или по названию; выдуманная
+//     выбрасывается, а у настоящей с не тем адресом он исправляется. Прочее
+//     остаётся с пометкой «не проверен»: закрытые сайты бывают и настоящими;
+//   • источник не о продукте и вообще не о производстве — выбрасывается. Живой прогон 2026-11-03: на
 //     поиск «что делают из алкилсалицилатных присадок» модель вернула
 //     репозиторий GitHub, страницу NVIDIA и данные Всемирного банка — и сама
 //     честно описала их как веб-технологии и машинное обучение. Страницы
@@ -23,6 +26,7 @@
 //     их пропускала, а обобщение потратило запрос впустую.
 
 const { fetchSource } = require("../../material-balance/utils/fetch-source");
+const { crossrefCheck } = require("./crossref");
 const { nameKeys } = require("../../local-sources/utils/store");
 
 /** Сколько страниц грузим одновременно и сколько всего ждём. */
@@ -116,19 +120,43 @@ function aboutProduct(item, productName) {
 }
 
 /**
- * Слова химии и производства — по-русски и по-английски. Продукт часто
- * называют сокращением («LDPE», «ПЭНП», «PVC»), которого в справочнике нет:
- * в живом прогоне 2026-11-03 так выпали источники «Hydrocracking of LDPE…»
- * у «Полиэтилена низкой плотности». Поэтому источник без названия продукта
- * выбрасываем, только если он и вовсе не о химии — как репозиторий GitHub
- * или данные Всемирного банка. («Технолог…» нет нарочно: «веб-технологии».)
+ * Слова производства — любого, не только химического, по-русски и
+ * по-английски. Продукт в источнике часто назван иначе, чем на графе:
+ * сокращением («LDPE», «ПЭНП») или другим словом («Автомобиль» — «car»,
+ * «vehicle»; «Самолёт» — «aircraft»), а такие пары по буквам не сравнить.
+ * Поэтому источник без названия продукта выбрасываем, только если он и
+ * вовсе не о производстве — как репозиторий GitHub или данные Всемирного
+ * банка (2026-11-03). До 2026-11-13 здесь были только слова химии, и
+ * источники о сборке машин и самолётов выпадали. («Технолог…» нет нарочно:
+ * «веб-технологии»; «производ…» — только «производств…», не
+ * «производительность».)
  */
-const CHEMISTRY =
-  /реакц|синтез|катализ|полимер|мономер|сырь|химич|производств|окисл|гидрир|гидрокрек|алкилир|пиролиз|крекинг|ректифик|дистилл|экстракц|нейтрализ|этерифик|сульфир|нитрова|хлориров|кислот|щелоч|олефин|углеводород|растворител|смол|пластик|reaction|synthes|catal|polymer|monomer|feedstock|chemical|oxidat|hydrogenat|alkylat|pyroly|cracking|distill|extract|esterif|sulfon|nitrat|chlorinat|acid|olefin|hydrocarbon|solvent|resin|plastic|refin/i;
+const PRODUCTION =
+  /производств|изготовл|сборк|собира|завод|фабрик|промышлен|отрасл|комплектующ|детал[еи]|узл[аыо]в?\b|агрегат|материал|сырь|литьё|литье|штамп|сварк|обработк|станк|конвейер|реакц|синтез|катализ|полимер|химич|пиролиз|крекинг|ректифик|кислот|углеводород|manufactur|production|produced|assembl|factory|plant\b|industr|component|supplier|supply chain|raw material|machin|fabricat|welding|casting|stamping|forging|reaction|synthes|catal|polymer|chemical|feedstock|refin|alloy|steel|aluminium|aluminum|composite/i;
 
-function aboutChemistry(item) {
+function aboutProduction(item) {
   const text = [item?.title, item?.technology_description, ...(item?.inputs_outputs_hint || []), ...(item?.evidence_snippets || [])].join(" ");
-  return CHEMISTRY.test(text);
+  return PRODUCTION.test(text);
+}
+
+/**
+ * Адрес страницы для сверки со списком найденного поиском: без схемы, www,
+ * параметров и косой черты в конце — так модель и поиск пишут одну и ту же
+ * страницу по-разному.
+ */
+function pageKey(url) {
+  try {
+    const u = new URL(String(url || "").trim());
+    let path = u.pathname;
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      /* битая кодировка — как есть */
+    }
+    return `${u.hostname.replace(/^www\./, "").toLowerCase()}${path.replace(/\/+$/, "")}`;
+  } catch {
+    return "";
+  }
 }
 
 /** Общие слова названий источников: по ним «о том ли страница» не понять. */
@@ -166,7 +194,8 @@ function relevant(item, page) {
 /** Причина отказа загрузчика → нет страницы (выбросить) или не проверить. */
 const GONE = /страницы нет|неверный адрес|адрес не http|адрес сайта не найден|сайт недоступен \((ENOTFOUND|EAI_AGAIN)/;
 
-async function checkOne(item, { signal, fetchPage }) {
+async function checkOne(item, { signal, fetchPage, crossref }) {
+  let unchecked;
   try {
     const page = await fetchPage(item.url, { signal });
     return relevant(item, page)
@@ -174,7 +203,16 @@ async function checkOne(item, { signal, fetchPage }) {
       : { status: "unrelated", reason: `по адресу — другая страница${page.title ? `: «${String(page.title).slice(0, 120)}»` : ""}` };
   } catch (e) {
     const reason = String(e?.message || e);
-    return GONE.test(reason) ? { status: "missing", reason } : { status: "unchecked", reason };
+    if (GONE.test(reason)) return { status: "missing", reason };
+    unchecked = { status: "unchecked", reason };
+  }
+  // Сайт не пустил сервер. Научную статью проверит Crossref (utils/crossref.js):
+  // выдуманные модели статьи сидят как раз на закрытых сайтах издательств.
+  try {
+    return (await crossref(item, { signal })) ?? unchecked;
+  } catch (e) {
+    console.warn(`[step/sources] Crossref недоступен: ${e.message}`);
+    return unchecked;
   }
 }
 
@@ -185,19 +223,27 @@ async function checkOne(item, { signal, fetchPage }) {
  * страницы, с причиной. Источники из базы документов (origin: local) не
  * трогаем: их загрузил человек.
  */
-async function verifyStepSources(items, { productName, signal, fetchPage = fetchSource } = {}) {
+async function verifyStepSources(
+  items,
+  { productName, searched, signal, fetchPage = fetchSource, crossref = crossrefCheck } = {},
+) {
   const list = Array.isArray(items) ? items : [];
   const dropped = [];
   const todo = [];
+  // Поиск отдал список найденных страниц (Responses API, 2026-11-13) — адрес
+  // не из него модель составила сама.
+  const found = new Set((Array.isArray(searched) ? searched : []).map(pageKey).filter(Boolean));
   for (const it of list) {
     if (it?.origin === "local") continue;
     if (isPlaceholder(it)) {
       dropped.push({ title: it?.title || "", url: it?.url || "", reason: "заглушка «источников нет», а не источник" });
-    } else if (productName && !aboutProduct(it, productName) && !aboutChemistry(it)) {
+    } else if (found.size && !found.has(pageKey(it.url))) {
+      dropped.push({ title: it?.title || "", url: it?.url || "", reason: "адреса нет среди страниц, найденных поиском, — модель его составила" });
+    } else if (productName && !aboutProduct(it, productName) && !aboutProduction(it)) {
       dropped.push({
         title: it?.title || "",
         url: it?.url || "",
-        reason: `не о «${productName}» и вообще не о химии: ни продукта, ни процессов в названии и описании источника`,
+        reason: `не о «${productName}» и вообще не о производстве: ни продукта, ни производства в названии и описании источника`,
       });
     } else {
       todo.push(it);
@@ -213,7 +259,7 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
     const worker = async () => {
       while (next < todo.length) {
         const it = todo[next++];
-        results.set(it, await checkOne(it, { signal: deadline.signal, fetchPage }));
+        results.set(it, await checkOne(it, { signal: deadline.signal, fetchPage, crossref }));
       }
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker));
@@ -232,10 +278,17 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
     if (r.status === "missing" || r.status === "unrelated") {
       dropped.push({ title: it.title || "", url: it.url || "", reason: r.reason });
     } else {
-      kept.push({ ...it, server_check: r.status === "ok" ? { status: "ok" } : { status: "unchecked", reason: r.reason } });
+      // Статью нашёл Crossref по названию, а адрес модель дала не тот — ставим
+      // настоящий (doi.org), прежний — рядом.
+      const fixed = r.url && r.url !== it.url ? { url: r.url, model_url: it.url } : {};
+      kept.push({
+        ...it,
+        ...fixed,
+        server_check: r.status === "ok" ? { status: "ok", ...(r.reason ? { reason: r.reason } : {}) } : { status: "unchecked", reason: r.reason },
+      });
     }
   }
   return { kept, dropped };
 }
 
-module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutChemistry, skeleton };
+module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutProduction, skeleton, pageKey };
