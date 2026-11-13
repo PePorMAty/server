@@ -25,6 +25,7 @@ const SOURCES_ANSWER = { acc: "список источников", gen: "спи�
 const {
   buildStepSourcesPromptDown,
   buildStepSourcesPromptUp,
+  stepSearchQuery,
 } = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
@@ -154,6 +155,7 @@ router.post("/gpt/step/sources", async (req, res) => {
       items: found,
     } = await searchSources({
       prompt,
+      query: stepSearchQuery(productName, direction),
       maxItems,
       timeoutMs: 35 * 60 * 1000,
       provider,

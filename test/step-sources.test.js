@@ -84,7 +84,7 @@ test("источник не о продукте — отброшен ещё до
   );
   assert.deepEqual(kept.map((k) => k.title.slice(0, 15)), ["Overbased calci"]);
   assert.equal(fetched, 1);
-  assert.match(dropped[0].reason, /не о «Алкилсалицилатные присадки» и вообще не о химии/);
+  assert.match(dropped[0].reason, /не о «Алкилсалицилатные присадки» и вообще не о производстве/);
 });
 
 // Тот же день: у «Полиэтилена низкой плотности» источники звали его LDPE —
@@ -219,4 +219,32 @@ test("Crossref недоступен — источник остаётся «не
     },
   });
   assert.equal(kept[0].server_check.status, "unchecked");
+});
+
+// 2026-11-13: «Автомобиль» и «Самолёт» вверх — источники по-английски о сборке
+// («car», «aircraft»): названия продукта в них нет, а слов химии — тоже, и
+// проверка их выбрасывала. Поиск — не только о химии.
+const { aboutProduction } = require("../routes/step/utils/verifySources");
+
+test("источник о производстве не химии — остаётся, хоть продукт назван иначе", async () => {
+  const { kept, dropped } = await verifyStepSources(
+    [
+      src("How a car is made: body in white, paint shop and final assembly", "https://www.madehow.com/Volume-1/Automobile.html", {
+        technology_description: "Steel coils are stamped into panels, welded into the body, painted; engine and transmission are installed on the assembly line.",
+      }),
+      src("Aircraft manufacturing: fuselage sections, wings and final assembly line", "https://en.wikipedia.org/wiki/Aircraft_manufacturing", {
+        technology_description: "Aluminium alloys and composite materials are used for fuselage panels; suppliers deliver engines and avionics.",
+      }),
+    ],
+    {
+      productName: "Автомобиль",
+      fetchPage: async (url) =>
+        url.includes("madehow")
+          ? { title: "How a car is made", text: "Body in white: panels are welded; the paint shop; final assembly of the car. ".repeat(20) }
+          : { title: "Aircraft manufacturing", text: "Fuselage sections and wings arrive at the final assembly line. ".repeat(20) },
+    },
+  );
+  assert.equal(dropped.length, 0, JSON.stringify(dropped));
+  assert.equal(kept.length, 2);
+  assert.equal(aboutProduction({ title: "GitHub: mattpocock/skills", technology_description: "Репозиторий навыков для изучения веб-технологий; производительность вычислений." }), false);
 });

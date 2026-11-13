@@ -770,8 +770,19 @@ function extractApiError(err) {
   return String(err);
 }
 
+/**
+ * Поиск источников с веб-поиском модели.
+ *
+ * query — короткий поисковый запрос о продукте. Если он есть, инструкции
+ * (prompt) уходят системным сообщением, а запрос — сообщением пользователя.
+ * Почему: DashScope строит поисковые запросы из сообщения пользователя, и
+ * когда туда уходил весь промпт на 9 тысяч знаков, поиск искал по нашим
+ * правилам («LLM-readable», «open html», «без логина»): на «Самолёт» вверх
+ * 2026-11-13 он нашёл AOSP, ядро Linux и GitHub Trending.
+ */
 async function callOpenAIResponses({
   prompt,
+  query,
   maxItems,
   provider,
   model,
@@ -793,7 +804,14 @@ async function callOpenAIResponses({
     const chatParams = withThinking({
       model: effectiveModel,
       messages: withSchemaNote(
-        ensureJsonMention([{ role: "user", content: prompt }]),
+        ensureJsonMention(
+          query
+            ? [
+                { role: "system", content: prompt },
+                { role: "user", content: query },
+              ]
+            : [{ role: "user", content: prompt }],
+        ),
         buildSourcesSchema(maxItems),
       ),
       max_tokens: 16000,
@@ -834,7 +852,7 @@ async function callOpenAIResponses({
   // OpenAI — Responses API
   const params = {
     model: effectiveModel,
-    input: prompt,
+    ...(query ? { instructions: prompt, input: query } : { input: prompt }),
     tools: [
       {
         type: "web_search",

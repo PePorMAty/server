@@ -17,7 +17,7 @@
 //     с Crossref (utils/crossref.js) — по DOI или по названию; выдуманная
 //     выбрасывается, а у настоящей с не тем адресом он исправляется. Прочее
 //     остаётся с пометкой «не проверен»: закрытые сайты бывают и настоящими;
-//   • источник не о продукте и вообще не о химии — выбрасывается. Живой прогон 2026-11-03: на
+//   • источник не о продукте и вообще не о производстве — выбрасывается. Живой прогон 2026-11-03: на
 //     поиск «что делают из алкилсалицилатных присадок» модель вернула
 //     репозиторий GitHub, страницу NVIDIA и данные Всемирного банка — и сама
 //     честно описала их как веб-технологии и машинное обучение. Страницы
@@ -119,19 +119,23 @@ function aboutProduct(item, productName) {
 }
 
 /**
- * Слова химии и производства — по-русски и по-английски. Продукт часто
- * называют сокращением («LDPE», «ПЭНП», «PVC»), которого в справочнике нет:
- * в живом прогоне 2026-11-03 так выпали источники «Hydrocracking of LDPE…»
- * у «Полиэтилена низкой плотности». Поэтому источник без названия продукта
- * выбрасываем, только если он и вовсе не о химии — как репозиторий GitHub
- * или данные Всемирного банка. («Технолог…» нет нарочно: «веб-технологии».)
+ * Слова производства — любого, не только химического, по-русски и
+ * по-английски. Продукт в источнике часто назван иначе, чем на графе:
+ * сокращением («LDPE», «ПЭНП») или другим словом («Автомобиль» — «car»,
+ * «vehicle»; «Самолёт» — «aircraft»), а такие пары по буквам не сравнить.
+ * Поэтому источник без названия продукта выбрасываем, только если он и
+ * вовсе не о производстве — как репозиторий GitHub или данные Всемирного
+ * банка (2026-11-03). До 2026-11-13 здесь были только слова химии, и
+ * источники о сборке машин и самолётов выпадали. («Технолог…» нет нарочно:
+ * «веб-технологии»; «производ…» — только «производств…», не
+ * «производительность».)
  */
-const CHEMISTRY =
-  /реакц|синтез|катализ|полимер|мономер|сырь|химич|производств|окисл|гидрир|гидрокрек|алкилир|пиролиз|крекинг|ректифик|дистилл|экстракц|нейтрализ|этерифик|сульфир|нитрова|хлориров|кислот|щелоч|олефин|углеводород|растворител|смол|пластик|reaction|synthes|catal|polymer|monomer|feedstock|chemical|oxidat|hydrogenat|alkylat|pyroly|cracking|distill|extract|esterif|sulfon|nitrat|chlorinat|acid|olefin|hydrocarbon|solvent|resin|plastic|refin/i;
+const PRODUCTION =
+  /производств|изготовл|сборк|собира|завод|фабрик|промышлен|отрасл|комплектующ|детал[еи]|узл[аыо]в?\b|агрегат|материал|сырь|литьё|литье|штамп|сварк|обработк|станк|конвейер|реакц|синтез|катализ|полимер|химич|пиролиз|крекинг|ректифик|кислот|углеводород|manufactur|production|produced|assembl|factory|plant\b|industr|component|supplier|supply chain|raw material|machin|fabricat|welding|casting|stamping|forging|reaction|synthes|catal|polymer|chemical|feedstock|refin|alloy|steel|aluminium|aluminum|composite/i;
 
-function aboutChemistry(item) {
+function aboutProduction(item) {
   const text = [item?.title, item?.technology_description, ...(item?.inputs_outputs_hint || []), ...(item?.evidence_snippets || [])].join(" ");
-  return CHEMISTRY.test(text);
+  return PRODUCTION.test(text);
 }
 
 /** Общие слова названий источников: по ним «о том ли страница» не понять. */
@@ -206,11 +210,11 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
     if (it?.origin === "local") continue;
     if (isPlaceholder(it)) {
       dropped.push({ title: it?.title || "", url: it?.url || "", reason: "заглушка «источников нет», а не источник" });
-    } else if (productName && !aboutProduct(it, productName) && !aboutChemistry(it)) {
+    } else if (productName && !aboutProduct(it, productName) && !aboutProduction(it)) {
       dropped.push({
         title: it?.title || "",
         url: it?.url || "",
-        reason: `не о «${productName}» и вообще не о химии: ни продукта, ни процессов в названии и описании источника`,
+        reason: `не о «${productName}» и вообще не о производстве: ни продукта, ни производства в названии и описании источника`,
       });
     } else {
       todo.push(it);
@@ -258,4 +262,4 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
   return { kept, dropped };
 }
 
-module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutChemistry, skeleton };
+module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutProduction, skeleton };
