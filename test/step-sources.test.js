@@ -278,3 +278,25 @@ test("поле описания под другим именем (technological_
   assert.equal(it.technology_description, "Airbus has more than 20 manufacturing sites.");
   assert.deepEqual(it.evidence_snippets, ["20 sites"]);
 });
+
+// ---------- текст страницы в описание источника (2026-11-13) ----------
+const { pageExcerpt } = require("../routes/step/utils/verifySources");
+
+test("в описание источника — абзацы страницы о производстве продукта, по порядку страницы", async () => {
+  const page = [
+    "Cookie settings and privacy policy. Subscribe to our newsletter for weekly updates and offers from our partners.",
+    "Body in white (BIW) is the stage in automobile manufacturing in which a car body's frame has been joined together, that is, before painting and before the motor, chassis sub-assemblies, or trim have been integrated into the structure.",
+    "Our team visited the museum last summer and enjoyed the coffee very much, it was a nice trip with friends and family members.",
+    "Steel coils are stamped into panels in the press shop; the panels are then welded by robots into the body-in-white on the assembly line, and adhesives are dispensed between flanges.",
+  ].join("\n");
+  const ex = pageExcerpt(page, "Кузов (BIW)");
+  assert.match(ex, /^Body in white \(BIW\) is the stage/);
+  assert.match(ex, /Steel coils are stamped/);
+  assert.doesNotMatch(ex, /Cookie|museum/);
+
+  const { kept } = await verifyStepSources([src("Body in white - Wikipedia", "https://en.wikipedia.org/wiki/Body_in_white", { technology_description: "Кратко: сборка кузова." })], {
+    productName: "Кузов (BIW)",
+    fetchPage: async () => ({ title: "Body in white - Wikipedia", text: page }),
+  });
+  assert.match(kept[0].technology_description, /^Кратко: сборка кузова\.\n\nТекст страницы \(загружен сервером\):\nBody in white/);
+});

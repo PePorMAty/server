@@ -771,6 +771,35 @@ function extractApiError(err) {
 }
 
 /**
+ * Ответ поиска пришёл текстом, а не JSON (qwen3.8-flash 2026-11-13: «ответила
+ * обычным текстом вместо списка источников»). Повторять поиск — ещё 1–2
+ * минуты и тот же риск, поэтому найденное переводим в JSON отдельным коротким
+ * запросом без поиска. Адреса — только из списка найденных поиском страниц.
+ */
+async function searchTextToJson({ client, model, text, searched, maxItems, timeoutMs, name }) {
+  const schema = buildSourcesSchema(maxItems);
+  const urls = [...new Set(searched)].slice(0, 80);
+  const params = withThinking({
+    model,
+    messages: withSchemaNote(
+      [
+        {
+          role: "system",
+          content:
+            "Перенеси источники из текста ниже в JSON по схеме: название, URL, описание технологии, входы и выходы, цитаты. URL бери только из списка найденных поиском страниц; источник, адреса которого в списке нет, пропусти. Ничего не добавляй от себя.",
+        },
+        { role: "user", content: `${text}\n\nНайденные поиском страницы:\n${urls.join("\n")}` },
+      ],
+      schema,
+    ),
+    max_tokens: 16000,
+    response_format: { type: "json_schema", json_schema: { name: "technology_sources", schema, strict: true } },
+  });
+  const { resp } = await createChat(client, params, { timeoutMs: Math.min(timeoutMs, 3 * 60 * 1000), name, searchRequired: false });
+  return resp.choices?.[0]?.message?.content || "";
+}
+
+/**
  * Поиск источников Qwen через Responses API с инструментом web_search.
  *
  * Почему не chat completions с enable_search. Пробы на шлюзе тарифа (Token
@@ -790,12 +819,16 @@ function extractApiError(err) {
  * страниц, найденных поиском: по ним сервер выбрасывает источники с
  * выдуманными адресами (routes/step/utils/verifySources.js).
  */
-async function qwenResponsesSearch({ client, model, prompt, query, maxItems, timeoutMs, name }) {
+async function qwenResponsesSearch({ client, model, prompt, brief, query, maxItems, timeoutMs, name }) {
   const t0 = Date.now();
   const schema = buildSourcesSchema(maxItems);
   const instructions = [
-    prompt,
-    "ПОИСК. Сделай не больше 3–5 поисковых запросов, по-русски и по-английски. Описание источника пиши по тому, что уже нашёл: не ищи заново ради дословного текста страницы. URL — только страниц, найденных поиском в этом запросе.",
+    // brief — короткая задача поиска (stepSearchBrief); без неё — промпт,
+    // как его прислали (правленый в окне построения).
+    brief || prompt,
+    // Модель делала до 27 поисков подряд, добывая текст страниц (2026-11-13:
+    // до 5 минут и 665 тыс. токенов на поиск): текст сервер берёт сам.
+    "ПОИСК. Сделай 1–3 поисковых запроса (по-русски и по-английски) и остановись. URL — только страниц, найденных поиском в этом запросе.",
     "ФОРМАТ ОТВЕТА. Ниже — JSON Schema: описание формата, а НЕ ответ. Верни один JSON-объект с данными, заполненный по ней, без пояснений вне JSON.\n" +
       JSON.stringify(schema),
   ].join("\n\n");
@@ -829,11 +862,23 @@ async function qwenResponsesSearch({ client, model, prompt, query, maxItems, tim
     for (const src of it.action?.sources || []) if (src?.url) searched.push(src.url);
   }
   // Текст — только из сообщения модели: в размышлениях бывают свои скобки.
-  const text = (final.output || [])
+  let text = (final.output || [])
     .filter((it) => it?.type === "message")
     .flatMap((it) => it.content || [])
     .map((c) => c?.text || "")
     .join("");
+  const fixes = [];
+  if (searched.length && !pickItems(safeJsonParse(text))?.length && text.trim()) {
+    try {
+      const json = await searchTextToJson({ client, model, text, searched, maxItems, timeoutMs, name });
+      if (pickItems(safeJsonParse(json))?.length) {
+        text = json;
+        fixes.push("ответ поиска пришёл текстом — переведён в JSON без повторного поиска");
+      }
+    } catch (e) {
+      console.warn(`[${name}] перевод ответа поиска в JSON не удался: ${e.message}`);
+    }
+  }
   // Поиска не было — адреса из ответа модель взяла из памяти; пусть лучше
   // сработает прежний поиск со всеми его проверками.
   if (!searched.length) throw new Error("модель не выполнила поиск");
@@ -848,7 +893,7 @@ async function qwenResponsesSearch({ client, model, prompt, query, maxItems, tim
     ai: {
       model,
       ms,
-      fixes: [],
+      fixes,
       searchQueries: queries,
       usage: final.usage ?? null,
     },
@@ -867,6 +912,7 @@ async function qwenResponsesSearch({ client, model, prompt, query, maxItems, tim
  */
 async function callOpenAIResponses({
   prompt,
+  brief,
   query,
   maxItems,
   provider,
@@ -885,7 +931,7 @@ async function callOpenAIResponses({
   if (isQwen && query && String(process.env.QWEN_SEARCH_MODE || "responses").toLowerCase() !== "chat") {
     const searchModel = process.env.QWEN_SEARCH_MODEL || effectiveModel;
     try {
-      return await qwenResponsesSearch({ client, model: searchModel, prompt, query, maxItems, timeoutMs, name });
+      return await qwenResponsesSearch({ client, model: searchModel, prompt, brief, query, maxItems, timeoutMs, name });
     } catch (err) {
       const why = apiErrorText(err) || err?.message || String(err);
       console.warn(`[${name}] поиск через Responses API не удался (${why}) — обычный поиск`);

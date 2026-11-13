@@ -99,24 +99,33 @@ const GENERIC = /^(продукт|веществ|смес|сырь|отход|м
  * «ethylene glycol» различаются только гласными на стыке. Короткое название
  * (короче четырёх букв) не проверяем — по нему ничего не понять.
  */
-function aboutProduct(item, productName) {
-  const hay = skeleton(
-    [item?.title, item?.url, item?.technology_description, ...(item?.inputs_outputs_hint || []), ...(item?.evidence_snippets || [])].join(" "),
-  );
-  const hayC = consonants(hay);
-  // [где искать, что искать]: начало слова в записи — и его согласные.
+function productProbes(productName) {
+  // [по согласным?, что искать]: начало слова в записи — и его согласные.
   const probes = [];
   for (const key of nameKeys(productName)) {
     for (const w of key.split(" ")) {
       if (GENERIC.test(w)) continue;
       const s = skeleton(w);
       if (s.length < 4 || /^\d+$/.test(s)) continue;
-      probes.push([hay, s.slice(0, s.length <= 6 ? Math.max(4, s.length - 2) : Math.max(6, s.length - 3))]);
+      probes.push([false, s.slice(0, s.length <= 6 ? Math.max(4, s.length - 2) : Math.max(6, s.length - 3))]);
       const c = consonants(s);
-      if (c.length >= 5) probes.push([hayC, c.slice(0, c.length - 1)]);
+      if (c.length >= 5) probes.push([true, c.slice(0, c.length - 1)]);
     }
   }
-  return !probes.length || probes.some(([where, what]) => where.includes(what));
+  return probes;
+}
+
+/** Назван ли продукт в тексте; null — название слишком короткое, судить нельзя. */
+function mentionsProduct(text, probes) {
+  if (!probes.length) return null;
+  const hay = skeleton(text);
+  const hayC = consonants(hay);
+  return probes.some(([byConsonants, what]) => (byConsonants ? hayC : hay).includes(what));
+}
+
+function aboutProduct(item, productName) {
+  const text = [item?.title, item?.url, item?.technology_description, ...(item?.inputs_outputs_hint || []), ...(item?.evidence_snippets || [])].join(" ");
+  return mentionsProduct(text, productProbes(productName)) !== false;
 }
 
 /**
@@ -159,6 +168,55 @@ function pageKey(url) {
   }
 }
 
+/** Сколько знаков текста страницы добавляем к описанию источника. */
+const EXCERPT_CHARS = 4000;
+
+/**
+ * Абзацы страницы о производстве продукта — в описание источника.
+ *
+ * Модель на поиске пишет о странице пару предложений: подробный текст она
+ * добывала повторными поисками, и поиск шёл до 5 минут (27 поисков подряд у
+ * qwen3.8-flash 2026-11-13). Страницу сервер и так открывает для проверки —
+ * берём текст оттуда: обобщение шага читает настоящую страницу, а не
+ * пересказ. Абзац ценнее, если в нём назван продукт и есть слова
+ * производства; порядок — как на странице.
+ */
+function pageExcerpt(text, productName, max = EXCERPT_CHARS) {
+  const lines = String(text || "").split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const paras = [];
+  let cur = "";
+  // Строка страницы — абзац; совсем короткие (заголовки, пункты списков)
+  // приклеиваем к следующей, чтобы не терять их смысл.
+  for (const line of lines) {
+    cur = cur ? `${cur} ${line}` : line;
+    if (cur.length >= 80) {
+      paras.push(cur);
+      cur = "";
+    }
+  }
+  if (cur) paras.push(cur);
+  const probes = productProbes(productName);
+  const scored = paras.map((p, i) => {
+    // Меню и шапки сайта («Сварочные материалы Виды сварки История…»)
+    // — без знаков препинания; в связном тексте они есть.
+    if (!/[.!?;:](\s|$)/.test(p)) return { i, p, score: 0 };
+    const production = (p.match(new RegExp(PRODUCTION.source, "gi")) || []).length;
+    const named = mentionsProduct(p, probes) ? 3 : 0;
+    return { i, p, score: production + named };
+  });
+  const picked = [];
+  let used = 0;
+  for (const s of [...scored].filter((x) => x.score > 0).sort((a, b) => b.score - a.score || a.i - b.i)) {
+    if (used + s.p.length > max) continue;
+    picked.push(s);
+    used += s.p.length + 2;
+  }
+  return picked
+    .sort((a, b) => a.i - b.i)
+    .map((s) => s.p)
+    .join("\n\n");
+}
+
 /** Общие слова названий источников: по ним «о том ли страница» не понять. */
 const STOP = new Set(
   (
@@ -199,7 +257,7 @@ async function checkOne(item, { signal, fetchPage, crossref }) {
   try {
     const page = await fetchPage(item.url, { signal });
     return relevant(item, page)
-      ? { status: "ok" }
+      ? { status: "ok", page }
       : { status: "unrelated", reason: `по адресу — другая страница${page.title ? `: «${String(page.title).slice(0, 120)}»` : ""}` };
   } catch (e) {
     const reason = String(e?.message || e);
@@ -281,9 +339,13 @@ async function verifyStepSources(
       // Статью нашёл Crossref по названию, а адрес модель дала не тот — ставим
       // настоящий (doi.org), прежний — рядом.
       const fixed = r.url && r.url !== it.url ? { url: r.url, model_url: it.url } : {};
+      const excerpt = r.page ? pageExcerpt(r.page.text, productName || it.title) : "";
       kept.push({
         ...it,
         ...fixed,
+        ...(excerpt
+          ? { technology_description: `${it.technology_description}\n\nТекст страницы (загружен сервером):\n${excerpt}` }
+          : {}),
         server_check: r.status === "ok" ? { status: "ok", ...(r.reason ? { reason: r.reason } : {}) } : { status: "unchecked", reason: r.reason },
       });
     }
@@ -291,4 +353,4 @@ async function verifyStepSources(
   return { kept, dropped };
 }
 
-module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutProduction, skeleton, pageKey };
+module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutProduction, skeleton, pageKey, pageExcerpt };

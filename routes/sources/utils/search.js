@@ -40,8 +40,10 @@ async function searchSources({
     result = { resp, text, parsed, rawItems, items, attempts: attempt };
 
     // Годные есть — готово. Ответ оборвался на пределе длины — повтор упрётся
-    // в тот же предел, это не случайность.
-    if (items.length > 0 || isAborted() || resp?.status === "incomplete") break;
+    // в тот же предел, это не случайность. Поиск со списком найденных страниц
+    // (Responses API) состоялся, но годного не дал — повтор ещё на 1–2 минуты
+    // вряд ли найдёт другое: владелец 2026-11-13 ждал так по 5 минут.
+    if (items.length > 0 || isAborted() || resp?.status === "incomplete" || resp?.searched_urls?.length) break;
     if (attempt === 1) {
       console.warn(
         `[sources] model=${opts.model || "по умолчанию"}: ни одного годного источника — повторяю поиск`,
