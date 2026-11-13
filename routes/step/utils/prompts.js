@@ -1555,6 +1555,27 @@ function stepSearchQuery(productName, direction = "down") {
     : `Что производят из «${productName}» или с его использованием: промышленное применение, продукты и изделия, где «${productName}» — сырьё, материал, деталь или комплектующее. Ищи по-русски и по-английски («${productName}» по-английски + uses, applications, used to make). Верни найденные источники в JSON по схеме.`;
 }
 
+/**
+ * Инструкция поиска шага через Responses API (routes/sources/utils/openai.js,
+ * qwenResponsesSearch): найти страницы и коротко сказать о каждой. Подробный
+ * текст сервер берёт со страниц сам (verifySources.js, pageExcerpt). Длинные
+ * buildStepSourcesPrompt* требовали «крупных фрагментов, близких к
+ * источнику» — и модель искала снова и снова, до 27 поисков и 5 минут.
+ */
+function stepSearchBrief(productName, direction = "down", maxItems = 5) {
+  const intent =
+    direction === "up"
+      ? `как производят «${productName}»: из какого сырья, материалов, узлов и деталей и через какие стадии`
+      : `что производят из «${productName}» или с его использованием: в каких процессах и изделиях он сырьё, материал, деталь или комплектующее`;
+  return [
+    "Ты ищешь в интернете открытые источники о промышленном производстве. Продукт может быть любым: вещество, материал, деталь, узел, изделие.",
+    `Задача: найди до ${maxItems} страниц, где по существу описано, ${intent}.`,
+    "Подходят технологические описания, учебные пособия, энциклопедии, сайты производителей, отраслевые обзоры и стандарты, патенты. Не подходят новости без технологии, магазины, форумы, страницы без текста о производстве.",
+    "Для каждой страницы: название; URL — только из найденного поиском в этом запросе; access_hint — open html или text pdf; в technology_description — 3–5 предложений о том, что на странице написано по задаче; в inputs_outputs_hint — названные на странице входы и выходы; в evidence_snippets — 1–3 короткие цитаты.",
+    "Подробный текст страницы сервер загрузит сам — не ищи повторно ради него.",
+  ].join("\n\n");
+}
+
 function stringifyExistingChain(chain) {
   if (chain === null || chain === undefined) return "[]";
   if (typeof chain === "string") return chain.trim() || "[]";
@@ -1640,6 +1661,7 @@ function buildStepAggregatePrompts({
 
 module.exports = {
   stepSearchQuery,
+  stepSearchBrief,
   buildStepSourcesPromptDown,
   buildStepSourcesPromptUp,
   buildStepAggregatePrompts,

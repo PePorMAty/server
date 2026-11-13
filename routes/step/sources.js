@@ -26,6 +26,7 @@ const {
   buildStepSourcesPromptDown,
   buildStepSourcesPromptUp,
   stepSearchQuery,
+  stepSearchBrief,
 } = require("./utils/prompts");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
@@ -155,6 +156,9 @@ router.post("/gpt/step/sources", async (req, res) => {
       items: found,
     } = await searchSources({
       prompt,
+      // Правленый промпт — как есть; по умолчанию поиск с короткой задачей,
+      // а текст страниц сервер возьмёт сам (verifySources.js).
+      brief: customSystemPrompt ? null : stepSearchBrief(productName, direction, maxItems) + knownSourcesBlock(existingSources),
       query: stepSearchQuery(productName, direction),
       maxItems,
       timeoutMs: 35 * 60 * 1000,
