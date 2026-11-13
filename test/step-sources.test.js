@@ -248,3 +248,33 @@ test("источник о производстве не химии — оста�
   assert.equal(kept.length, 2);
   assert.equal(aboutProduction({ title: "GitHub: mattpocock/skills", technology_description: "Репозиторий навыков для изучения веб-технологий; производительность вычислений." }), false);
 });
+
+// ---------- список найденных поиском страниц (Responses API, 2026-11-13) ----------
+const { pageKey } = require("../routes/step/utils/verifySources");
+const { normalizeAndFilterItems } = require("../routes/sources/utils/openai");
+
+test("адрес не из найденного поиском — выдуман; www, параметры и косая черта не мешают", async () => {
+  const searched = [
+    "https://www.airbus.com/en/products-services/commercial-aircraft/the-life-cycle-of-an-aircraft/production",
+    "https://global.toyota/en/company/plant-tours/assembly/index.html?utm=x",
+  ];
+  const { kept, dropped } = await verifyStepSources(
+    [
+      src("Production - Airbus", "https://airbus.com/en/products-services/commercial-aircraft/the-life-cycle-of-an-aircraft/production/", { technology_description: "Aircraft final assembly lines." }),
+      src("Car Production Process: Assembly", "https://global.toyota/en/company/plant-tours/assembly/index.html", { technology_description: "Final assembly of the car." }),
+      src("Ту-214: производственные мощности", "https://example-aero.ru/tu-214", { technology_description: "Сборка самолёта." }),
+    ],
+    { productName: "Самолёт", searched, fetchPage: async (url) => ({ title: url.includes("toyota") ? "Car Production Process: Assembly" : "Production - Airbus", text: "Production Airbus car assembly process ".repeat(20) }) },
+  );
+  assert.deepEqual(kept.map((k) => k.title), ["Production - Airbus", "Car Production Process: Assembly"]);
+  assert.match(dropped[0].reason, /нет среди страниц, найденных поиском/);
+  assert.equal(pageKey("https://www.Example.com/a/b/?q=1#x"), "example.com/a/b");
+});
+
+test("поле описания под другим именем (technological_description) — не теряется", () => {
+  const [it] = normalizeAndFilterItems([
+    { title: "Production - Airbus", url: "https://www.airbus.com/production", technological_description: "Airbus has more than 20 manufacturing sites.", evidence: ["20 sites"] },
+  ]);
+  assert.equal(it.technology_description, "Airbus has more than 20 manufacturing sites.");
+  assert.deepEqual(it.evidence_snippets, ["20 sites"]);
+});

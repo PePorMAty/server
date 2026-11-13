@@ -10,6 +10,7 @@
 // с адресом https://N/A и текстом «источников нет» — и обобщение строило по
 // нему шаг «X → X». Поэтому:
 //   • заглушки «источников нет» — не источники;
+//   • поиск отдал список найденных страниц — адрес не из него выдуман;
 //   • страницы нет (404, нет такого сайта) — источник выбрасывается;
 //   • страница есть, но не о том (в ней нет ключевых слов названия
 //     источника) — выбрасывается;
@@ -138,6 +139,26 @@ function aboutProduction(item) {
   return PRODUCTION.test(text);
 }
 
+/**
+ * Адрес страницы для сверки со списком найденного поиском: без схемы, www,
+ * параметров и косой черты в конце — так модель и поиск пишут одну и ту же
+ * страницу по-разному.
+ */
+function pageKey(url) {
+  try {
+    const u = new URL(String(url || "").trim());
+    let path = u.pathname;
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      /* битая кодировка — как есть */
+    }
+    return `${u.hostname.replace(/^www\./, "").toLowerCase()}${path.replace(/\/+$/, "")}`;
+  } catch {
+    return "";
+  }
+}
+
 /** Общие слова названий источников: по ним «о том ли страница» не понять. */
 const STOP = new Set(
   (
@@ -202,14 +223,22 @@ async function checkOne(item, { signal, fetchPage, crossref }) {
  * страницы, с причиной. Источники из базы документов (origin: local) не
  * трогаем: их загрузил человек.
  */
-async function verifyStepSources(items, { productName, signal, fetchPage = fetchSource, crossref = crossrefCheck } = {}) {
+async function verifyStepSources(
+  items,
+  { productName, searched, signal, fetchPage = fetchSource, crossref = crossrefCheck } = {},
+) {
   const list = Array.isArray(items) ? items : [];
   const dropped = [];
   const todo = [];
+  // Поиск отдал список найденных страниц (Responses API, 2026-11-13) — адрес
+  // не из него модель составила сама.
+  const found = new Set((Array.isArray(searched) ? searched : []).map(pageKey).filter(Boolean));
   for (const it of list) {
     if (it?.origin === "local") continue;
     if (isPlaceholder(it)) {
       dropped.push({ title: it?.title || "", url: it?.url || "", reason: "заглушка «источников нет», а не источник" });
+    } else if (found.size && !found.has(pageKey(it.url))) {
+      dropped.push({ title: it?.title || "", url: it?.url || "", reason: "адреса нет среди страниц, найденных поиском, — модель его составила" });
     } else if (productName && !aboutProduct(it, productName) && !aboutProduction(it)) {
       dropped.push({
         title: it?.title || "",
@@ -262,4 +291,4 @@ async function verifyStepSources(items, { productName, signal, fetchPage = fetch
   return { kept, dropped };
 }
 
-module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutProduction, skeleton };
+module.exports = { verifyStepSources, isPlaceholder, keyTerms, relevant, aboutProduct, aboutProduction, skeleton, pageKey };
