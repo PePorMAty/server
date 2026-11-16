@@ -141,6 +141,8 @@ test("замечание расчёта баланса и fixed уходят в 
 test("без сырья или продуктов — 400; ответ не по схеме — 502", async () => {
   const bad = await check({ transformation: { name: "X" }, inputs: ["А"], outputs: [] });
   assert.equal(bad.http_status, 400);
+  const noName = await check({ transformation: { description: "…" }, inputs: ["А"], outputs: ["Б"] });
+  assert.equal(noName.http_status, 400);
   reply = "это не JSON";
   const r = await check(cellosolve);
   assert.equal(r.success, false);

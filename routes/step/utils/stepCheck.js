@@ -87,8 +87,9 @@ function productOf(p) {
  */
 function readCheckBody(body) {
   const list = (v) => (Array.isArray(v) ? v.map(productOf).filter((p) => p.name).slice(0, 30) : []);
+  const t = body?.transformation;
   const transformation = {
-    name: unquote(body?.transformation?.name ?? body?.transformation),
+    name: unquote(typeof t === "string" ? t : t?.name),
     description: brief(body?.transformation?.description, 600) || undefined,
   };
   const inputs = list(body?.inputs);
