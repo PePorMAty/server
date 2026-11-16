@@ -16,6 +16,7 @@ const stepSources = require("./routes/step/sources");
 const stepAggregate = require("./routes/step/aggregate");
 const stepBuild = require("./routes/step/build");
 const stepEndUse = require("./routes/step/endUse");
+const stepCheck = require("./routes/step/check");
 const transformationBetween = require("./routes/transformation-between/transformation-between");
 const techDescription = require("./routes/tech-description/tech-description");
 const shareRoutes = require("./routes/share/share");
@@ -102,6 +103,8 @@ app.use("/api/graphs", stepAggregate);
 app.use("/api/graphs", stepBuild);
 // «Что делают из продукта» — когда шаг «вниз» не нашёл продолжения.
 app.use("/api/graphs", stepEndUse);
+// Проверка шага моделью: верно ли «сырьё → продукты» (превью шага, отказ баланса).
+app.use("/api/graphs", stepCheck);
 app.use("/api/graphs", transformationBetween);
 app.use("/api/graphs", techDescription);
 app.use("/api/graphs", shareRoutes);
