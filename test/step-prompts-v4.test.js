@@ -124,3 +124,17 @@ test("обобщение отдаёт версию промптов и «Дос�
   assert.equal(legacy.promptsVersion, "legacy");
   assert.doesNotMatch(captured.instructions, /единый контракт шага/);
 });
+
+test("GET /gpt/step/sources/prompt — промпт поиска действующей версии для окна клиента", async () => {
+  const sources = require("../routes/step/sources.js");
+  const get = sources.stack.find((l) => l.route?.path === "/gpt/step/sources/prompt" && l.route.methods.get).route.stack[0].handle;
+  const call = (query) => new Promise((resolve) => get({ query }, { json: resolve }));
+  const v4 = await withVersion(undefined, () => call({ direction: "up", productName: "Фенол", maxItems: "4" }));
+  assert.equal(v4.version, "v4");
+  assert.equal(v4.direction, "up");
+  assert.match(v4.prompt, /^Параметры сервера:\nEXPAND_PRODUCT: Фенол\nПРОДУКТ: Фенол\nN: 4\n/);
+  const legacy = await withVersion("legacy", () => call({ direction: "down", productName: "Фенол", maxItems: "99" }));
+  assert.equal(legacy.version, "legacy");
+  assert.doesNotMatch(legacy.prompt, /Параметры сервера/);
+  assert.match(legacy.prompt, /Фенол/);
+});

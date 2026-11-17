@@ -28,6 +28,7 @@ const {
   stepSearchQuery,
   stepSearchBrief,
 } = require("./utils/prompts");
+const { promptsVersion } = require("./utils/promptVersion");
 
 // ---------- heartbeat (как в routes/sources/sources.js) ----------
 /** Сколько уже найденных ссылок перечислять модели — дальше промпт пухнет зря. */
@@ -94,6 +95,23 @@ function startAntiIdle(res, req, { heartbeatMs = 15000 } = {}) {
     },
   };
 }
+
+// Промпт поиска источников по умолчанию — действующей версии (v4 или прежний,
+// STEP_PROMPTS). Окно «Промпт поиска» на клиенте показывало свою копию, и
+// после смены промптов на сервере в нём оставался старый текст, а правка
+// уходила на сервер старым текстом поверх нового.
+router.get("/gpt/step/sources/prompt", (req, res) => {
+  const direction = req.query?.direction === "up" ? "up" : "down";
+  const productName = String(req.query?.productName || "").trim() || "<продукт>";
+  const n = Number(req.query?.maxItems);
+  const maxItems = Number.isFinite(n) && n >= 1 && n <= 15 ? Math.round(n) : 5;
+  res.json({
+    success: true,
+    direction,
+    version: promptsVersion(),
+    prompt: direction === "up" ? buildStepSourcesPromptUp(productName, maxItems) : buildStepSourcesPromptDown(productName, maxItems),
+  });
+});
 
 router.post("/gpt/step/sources", async (req, res) => {
   const t0 = Date.now();
