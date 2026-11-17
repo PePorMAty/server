@@ -1,0 +1,110 @@
+{
+ "note": "Нейлон 6,6 вниз — источники из поиска в новом формате (2026-11-17): строки стадий без адреса и продукта (их дописывает сервер, utils/searchHints.js), полные названия. Строки идут в блок обобщения v4; основной — волокно, альтернативы — литьё и стеклонаполненные компаунды со вторым сырьём. Проверяет, что модель не копирует из строк общие названия («Гранулы», «Волокна») и не склеивает разные применения в один шаг.",
+ "expect": {
+  "minAlternatives": 1,
+  "forbidOutputs": [
+   "Гранулы",
+   "Волокна",
+   "Текстильные волокна"
+  ]
+ },
+ "request": {
+  "productName": "Нейлон 6,6",
+  "direction": "down",
+  "sources": [
+   {
+    "title": "Flow Chart of Nylon 66 Fiber Manufacturing Process",
+    "url": "https://www.textileflowchart.com/2015/08/flow-chart-of-nylon-66-fiber-manufacturing-process.html",
+    "access_hint": "open html",
+    "technology_description": "search_product: Нейлон 6,6\nПроцесс производства волокна из нейлона 6,6 включает двухстадийное формование расплавом (melt spinning), состоящее из прядения и вытяжки. Полимерные гранулы (chips) плавятся при температуре около 280–295°C и экструзируются через фильеры для формирования непрерывных нитей. Затем нити охлаждаются, подвергаются механической вытяжке для ориентации молекул и термической фиксации для стабилизации структуры.\n\nТекст страницы (загружен сервером):\nNylon-6.6: There are several types of “nylon” polymers. The most widely utilized polyamides in commerce are type nylon 66 and nylon 6 . Nylon-6.6 fiber is spun from polyhexamethylene adipamide, a polyamide made by condensation of hexamethylene diamine and adipic acid. Flow Chart of Nylon 66 Fiber Manufacturing Process is as follows:\n\nNylon 66 is frequently used when high mechanical strength, rigidity, good stability under heat, and/or chemical resistance are required. It is used in fibers for textiles and carpets and molded parts. It is also used as zip ties, conveyor belts, hoses, etc. Nylon 66 is also a popular guitar nut material. The manufacturing flow chart of Nylon 66 fiber is given below.\n\nThe production process of nylon 66 fiber: Nylon 66 could synthesize by using a polycondensation reaction. The simplest polycondensation for making nylon 66 is the reaction of a diamine and a diacid:\n\nPolycondensation reaction: In the production of nylon 66 polymer adipic acid and hexamethylenediamine are used. During polymerization, the diamine and the diacid each donate 6 carbons to the polymer chain. Therefore the polymer formed in this reaction is called nylon 66. As with other regular copolymers like polyesters and polyurethanes, the repeating unit consists of one of each monomer.\n\nMelt spinning: Two-step melt spinning, comprised of spinning and drawing, is considered to be the conventional method to manufacture nylon filaments. After melting, filtering, and deaerating, the molten polymer is extruded through a spinneret into a chamber where the melt solidifies into a filament form.\n\nFlow Chart of Viscose Rayon Manufacturing Process Leave a Comment Cancel reply Subscribe for Free Articles!",
+    "inputs_outputs_hint": [
+     "Маршрут R1 | Стадия S1 | industrial_status=confirmed | Входы: [Гранулы нейлона 6,6 {role=business_product}] | Выходы: [Неориентированное волокно нейлона 6,6 {role=основной продукт}] | input_completeness=complete | output_completeness=partial"
+    ],
+    "evidence_snippets": [
+     "Melt spinning: Two-step melt spinning, comprised of spinning and drawing, is considered to be the conventional method to manufacture nylon",
+     "The technique involves melting the polymer, extruding it through spinnerets, and then cooling and drawing the filaments"
+    ],
+    "server_check": {
+     "status": "ok"
+    }
+   },
+   {
+    "title": "Mastering Nylon Injection Molding: Insights into PA6 and PA66",
+    "url": "https://boyanmfg.com/pa6-and-pa66-nylon-injection-molding/",
+    "access_hint": "open html",
+    "technology_description": "search_product: Нейлон 6,6\nЛитьё под давлением (injection molding) является основным промышленным процессом переработки гранул полиамида 6,6 в инженерные детали. Гранулы PA66 загружаются в бункер, сушатся для удаления влаги (так как нейлон гигроскопичен), затем расплавляются в цилиндре литьевой машины и впрыскиваются под высоким давлением в металлическую форму. После охлаждения и затвердевания форма открывается, и готовое изделие извлекается.\n\nТекст страницы (загружен сервером):\nMastering Nylon Injection Molding: Insights into PA6 and PA66 - Boyan Manufacturing Solutions\n\nMastering Nylon Injection Molding: Insights into PA6 and PA66 by boyanmfg manufacturing knowledge (category) , Sourcing skills (category)\n\nThis article delves into the nuances of nylon injection molding, focusing on its most popular forms, PA6 and PA66, and the essential aspects of the molding process. Our exploration offers insights into this key manufacturing process, highlighting how modifications enhance nylon’s properties and its applications across various industries. Join us in uncovering the intricate world of nylon injection molding, a cornerstone of modern manufacturing.\n\nWhat is Nylon? Nylon is a synthetic polyamide (abbreviated as PA ), a type of polymer that is formed by amide bonds (-NH-CO-). It belongs to the family of semi-crystalline thermoplastic polymers . Known for its strength, toughness, high-temperature resistance, wear resistance, and low friction, nylon is widely used in textile manufacturing and injection molding processes. This material was invented and named by the American company DuPont in the late 1930s. Nylon was first used for toothbrush bristles and later expanded to the production of stockings, parachutes, and other items.\n\nTypes of Modified Nylon To overcome the weaknesses of nylon, various modified forms of nylon have been developed in the market. The most common modification methods include blending, filling, and copolymerization . Blending involves mixing nylon with other plastics or rubbers to complement each other’s strengths; filling modification typically adds materials like glass fibers, calcium carbonate, or talc to increase strength and reduce shrinkage; copolymerization modifies the molecular chain, grafting or segmenting other functional groups or polymers onto PA6 chains to enhance overall performance.\n\nWide Application : Nylon’s excellent strength, wear resistance, chemical corrosion resistance, and high-temperature tolerance make it applicable in various fields such as automotive, electronics, machinery, and everyday goods. This diversity offers small and medium-sized businesses a broad market space.\n\nEase of Processing : Nylon is easy to mold, and the cost of production and testing equipment is not high, which lowers the barrier to entry. The main cost is associated with the need for substantial production and storage space.\n\nOn-Site Visits to Small and Medium Material Manufacturers When selecting and evaluating small and medium material manufacturers, an on-site visit to their factories is a crucial step. By being there in person, you can gain a direct understanding of whether their production process and storage management adhere to quality control standards. Such visits also allow you to inspect the quality of the raw materials used and verify if they are equipped with adequate testing equipment to ensure product quality.\n\nFace-to-face communication with the manufacturers is also vital. Through conversations, you can assess whether they possess the professional knowledge and understanding necessary to guarantee product quality and subsequent service support. Additionally, interacting with their team members can give you insights into their work attitude and service awareness, which are important factors in choosing the right supplier.\n\nTo better illustrate this process, here is a video showcasing the production site of modified nylon. This video allows you to visually observe their production environment and operational processes, which is extremely helpful in assessing their production capabilities and product quality.\n\nIn summary, on-site visits not only provide you with first-hand information about the manufacturers but also help you make more informed and practical decisions. Such evaluations can strengthen your confidence in the supplier’s quality control and production capabilities, ensuring that your chosen partner can meet your business needs.",
+    "inputs_outputs_hint": [
+     "Маршрут R2 | Стадия S1 | industrial_status=confirmed | Входы: [Гранулы нейлона 6,6 {role=business_product}] | Выходы: [Инженерные пластиковые детали из PA66 {role=основной продукт}] | input_completeness=complete | output_completeness=complete"
+    ],
+    "evidence_snippets": [
+     "Uncover the intricacies of nylon injection molding, focusing on PA6 and PA66",
+     "Ideal for gears, bearings, and moving parts in harsh conditions"
+    ],
+    "server_check": {
+     "status": "ok"
+    }
+   },
+   {
+    "title": "Glass-Filled Polyamide: Advantages and Disadvantages",
+    "url": "https://www.protolabs.com/resources/blog/the-advantages-and-disadvantages-of-glass-filled-nylon/",
+    "access_hint": "open html",
+    "technology_description": "search_product: Нейлон 6,6\nПроизводство стеклонаполненного нейлона 6,6 осуществляется путём компаундирования: к смоле нейлона 6,6 добавляется порошкообразное стекло или стеклянные волокна. Процесс обычно включает экструзию смеси в двухшнековом экструдере для равномерного распределения наполнителя в полимерной матрице. Полученный композитный материал затем гранулируется для последующего использования в литье под давлением или экструзии профилей.\n\nТекст страницы (загружен сервером):\nNylon is an ideal material choice for machined parts that will experience friction and wear. But when you are dealing with glass-filled nylon, the CNC machining process becomes significantly trickier and more difficult. The glass filler is highly abrasive, which can cause cutting tools and inserts to wear down rapidly. But when glass-filled nylon is handled carefully and properly, there are many benefits to using the material in your CNC machining projects. Like other nylon variants, glass-filled nylon provides good mechanical properties, fatigue resistance, noise damping, and bearing and wear resistance. Our service uses Nylon 6/6 (30% GF) Natural.\n\nBenefits of Glass-Filled Nylon for 3D-Printed Parts Nylon materials make strong, durable parts that have suitable properties for both functional prototyping and end-use projects. A wide array of nylons can be used for both selective laser sintering (SLS) and Multi Jet Fusion (MJF) 3D printing processes. While all printed nylons offer high levels of strength, stiffness, and temperature resistance, glass-filled nylons stand out from their standard nylon counterparts by having long term wear resistance, higher stiffness, and substantially more heat deflection resistance. We manufacture glass-filled nylon parts made from PA 12 with 40% glass-fill. One is in black, the other is in white. The chart below lays out the key differences in various nylons used in 3D printing.\n\nBlack 4.35 ksi (30.0MPa) 508 ksi (3,500MPa) 8.5% 347° F 175° C 248° F 120° C With SLS, glass-filled nylon’s stiffness and temperature resistance makes it well-suited for components like armatures and mounting plates. With MJF, PA 12 40% glass-filled black is often used to build housings, enclosures, and fixtures. It also works well for snap fits and hinges.\n\nBenefits of Glass-Filled Nylon for Injection-Molded Parts All molded nylon materials possess good levels of hardness, stiffness, and rigidity. But nylon typically has poor heat resistance and fails to withstand UV light. Adding glass fibers to the nylon modifies the material, improving these properties. Nylon’s high-temperature strength improves considerably when it is reinforced with glass. Using glass-filled nylon in injection molding projects also increases a part’s wear resistance and improves its chemical resistance, except for exposure to strong acids and bases. We offer a variety of glass-filled nylon for injection molding:\n\nNylon 3D Printing Service Tagged: injection molding, CNC machining, 3D printing,",
+    "inputs_outputs_hint": [
+     "Маршрут R3 | Стадия S1 | industrial_status=confirmed | Входы: [Гранулы нейлона 6,6 {role=business_product}, Стеклянные волокна {role=material_intermediate}] | Выходы: [Гранулы стеклонаполненного нейлона 6,6 {role=основной продукт}] | input_completeness=complete | output_completeness=complete"
+    ],
+    "evidence_snippets": [
+     "It's made by adding powdered glass to nylon resin or by extruding the plastic with glass fibers",
+     "Glass-filled nylon is a synthetic polyamide thermoplastic and it's one of the most important materials used in engineering"
+    ],
+    "server_check": {
+     "status": "ok"
+    }
+   },
+   {
+    "title": "A Comprehensive Analysis Of The Injection Molding Process For PA66 Plastic Materials",
+    "url": "https://elimold.com/a-comprehensive-analysis-of-the-injection-molding-process-for-pa66-plastic-materials/",
+    "access_hint": "open html",
+    "technology_description": "search_product: Нейлон 6,6\nВ статье описывается специфика литья под давлением деталей из PA66, включая влияние давления впрыска на усадку изделия. Обычная усадка PA66 составляет 1,5–2,5%, но при использовании стеклонаполненных марок она снижается до 0,3–0,8%. Приводится пример промышленного применения: производство клетки подшипника коробки передач (gearbox bearing cage) компанией Nippon Seiko.\n\nТекст страницы (загружен сервером):\nin conclusion Polyamide (PA), commonly known as nylon, is a widely used semi-crystalline thermoplastic, renowned for its excellent abrasion resistance, low density, and high thermal stability. This material, depending on the carbon number of the diamine and diacid, is synthesized from two monomers, resulting in nylon varieties such as PA46, PA66, PA610, PA612, and PA1010. PA66, due to its superior mechanical properties, heat resistance, and chemical stability, is widely used in the automotive, electronics, and machinery industries. To fully understand the injection molding manufacturing of PA66 plastic material, it is first necessary to understand its basic physicochemical properties and the technical details that need attention during the injection molding process.\n\nWhat is nylon material? First, let’s briefly understand what nylon is. Nylon is a man-made fiber and one of the most commonly used polyamides. This material refers to a class of synthetic polymers composed of polyamides. Nylon is a silk-like material made from petroleum and is typically melted into films, various shapes, or fibers. By adding other properties or additives, nylon can be derived into many different types. Currently, nylon is widely used in almost all industries. You can use it to make a variety of plastic products. It is lightweight, durable, strong, and wear-resistant.\n\nWhat is Nylon PA66? Nylon has many variants. Generally, nylons synthesized from two monomers based on the number of carbon atoms in the diamine and diacid are: PA46, PA66, PA610, PA612, PA1010, etc. They are also named according to the number of carbon atoms in the monomers: Nylon PA6, PA11, PA12, etc. One such variant is PA66, also known as Nylon PA66. It is one of the earliest nylon materials. Wallace Hume Carothers invented it in 1935 at the DuPont research center. To date, it has become the most widely used nylon material in the world. Companies use PA66 plastic to manufacture products because of its excellent performance balance and relatively low price. Furthermore, it has high rigidity and toughness, as well as excellent tensile strength.\n\nDetails to consider when injection molding PA66 Our engineering team has accumulated extensive experience in the injection molding of PA66 plastic materials (having manufactured over 10,000 different nylon plastic products to date). Below are the lessons learned from our daily experience in manufacturing nylon plastic products.\n\nWhy do most injection-molded plastic products use PA66 material? Nylon exhibits unique flow properties in injection molding, making it easy to manufacture complex plastic products using this process. PA66 boasts a melt flow rate (MFR) of up to 30 g/10 min (275℃/5 kg). This honey-like flow pattern ensures complete filling of complex structures while avoiding defects such as jetting. In micro-connector injection molding, nylon melt can precisely fill needle-like cavities with a wall thickness of 0.15 mm and an aspect ratio exceeding 20:1—a precision unattainable by most engineering plastics.\n\nApplications and Industry Use Cases of PA66 Material PA66 material is indispensable in many industries due to its versatility. Here are some typical applications:\n\nNylon PA66 is an ideal choice. Combined with injection molding, it yields superior finished products. However, incorrect operation can affect the quality of the final product. By paying attention to the manufacturing details mentioned in this article, you can certainly obtain high-quality nylon products. If you require products manufactured using PA66 material and injection molding, please contact Elimold. To date, we have manufactured over 10,000 nylon injection molding projects.\n\nRelated Posts The most common type of precision CNC machining What is CNC machining? CNC machines make parts around the world for nearly every industry. They make…\n\nFrom prototyping to production, our production sites can handle all your manufacturing projects.",
+    "inputs_outputs_hint": [
+     "Маршрут R4 | Стадия S1 | industrial_status=confirmed | Входы: [Гранулы стеклонаполненного нейлона 6,6 {role=business_product}] | Выходы: [Клетка подшипника коробки передач {role=основной продукт}] | input_completeness=complete | output_completeness=complete"
+    ],
+    "evidence_snippets": [
+     "Nippon Seiko's gearbox bearing cage",
+     "The molding shrinkage of ordinary PA66 ranges from 1.5% to 2.5%, decreasing to 0.3% to 0.8% after glass fiber reinforcement"
+    ],
+    "server_check": {
+     "status": "ok"
+    }
+   },
+   {
+    "title": "PA66 LGF Compound - Long Glass Fiber Reinforced Nylon 66",
+    "url": "https://www.lfrt-plastic.com/long-glass-fiber-polyamide-66/",
+    "access_hint": "open html",
+    "technology_description": "search_product: Нейлон 6,6\nОписывается производство композита PA66 с длинными стеклянными волокнами (LGF30). Процесс включает пропитку непрерывных стеклянных ровингов расплавом нейлона 6,6 в специальной головке экструдера. Длинные волокна (обычно 10–25 мм) обеспечивают более высокую ударную вязкость и прочность по сравнению с короткими волокнами. Полученный материал используется для изготовления крупногабаритных структурных деталей.\n\nТекст страницы (загружен сервером):\nLFT-G® LGF40 Nylon 66 Polymer LGF40 PA66 is a long glass fiber reinforced nylon material designed for high-load structural components. Through approximately 40% glass fiber reinforcement, a more targeted balance is achieved...\n\nLGF30 PA66 (30% long glass fibe reinforced polyamie 66) is a high-performance composite material designed for structural components and metal substitution applications.\n\nview more First 1 2 3 4 5 6 7 Last As one of leading long glass fiber reinforced polyamide 66 manufacturers and suppliers in China, we have been specialized in the production of long glass fiber reinforced polyamide 66 for years. Welcome to buy quality products or enjoy good customized service with our factory.",
+    "inputs_outputs_hint": [
+     "Маршрут R5 | Стадия S1 | industrial_status=confirmed | Входы: [Гранулы нейлона 6,6 {role=business_product}, Длинное стеклянное волокно {role=material_intermediate}] | Выходы: [Компаунд PA66 с длинным стеклянным волокном {role=основной продукт}] | input_completeness=complete | output_completeness=complete"
+    ],
+    "evidence_snippets": [
+     "LGF30 PA66 is a 30% long glass fiber reinforced nylon 66 engineering plastic",
+     "offering high strength, excellent impact toughness, thermal stability"
+    ],
+    "server_check": {
+     "status": "ok"
+    }
+   }
+  ],
+  "existingChain": "Как «Нейлон 6,6» попал в цепочку (уже построенные шаги):\n- «Адипиновая кислота» + «Гексаметилендиамин» → [Поликонденсация нейлона 6,6] → «Нейлон 6,6»",
+  "existingProducts": [
+   "Адипиновая кислота",
+   "Нейлон 6,6",
+   "Гексаметилендиамин"
+  ],
+  "ancestorProducts": [
+   "Нейлон 6,6",
+   "Адипиновая кислота",
+   "Гексаметилендиамин"
+  ],
+  "provider": "qwen",
+  "model": "qwen3.7-plus"
+ }
+}
