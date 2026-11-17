@@ -77,17 +77,23 @@ function checkAnswer(md, request, expect = {}) {
   const add = (title, ok, detail = "") => out.push({ title, ok: !!ok, detail });
   const a = parseAnswer(md);
   const anchor = request.productName;
+  // Промпты v4 (STEP_PROMPTS, с 2026-11-17): поля «Побочные продукты» нет —
+  // товарные сопродукты в «Что производят»; «Контроль шага» — без счёта
+  // блоков; «Достаточность данных: unresolved» — оба списка пусты по правилу.
+  const v4 = /Достаточность данных/.test(md) || a.main.raw.by === undefined;
+  const unresolved = /Достаточность данных:?\**:?\s*\**\s*unresolved/i.test(md);
   const down = request.direction !== "up";
   const variants = [a.main, ...a.alts];
   const allOutputs = variants.flatMap((v) => (down ? v.outputs : v.inputs));
 
   const echoed = ECHO.filter((m) => md.includes(m));
   add("нет эха входных данных", !echoed.length, echoed.join(", "));
-  add("шаблон соблюдён (продукт, шаг, три поля списком)",
-    same(a.product, anchor) && a.main.raw.out && a.main.raw.inp && a.main.raw.by !== undefined && /^\[/.test(a.main.raw.inp),
+  add(v4 ? "шаблон соблюдён (продукт, шаг, два поля списком; v4)" : "шаблон соблюдён (продукт, шаг, три поля списком)",
+    same(a.product, anchor) && a.main.raw.out && a.main.raw.inp && (v4 || a.main.raw.by !== undefined) && /^\[/.test(a.main.raw.inp),
     `Продукт: ${a.product ?? "—"}; Из чего: ${a.main.raw.inp ?? "—"}; Побочные: ${a.main.raw.by ?? "нет поля"}`);
   if (down) {
-    add("раскрываемый продукт — первый вход основного шага", same(a.main.inputs[0], anchor), a.main.inputs.join(", "));
+    if (unresolved && !a.main.inputs.length && !a.main.outputs.length) add("unresolved — оба списка шага пусты (v4)", true);
+    else add("раскрываемый продукт — первый вход основного шага", same(a.main.inputs[0], anchor), a.main.inputs.join(", "));
     add("у каждой альтернативы раскрываемый продукт во входах", a.alts.every((v) => v.inputs.some((x) => same(x, anchor))),
       a.alts.filter((v) => !v.inputs.some((x) => same(x, anchor))).map((v) => v.title).join(", "));
   } else {
@@ -104,7 +110,7 @@ function checkAnswer(md, request, expect = {}) {
   if (expect.mainEmpty) {
     // Тупик — правильный ответ: продолжения в блоках нет, считать нечего.
     add("продолжения нет — «Что производят» пусто", !a.main.outputs.length, a.main.outputs.join(", ") || "[]");
-  } else {
+  } else if (!v4) {
     add("в «Контроле шага» посчитаны блоки", a.control.length > 0, `${a.control.length} строк`);
     if (a.control.length)
       add("основной шаг — самый подтверждённый", mainRow && mainRow.total === maxTotal,
