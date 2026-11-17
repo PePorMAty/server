@@ -43,14 +43,19 @@ Node.js, Express 5, CommonJS.
   в блоке, дозапрос при перепрыгивании уровня — `utils/levelSkip.js`, при
   выходе-не-продукте: класс веществ, смесь одной строкой, переработка
   отходов — `utils/outputCheck.js`),
-  `build.js` (разбор шага в узлы + страховки по тексту обобщения), промпты —
-  `routes/step/utils/prompts.js`.
+  `build.js` (разбор шага в узлы + страховки по тексту обобщения),
+  `check.js` (проверка шага моделью без поиска: верно ли «сырьё → продукты»,
+  исправление — переименованиями; зовут превью шага и отказ баланса,
+  `utils/stepCheck.js`), промпты — `routes/step/utils/prompts.js`.
 - `routes/sources/utils/openai.js` — единый транспорт к моделям (`MODELS.md`).
 - `routes/graph-files/` — файлы графов и данные рядом с ними (закладки,
   история, расчёты баланса, идентификаторы) в `data/<вид>/<граф>.json`;
   `data/` не в git.
 - `routes/industry/` — справочники и идентификация продуктов
-  (`IDENTIFICATION.md`); `routes/local-sources/` — документы в базе
+  (`IDENTIFICATION.md`); коды ОКПД2/ТН ВЭД моделью по файлам `reference/`
+  — `codes.js` (`/graphs/gpt/product-codes`, сохранённые — в
+  `data/product-codes.json` и в ответе `/industry/lookup`);
+  `routes/local-sources/` — документы в базе
   (`LOCAL-SOURCES.md`).
 - `TODO.md` — отложенные договорённости с разбором; читай перед тем, как
   переделывать описанное там.

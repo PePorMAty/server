@@ -537,7 +537,24 @@ function classifiersStatus() {
   return { okpd2: okpd2.size, tnved: tnved.size, dir: DIR };
 }
 
+/**
+ * Классификаторы целиком — для поиска кода моделью (codeSearch.js): ей нужен
+ * фрагмент файла, а не одно название. ОКПД2 — код → название, ТН ВЭД — код
+ * цифрами → { name, path, group }; порядок — как в файле.
+ */
+function okpd2Entries() {
+  if (okpd2 === null) okpd2 = loadOkpd2();
+  return okpd2;
+}
+
+function tnvedEntries() {
+  if (tnved === null) tnved = loadTnved();
+  return tnved;
+}
+
 module.exports = {
+  okpd2Entries,
+  tnvedEntries,
   describeOkpd2,
   describeTnved,
   okpd2Below,
