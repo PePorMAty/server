@@ -13,6 +13,7 @@
 // сам: у ИТС каждая строка оглавления ведёт на страницу и место заголовка).
 
 const { getDocumentProxy, getMeta } = require("unpdf");
+const { fixPageLines } = require("./mojibake");
 
 /** Страница без текстового слоя: меньше стольких букв — считаем сканом. */
 const TEXTLESS_PAGE_CHARS = 20;
@@ -308,7 +309,9 @@ async function extractPdf(buf) {
     for (let n = 1; n <= pdf.numPages; n++) {
       const page = await pdf.getPage(n);
       const content = await page.getTextContent();
-      pages.push({ n, lines: groupLines(content.items) });
+      // Кириллица в 1251, прочитанная как латиница («ÑÐÅÄÍÅÅ»), — обратно в
+      // буквы до всего остального: по строкам ищутся заголовки и колонтитулы.
+      pages.push({ n, lines: fixPageLines(groupLines(content.items)) });
       page.cleanup?.();
     }
     const cover = pages[0] ? pages[0].lines.map((l) => ({ ...l })) : [];
