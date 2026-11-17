@@ -8,6 +8,8 @@
 //   /graphs/gpt — как у остальных вызовов модели.
 //   Тело: { name, description?, kinds?: ["okpd2", "tnved"], usedFor?: [] —
 //     во что продукт идёт по графу, madeFrom?: [] — из чего его делают,
+//     context?: {} — контекст из графа (описание, процессы, путь до изделия;
+//     routes/shared/productContext.js),
 //     current?: { okpd2?, tnved? } — коды, что уже стоят в карточке,
 //     prompts?: { okpd2?, tnved? } — свой текст промпта, provider?, model? }.
 //   Ответ: { success, name, okpd2?, tnved? — { status: found | none, code,
@@ -27,6 +29,7 @@ const { determineCode } = require("./utils/determineCode");
 const { DEFAULT_PROMPTS } = require("./utils/codePrompts");
 const { storeCodes, clearCodes } = require("./utils/modelCodes");
 const { isUnqualifiedGeneric } = require("../shared/genericParts");
+const { readProductContext, neighboursOf } = require("../shared/productContext");
 
 /** Список названий из тела: строки, без пустых, не длиннее 120 знаков, до 6. */
 const names = (raw) =>
@@ -37,6 +40,14 @@ const names = (raw) =>
 const { startAntiIdle } = require("../step/utils/antiIdle");
 
 const KINDS = ["okpd2", "tnved"];
+
+/** Соседи по контексту, без самого продукта. */
+function neighboursExcept(context, name) {
+  const { usedFor, madeFrom } = neighboursOf(context);
+  const own = name.trim().toLowerCase();
+  const other = (list) => list.filter((x) => x.trim().toLowerCase() !== own);
+  return { usedFor: other(usedFor), madeFrom: other(madeFrom) };
+}
 
 router.get("/industry/codes/prompts", (req, res) => {
   res.json({ success: true, prompts: DEFAULT_PROMPTS });
@@ -52,6 +63,12 @@ router.post("/graphs/gpt/product-codes", async (req, res) => {
   const provider = req.body?.provider ? String(req.body.provider).trim() : undefined;
   const model = req.body?.model ? String(req.body.model).trim() : undefined;
   const prompts = req.body?.prompts ?? {};
+  // Контекст из графа (новый клиент); соседей из него берёт и поиск по
+  // классификатору, если клиент не прислал usedFor/madeFrom отдельно.
+  const context = readProductContext(req.body?.context);
+  const near = neighboursExcept(context, name);
+  const usedFor = names(req.body?.usedFor).length ? names(req.body?.usedFor) : near.usedFor;
+  const madeFrom = names(req.body?.madeFrom).length ? names(req.body?.madeFrom) : near.madeFrom;
 
   const stream = startAntiIdle(res, req);
   const reply = (status, obj) => {
@@ -87,8 +104,9 @@ router.post("/graphs/gpt/product-codes", async (req, res) => {
           {
             name,
             description,
-            usedFor: names(req.body?.usedFor),
-            madeFrom: names(req.body?.madeFrom),
+            usedFor,
+            madeFrom,
+            ...(context ? { context } : {}),
             current: req.body?.current?.[kind] ? String(req.body.current[kind]) : undefined,
             prompt: typeof prompts[kind] === "string" && prompts[kind].trim() ? prompts[kind] : undefined,
           },

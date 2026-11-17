@@ -220,3 +220,55 @@ test("записанное раньше по общему названию не 
   const l = await call(lookup, { products: ["Шасси", "Шасси (Автомобиль)"] });
   assert.equal(l.modelCodes["Шасси"], undefined);
 });
+
+// ---------- контекст продукта из графа (routes/shared/productContext.js) ----------
+const { readProductContext, productContextText } = require("../routes/shared/productContext");
+
+test("контекст из графа: процессы и путь до изделия — в запросах вместо одной строки usage", async () => {
+  asked.length = 0;
+  // Найдёт ли поиск «волокно» — неважно: класс, подгруппа, конечный код.
+  answer = (text) => {
+    if (isGroup(text) && /класс ОКПД2/.test(text)) return "20";
+    if (isGroup(text)) return "20.60";
+    return isLeaf("okpd2", text) ? "20.60.12.110" : "NONE";
+  };
+  const context = {
+    description: "Полиамид 6,6 в виде комплексных нитей для текстиля и шинного корда.",
+    madeBy: [{ name: "Формование волокна", description: "Расплав полимера продавливают через фильеры и вытягивают.", inputs: ["Нейлон 6,6"], outputs: ["Волокно нейлона 6,6"] }],
+    usedIn: [{ name: "Изготовление корда", inputs: ["Волокно нейлона 6,6"], outputs: ["Шинный корд"] }],
+    downstream: [["Шинный корд", "Шина"]],
+  };
+  const r = await call(determine, { name: "Волокно нейлона 6,6", kinds: ["okpd2"], context });
+  const prompts = asked.flat().map((m) => m.content);
+  const group = prompts.find((t) => isGroup(t));
+  assert.match(group, /Контекст из графа:\nОписание: Полиамид 6,6 в виде комплексных нитей/);
+  assert.match(group, /- «Формование волокна»: Нейлон 6,6 → Волокно нейлона 6,6\. Расплав полимера/);
+  assert.match(group, /Дальше по цепочке: Шинный корд → Шина/);
+  assert.doesNotMatch(group, /Где используется \(по графу\)/);
+  const leaf = prompts.find((t) => isLeaf("okpd2", t));
+  assert.match(leaf, /Product context \(из графа\):\n/);
+  assert.match(leaf, /Во что идёт \(по графу\):\n- «Изготовление корда»: Волокно нейлона 6,6 → Шинный корд/);
+  assert.equal(r.okpd2.status, "found");
+});
+
+test("контекст: чужие поля и лишняя длина отброшены, текст укладывается в бюджет", () => {
+  assert.equal(readProductContext(null), null);
+  assert.equal(readProductContext({ junk: 1 }), null);
+  const long = "очень длинное описание процесса ".repeat(40);
+  const ctx = readProductContext({
+    description: "x".repeat(2000),
+    madeBy: Array.from({ length: 9 }, (_, i) => ({ name: `Процесс ${i}`, description: long, inputs: ["A", "B"], outputs: ["C"] })),
+    usedIn: [{ name: "", inputs: [], outputs: [] }, "мусор"],
+    downstream: [["Деталь", "Узел", "Изделие"], []],
+  });
+  assert.equal(ctx.description.length, 600);
+  assert.equal(ctx.madeBy.length, 4);
+  assert.equal(ctx.madeBy[0].description.length, 400);
+  assert.equal(ctx.usedIn, undefined);
+  assert.deepEqual(ctx.downstream, [["Деталь", "Узел", "Изделие"]]);
+  const text = productContextText(ctx, { budget: 900 });
+  assert.ok(text.length <= 900, `длина ${text.length}`);
+  assert.match(text, /Как получают \(по графу\):\n- «Процесс 0»: A \+ B → C/);
+  // Без описания карточки — когда промпт дал его своей строкой.
+  assert.doesNotMatch(productContextText(ctx, { withDescription: false }), /^Описание:/);
+});
