@@ -22,6 +22,7 @@
 
 const cs = require("./codeSearch");
 const { groupPrompt, leafPrompt, usageText } = require("./codePrompts");
+const { productContextText } = require("../../shared/productContext");
 const { formatTnved, tnvedEntries } = require("./classifiers");
 const { identify } = require("./synonyms");
 
@@ -89,7 +90,8 @@ function resultOf(kind, code, subgroup) {
 
 /**
  * @param {"okpd2"|"tnved"} kind
- * @param {{ name: string, description?: string, usedFor?: string[], madeFrom?: string[], current?: string, prompt?: string }} product
+ * @param {{ name: string, description?: string, usedFor?: string[], madeFrom?: string[], context?: object, current?: string, prompt?: string }} product
+ *   context — контекст из графа (routes/shared/productContext.js, уже проверенный readProductContext)
  * @param {(messages: {role: string, content: string}[]) => Promise<string>} ask
  * @returns {Promise<{ status: "found"|"none", code?, name?, subgroup?, reason?, requests: number, steps: object[] }>}
  */
@@ -103,6 +105,9 @@ async function determineCode(kind, product, ask) {
   const none = (reason) => ({ status: "none", reason, requests, steps });
 
   const usage = usageText(product);
+  // Контекст из графа — текстом; описание карточки промпт уже дал своей
+  // строкой, второй раз его не повторяем.
+  const context = productContextText(product.context, { withDescription: !product.description });
   const own = cs.spellingsFor(product.name);
   const found = cs.searchByName(kind, [...own, ...cs.contextSpellings(product.usedFor)], { contextFrom: own.length });
   let candidates = found.groups;
@@ -125,7 +130,7 @@ async function determineCode(kind, product, ask) {
   if (subgroup) steps.push({ stage: "group", by: "search", subgroup });
 
   const ask1 = (list, opts) =>
-    call([{ role: "user", content: groupPrompt(kind, { product: product.name, description: product.description, usage, candidates: list, ...opts }) }]);
+    call([{ role: "user", content: groupPrompt(kind, { product: product.name, description: product.description, usage, context, candidates: list, ...opts }) }]);
 
   if (!subgroup && candidates.length) {
     const answer = await ask1(candidates, { searched: true });
@@ -155,6 +160,7 @@ async function determineCode(kind, product, ask) {
     product: product.name,
     description: product.description,
     usage,
+    context,
     subgroup,
     fragment,
   });

@@ -283,3 +283,68 @@ test("«Смесь X и Y» — дозапрос; продукты по отде
   await aggregate({ productName: "Пропан", direction: "down", sources: [web("LPG blending")] }, [answer("Смесь пропан-бутановая", "Пропан, бутан", "Смешение.")]);
   assert.equal(calls.length, 1);
 });
+
+// ---------- строки поиска в блоках обобщения v4 (utils/searchHints.js) ----------
+test("v4: строки стадий и цитаты поиска — в блоке, с адресом и продуктом поиска; раздел базы — без строк", async () => {
+  const sectionId = addSection([]);
+  const page = "Текст страницы (загружен сервером):\n" + "Nylon 6,6 is produced by polycondensation. ".repeat(80);
+  await aggregate({
+    productName: "Адипиновая кислота",
+    direction: "down",
+    sources: [
+      {
+        title: "Nylon 6,6 Production",
+        url: "https://example.com/nylon.pdf",
+        technology_description: `search_product: Адипиновая кислота\nАдипиновую кислоту поликонденсируют с ГМДА.\n\n${page}`,
+        inputs_outputs_hint: [
+          "Маршрут R1 | Стадия S1 | industrial_status=confirmed | Входы: [Адипиновая кислота {role=business_product}, Гексаметилендиамин {role=business_product}] | Выходы: [Нейлон 6,6 {role=основной продукт}] | input_completeness=complete | output_completeness=partial",
+        ],
+        evidence_snippets: ["Nylon 6,6 is produced from adipic acid and HMDA"],
+      },
+      {
+        // Прежний ответ поиска — адрес уже в строке: второй раз не дописывается.
+        url: "https://example.com/old",
+        technology_description: "search_product: Адипиновая кислота\nПолиэфирполиолы из адипиновой кислоты и гликолей.",
+        inputs_outputs_hint: ["Маршрут R1 | Стадия S1 | source_id=url:https://example.com/old | search_product=Адипиновая кислота | Входы: [Адипиновая кислота] | Выходы: [Полиэфирполиолы]"],
+      },
+      {
+        origin: "local",
+        sectionId,
+        url: `local-sources/documents/1/file?section=${sectionId}`,
+        technology_description: "Раздел о капролактаме.",
+        inputs_outputs_hint: ["Производство капролактама: Фенол, Водород → Капролактам"],
+      },
+    ],
+  });
+  const input = captured?.input || "";
+  assert.match(
+    input,
+    /inputs_outputs_hint:\n- Маршрут R1 \| Стадия S1 \| source_id=url:https:\/\/example\.com\/nylon\.pdf \| search_product=Адипиновая кислота \| industrial_status=confirmed/,
+  );
+  assert.match(input, /evidence_snippets:\n- «Nylon 6,6 is produced from adipic acid and HMDA»/);
+  // Строки — до текста страницы и сверх предела блока: обрезка их не съела.
+  assert.ok(input.indexOf("inputs_outputs_hint:") < input.indexOf("Текст страницы (загружен сервером):"));
+  assert.equal(input.match(/source_id=url:https:\/\/example\.com\/old/g).length, 1);
+  // Сводка раздела базы («… → Капролактам») в блок не идёт.
+  assert.doesNotMatch(input, /Производство капролактама: Фенол/);
+});
+
+test("прежние промпты (STEP_PROMPTS=legacy) — блок без строк поиска", async () => {
+  process.env.STEP_PROMPTS = "legacy";
+  try {
+    await aggregate({
+      productName: "Адипиновая кислота",
+      direction: "down",
+      sources: [
+        {
+          url: "https://example.com/nylon.pdf",
+          technology_description: "search_product: Адипиновая кислота\nОписание.",
+          inputs_outputs_hint: ["Маршрут R1 | Стадия S1 | Входы: [Адипиновая кислота] | Выходы: [Нейлон 6,6]"],
+        },
+      ],
+    });
+    assert.doesNotMatch(captured?.input || "", /inputs_outputs_hint:/);
+  } finally {
+    delete process.env.STEP_PROMPTS;
+  }
+});

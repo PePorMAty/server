@@ -23,6 +23,9 @@ const {
 const { withoutProspective } = require("../local-sources/utils/prospective");
 const localStore = require("../local-sources/utils/store");
 const { skippedIntermediates, levelFollowUp, acceptFollowUp, mainStep, isStream } = require("./utils/levelSkip");
+const { splitProductList } = require("./utils/productList");
+const { withSearchHints } = require("./utils/searchHints");
+const { promptsVersion: activePromptsVersion } = require("./utils/promptVersion");
 const { outputProblem, outputFollowUp, acceptOutputFollowUp } = require("./utils/outputCheck");
 
 /**
@@ -108,11 +111,7 @@ function parseNeedsSources(text) {
   }
   const m = text.match(/^needs-sources\s*[:\-]\s*(.+)$/im);
   if (m) {
-    const list = m[1]
-      .split(/[,;]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return { insufficientProducts: list };
+    return { insufficientProducts: splitProductList(m[1]) };
   }
   return null;
 }
@@ -202,9 +201,12 @@ router.post("/gpt/step/aggregate", async (req, res) => {
     10,
   );
   const mid = intermediatesOf(picked);
-  const blocks = withIntermediates(picked, rawBlocks, mid)
-    .map((b) => clip(b, maxBlockChars))
-    .filter(Boolean);
+  const clipped = withIntermediates(picked, rawBlocks, mid).map((b) => clip(b, maxBlockChars));
+  // Промпты v4 — со строками стадий и цитатами поиска (utils/searchHints.js);
+  // прежние их не ждут. STEP_SEARCH_HINTS=off в .env — блок без строк, как до
+  // 2026-11-17: сравнить на боевом сервере без выкладки.
+  const hints = activePromptsVersion() === "v4" && process.env.STEP_SEARCH_HINTS !== "off";
+  const blocks = (hints ? withSearchHints(picked, clipped) : clipped).filter(Boolean);
 
   if (blocks.length < 1) {
     return res.status(400).json({

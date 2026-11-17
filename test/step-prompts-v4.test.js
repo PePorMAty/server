@@ -81,7 +81,9 @@ test("v4: поиск источников — параметры строкам�
     assert.match(prompts.buildStepSourcesPromptDown("Фенол", 3), /используется как сырьё, feedstock/);
     const brief = prompts.stepSearchBrief("Фенол", "down", 5);
     assert.match(brief, /первой строкой «search_product: Фенол»/);
-    assert.match(brief, /Маршрут R1 \| Стадия S1 \| source_id=url:<URL> \| search_product=Фенол \| industrial_status=/);
+    // Адрес и продукт поиска сервер дописывает в строки сам (utils/searchHints.js).
+    assert.match(brief, /Маршрут R1 \| Стадия S1 \| industrial_status=/);
+    assert.match(brief, /Адрес страницы и продукт поиска в строках не пиши/);
   }));
 
 test("STEP_PROMPTS=legacy — прежние промпты целиком", () =>

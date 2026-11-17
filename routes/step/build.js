@@ -23,6 +23,7 @@ const STEP_ANSWER = { acc: "шаг", gen: "шага" };
 
 // Общие названия деталей («Двигатель», «Шасси») — routes/shared/genericParts.js.
 const { isGenericPart } = require("../shared/genericParts");
+const { splitProductList } = require("./utils/productList");
 
 /**
  * Шаг из ответа модели: без строгой схемы модель порой заворачивает его в
@@ -229,24 +230,7 @@ function farSideEmpty(techText, direction) {
   return inner === "" || EMPTY_LIST_WORDS.test(inner);
 }
 
-/** Список «[А, Б (В, Г)]» — по запятым и точкам с запятой вне скобок. */
-function splitProductList(raw) {
-  const items = [];
-  let depth = 0;
-  let cur = "";
-  for (const ch of String(raw || "")) {
-    if (ch === "(" || ch === "[") depth += 1;
-    if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
-    if ((ch === "," || ch === ";") && depth === 0) {
-      items.push(cur);
-      cur = "";
-    } else {
-      cur += ch;
-    }
-  }
-  items.push(cur);
-  return items.map((s) => s.trim()).filter(Boolean);
-}
+// Деление списка — routes/step/utils/productList.js («Нейлон 6,6» — одно название).
 
 /**
  * Продукты поля `label` основного варианта текста. Пусто — поля нет или оно

@@ -241,3 +241,26 @@ test("шаг «вверх» от изделия: общие названия у�
   );
   assert.deepEqual(names(r2.body.step.inputProducts), ["Рама (Кузов)", "Листовая сталь"]);
 });
+
+// ---------- запятая в названии ----------
+test("«Нейлон 6,6» — одно название: страховка не делит его на «Нейлон 6» и «6»", async () => {
+  // Живой прогон v4 2026-11-17 (адипиновая кислота вниз): из «Нейлон 6,6»
+  // страховки добавляли выход «6» и второе сырьё «Нейлон 6» — лишние узлы и
+  // петля «6 → Формование → 6» на графе.
+  const r = await build(
+    { productName: "Нейлон 6,6", direction: "down", existingProducts: ["Адипиновая кислота", "Нейлон 6,6"],
+      techText: text({ out: "[Волокно нейлона 6,6]", inp: "[Нейлон 6,6]" }) },
+    step(["Нейлон 6,6"], ["Волокно нейлона 6,6"]),
+  );
+  assert.deepEqual(names(r.body.step.inputProducts), ["Нейлон 6,6"]);
+  assert.deepEqual(names(r.body.step.outputProducts), ["Волокно нейлона 6,6"]);
+});
+
+test("потерянный выход с запятой в названии возвращается целиком («1,2-Дихлорэтан»)", async () => {
+  const r = await build(
+    { productName: "Этилен", direction: "down", existingProducts: ["Этилен"],
+      techText: text({ out: "[1,2-Дихлорэтан]", inp: "[Этилен, Хлор]" }) },
+    step(["Этилен", "Хлор"], ["Винилхлорид"]),
+  );
+  assert.deepEqual(names(r.body.step.outputProducts), ["Винилхлорид", "1,2-Дихлорэтан"]);
+});
