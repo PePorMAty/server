@@ -23,6 +23,7 @@ const {
 const { withoutProspective } = require("../local-sources/utils/prospective");
 const localStore = require("../local-sources/utils/store");
 const { skippedIntermediates, levelFollowUp, acceptFollowUp, mainStep, isStream } = require("./utils/levelSkip");
+const { splitProductList } = require("./utils/productList");
 const { outputProblem, outputFollowUp, acceptOutputFollowUp } = require("./utils/outputCheck");
 
 /**
@@ -108,11 +109,7 @@ function parseNeedsSources(text) {
   }
   const m = text.match(/^needs-sources\s*[:\-]\s*(.+)$/im);
   if (m) {
-    const list = m[1]
-      .split(/[,;]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return { insufficientProducts: list };
+    return { insufficientProducts: splitProductList(m[1]) };
   }
   return null;
 }

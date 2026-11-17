@@ -10,6 +10,8 @@
 // основного шага названы промежуточные продукты раздела базы, а выход — не
 // один из них, модель переспрашивают один раз в той же переписке.
 
+const { splitProductList } = require("./productList");
+
 /** Технологические потоки — не продукты: выходом шага их не предлагаем. */
 const STREAM =
   /(реакционн|масс[аы]?$|смес|сырец|масло|раствор|суспензи|плав|газ|аддукт|фракци|поток|алкилат|расплав|форполимер|остат|кислые|отработ)/i;
@@ -37,12 +39,7 @@ function mainStep(markdown) {
     const m = new RegExp(`\\*\\*${label}:\\*\\*\\s*([^\\n]*)`).exec(section);
     return m ? m[1].trim() : "";
   };
-  const list = (label) =>
-    field(label)
-      .replace(/^\[|\]\.?$/g, "")
-      .split(/,\s*/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+  const list = (label) => splitProductList(field(label).replace(/^\[|\]\.?$/g, ""));
   return { outputs: list("Что производят"), inputs: list("Из чего производят"), description: field("Описание") };
 }
 
