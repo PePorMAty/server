@@ -124,6 +124,32 @@ router.get("/gpt/step/aggregate/prompt", (req, res) => {
   res.json({ success: true, direction, ...stepAggregateDefaults(direction) });
 });
 
+/**
+ * Ответ без переписанных входных данных: после «Примечаний» модель порой
+ * повторяет разделы запроса — родословную, раскрываемый продукт, цепочку,
+ * текстовые блоки (шаблон v4, 2026-11-17). Они не часть шага, а клиент
+ * показывает ответ человеку целиком.
+ */
+const ECHO_HEADING =
+  /^#{1,2}\s*(Родословная|Текущий раскрываемый продукт|Поисковый продукт Sources|Корневой\/целевой продукт|Существующая цепочка|Текстовые блоки|═{3,})/m;
+function withoutEcho(markdown) {
+  const text = String(markdown || "");
+  const notes = text.search(/^#\s*Примечания/m);
+  if (notes < 0) return text;
+  const tail = text.slice(notes);
+  const echo = tail.search(ECHO_HEADING);
+  return echo > 0 ? text.slice(0, notes + echo).trimEnd() : text;
+}
+
+/**
+ * «Достаточность данных» из примечаний обобщения v4: complete / partial /
+ * unresolved; у прежних промптов строки нет — null.
+ */
+function sufficiencyOf(markdown) {
+  const m = /Достаточность данных:?\**:?\s*\**\s*(complete|partial|unresolved)/i.exec(String(markdown || ""));
+  return m ? m[1].toLowerCase() : null;
+}
+
 router.post("/gpt/step/aggregate", async (req, res) => {
   const t0 = Date.now();
 
@@ -201,7 +227,7 @@ router.post("/gpt/step/aggregate", async (req, res) => {
   try {
     // Промпт по направлению (UP — зеркало DOWN). Правленый в окне построения
     // текст заполняется теми же данными, что и шаблон по умолчанию.
-    const { SYSTEM: effectiveSystem, USER_PROMPT: effectiveUser } =
+    const { SYSTEM: effectiveSystem, USER_PROMPT: effectiveUser, version: promptsVersion } =
       buildStepAggregatePrompts({
         productName,
         existingChain,
@@ -227,7 +253,7 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       model,
     });
 
-    const markdown = (extractOutputText(resp) || "").trim();
+    const markdown = withoutEcho((extractOutputText(resp) || "").trim());
     if (resp?.status !== "completed" || !markdown) {
       const usedModel = model || resp?.ai?.model || null;
       const whose = usedModel ? `модели «${usedModel}»` : "модели";
@@ -290,7 +316,7 @@ router.post("/gpt/step/aggregate", async (req, res) => {
           provider,
           model,
         });
-        const fixed = (extractOutputText(again) || "").trim();
+        const fixed = withoutEcho((extractOutputText(again) || "").trim());
         levelCheck.outputsOffered = mainStep(fixed)?.outputs ?? [];
         if (again?.status === "completed" && !parseNeedsSources(fixed) && acceptFollowUp(fixed, skipped)) {
           finalMarkdown = fixed;
@@ -326,7 +352,7 @@ router.post("/gpt/step/aggregate", async (req, res) => {
           provider,
           model,
         });
-        const fixed = (extractOutputText(again) || "").trim();
+        const fixed = withoutEcho((extractOutputText(again) || "").trim());
         outputCheck.outputsOffered = mainStep(fixed)?.outputs ?? [];
         if (again?.status === "completed" && !parseNeedsSources(fixed) && acceptOutputFollowUp(fixed, problem)) {
           finalMarkdown = fixed;
@@ -348,6 +374,11 @@ router.post("/gpt/step/aggregate", async (req, res) => {
       ...(levelCheck ? { levelCheck } : {}),
       // Необязательное: был ли дозапрос о выходе-не-продукте и что дал.
       ...(outputCheck ? { outputCheck } : {}),
+      // Необязательное: версия промптов (v4 / legacy, STEP_PROMPTS) и
+      // «Достаточность данных» из примечаний v4 — complete / partial /
+      // unresolved (partial: «не использовать как полный шаг до проверки»).
+      promptsVersion,
+      ...(sufficiencyOf(finalMarkdown) ? { sufficiency: sufficiencyOf(finalMarkdown) } : {}),
     });
   } catch (err) {
     return reply(500, {
@@ -358,3 +389,5 @@ router.post("/gpt/step/aggregate", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.sufficiencyOf = sufficiencyOf;
+module.exports.withoutEcho = withoutEcho;

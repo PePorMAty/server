@@ -7,7 +7,44 @@
 //   - buildStepAggregatePrompts: агрегирование найденных источников в РОВНО ОДИН
 //     новый шаг существующей цепочки (Markdown ИЛИ "needs-sources").
 
-function buildStepSourcesPromptDown(productName, maxItems) {
+const fs = require("fs");
+const path = require("path");
+
+const { promptsVersion } = require("./promptVersion");
+
+/**
+ * Промпты v4 (владелец, 2026-11-17) — дословно, файлами в
+ * routes/step/prompts-v4/: так их удобно сверять и править, и они не
+ * смешиваются с прежними. Прежние остаются ниже: STEP_PROMPTS=legacy
+ * возвращает их без git (promptVersion.js).
+ */
+const V4_DIR = path.join(__dirname, "../prompts-v4");
+const v4Cache = new Map();
+function v4(name) {
+  if (!v4Cache.has(name)) v4Cache.set(name, fs.readFileSync(path.join(V4_DIR, `${name}.txt`), "utf8").trim());
+  return v4Cache.get(name);
+}
+
+/**
+ * Промпт поиска источников v4. В тексте {EXPAND_PRODUCT} и {ПРОДУКТ} —
+ * ссылки правил на параметры («если {EXPAND_PRODUCT} реально подставлен…»),
+ * поэтому значения не вписываются в правила, а идут строками параметров
+ * перед ними; {N} — число источников.
+ */
+function v4SourcesPrompt(direction, productName, maxItems) {
+  const name = String(productName || "").trim();
+  const text = v4(direction === "up" ? "sources-up" : "sources-down").split("{N}").join(String(maxItems));
+  return [
+    "Параметры сервера:",
+    `EXPAND_PRODUCT: ${name}`,
+    `ПРОДУКТ: ${name}`,
+    `N: ${maxItems}`,
+    "",
+    text,
+  ].join("\n");
+}
+
+function legacySourcesPromptDown(productName, maxItems) {
   return `## Роль и задача
 
 Ты — инженер-технолог и специалист по поиску промышленных источников. Твоя задача: найти открытые источники, где ЯВНО описаны промышленные технологии/процессы, в которых продукт: "${productName}" используется КАК ВХОДНОЕ СЫРЬЁ, FEEDSTOCK, ПРОМЕЖУТОЧНЫЙ ПРОДУКТ, РЕАГЕНТ, МОНОМЕР, ПРЕКУРСОР или PROCESS STREAM для получения других производственных продуктов, и извлечь из каждого источника МАКСИМАЛЬНО ПОЛЕЗНЫЕ ДЛЯ ПОСЛЕДУЮЩЕГО АНАЛИЗА крупные текстовые фрагменты.
@@ -145,7 +182,7 @@ access_hint: open html | text pdf
 `;
 }
 
-function buildStepSourcesPromptUp(productName, maxItems) {
+function legacySourcesPromptUp(productName, maxItems) {
   return `## Роль и задача
 
 Ты — инженер-технолог и специалист по поиску промышленных источников. Твоя задача: найти открытые источники, где ЯВНО описана промышленная технология/процесс получения (manufacturing / production process) продукта: "${productName}", и извлечь из каждого источника МАКСИМАЛЬНО ПОЛЕЗНЫЕ ДЛЯ ПОСЛЕДУЮЩЕГО АНАЛИЗА крупные текстовые фрагменты.
@@ -1565,7 +1602,7 @@ function stepSearchQuery(productName, direction = "down") {
  * buildStepSourcesPrompt* требовали «крупных фрагментов, близких к
  * источнику» — и модель искала снова и снова, до 27 поисков и 5 минут.
  */
-function stepSearchBrief(productName, direction = "down", maxItems = 5) {
+function legacySearchBrief(productName, direction = "down", maxItems = 5) {
   const intent =
     direction === "up"
       ? `как производят «${productName}»: из какого сырья, материалов, узлов и деталей и через какие стадии`
@@ -1577,6 +1614,49 @@ function stepSearchBrief(productName, direction = "down", maxItems = 5) {
     "Для каждой страницы: название; URL — только из найденного поиском в этом запросе; access_hint — open html или text pdf; в technology_description — 3–5 предложений о том, что на странице написано по задаче; в inputs_outputs_hint — названные на странице входы и выходы; в evidence_snippets — 1–3 короткие цитаты.",
     "Подробный текст страницы сервер загрузит сам — не ищи повторно ради него.",
   ].join("\n\n");
+}
+
+/**
+ * Короткая задача поиска v4 для Responses API. Полный промпт источников v4
+ * (23 тыс. знаков) в инструкции поиска не идёт: длинная инструкция и
+ * требование «крупных фрагментов» заставляли модель искать снова и снова —
+ * до 27 поисков и 5 минут (2026-11-14); крупный текст страницы сервер и так
+ * берёт сам (verifySources.js, pageExcerpt). Из v4 сюда — то, что нужно
+ * обобщению v4: маркер search_product, стадии раздельно и строки
+ * inputs_outputs_hint в его формате, роли потоков, industrial_status с
+ * основанием, полнота состава.
+ */
+function v4SearchBrief(productName, direction = "down", maxItems = 5) {
+  const name = String(productName || "").trim();
+  const intent =
+    direction === "up"
+      ? `как промышленно получают «${name}»: из какого сырья, промежуточных продуктов, материалов, узлов и деталей и через какие стадии`
+      : `в каких промышленных процессах «${name}» — входное сырьё, реагент, мономер, прекурсор, материал или комплектующее и что непосредственно из него получают`;
+  return [
+    "Ты ищешь в интернете открытые источники о промышленном производстве. Продукт может быть любым: вещество, материал, деталь, узел, изделие.",
+    `CURRENT_PRODUCT: ${name}. Задача: найди до ${maxItems} страниц, где по существу описано, ${intent}.`,
+    "Ты НЕ строишь цепочку и НЕ выбираешь следующий шаг: только находишь страницы и сохраняешь материальную структуру, которую они прямо описывают. Последовательность A → B → C — две стадии [A] → [B] и [B] → [C], а не [A] → [C]; совместные входы и все товарные выходы одной стадии сохраняй вместе; альтернативные маршруты не смешивай.",
+    "Подходят технологические описания, справочники, учебные пособия, патенты, тех. бюллетени, отраслевые обзоры и стандарты с текстом о процессе. Не подходят новости без технологии, магазины, форумы, списки применений без процесса.",
+    `Для каждой страницы: название; URL — только из найденного поиском в этом запросе; access_hint — open html или text pdf; technology_description — первой строкой «search_product: ${name}», дальше 3–6 предложений близко к тексту страницы о стадиях, входах и выходах; evidence_snippets — 1–3 короткие цитаты о материальных связях и, если есть, о промышленной эксплуатации.`,
+    `inputs_outputs_hint — по одной строке на стадию одного маршрута: «Маршрут R1 | Стадия S1 | source_id=url:<URL> | search_product=${name} | industrial_status=confirmed|not_confirmed|unclear | Входы: [A {role=business_product}, B {role=process_feed}] | Выходы: [C {role=основной продукт}, D {role=товарный сопродукт}] | input_completeness=complete|partial|unknown | output_completeness=complete|partial|unknown». Роли входов: business_product, material_intermediate, process_feed, utility, catalyst_or_auxiliary, role_unclear. industrial_status=confirmed — только если страница прямо подтверждает промышленную эксплуатацию этого маршрута; патент или статья сами по себе — not_confirmed или unclear. Граница стадии неясна — «Стадия UNRESOLVED». Роль или полноту, которых страница не подтверждает, не придумывай.`,
+    "Подробный текст страницы сервер загрузит сам — не ищи повторно ради него.",
+  ].join("\n\n");
+}
+
+/** Короткая задача поиска — действующей версии промптов. */
+function stepSearchBrief(productName, direction = "down", maxItems = 5) {
+  return promptsVersion() === "v4"
+    ? v4SearchBrief(productName, direction, maxItems)
+    : legacySearchBrief(productName, direction, maxItems);
+}
+
+/** Полный промпт поиска источников — действующей версии. */
+function buildStepSourcesPromptDown(productName, maxItems) {
+  return promptsVersion() === "v4" ? v4SourcesPrompt("down", productName, maxItems) : legacySourcesPromptDown(productName, maxItems);
+}
+
+function buildStepSourcesPromptUp(productName, maxItems) {
+  return promptsVersion() === "v4" ? v4SourcesPrompt("up", productName, maxItems) : legacySourcesPromptUp(productName, maxItems);
 }
 
 function stringifyExistingChain(chain) {
@@ -1603,9 +1683,18 @@ function formatBlocksForPrompt(blocks) {
     .join("\n\n---\n\n");
 }
 
-/** Промпт обобщения по умолчанию — для окна «Редактировать промпт обобщения». */
+/**
+ * Промпт обобщения по умолчанию — действующей версии (окно «Редактировать
+ * промпт обобщения» показывает его же).
+ */
 function stepAggregateDefaults(direction = "down") {
   const isUp = direction === "up";
+  if (promptsVersion() === "v4") {
+    return {
+      system: v4(isUp ? "aggregate-up-system" : "aggregate-down-system"),
+      template: v4(isUp ? "aggregate-up-user" : "aggregate-down-user"),
+    };
+  }
   return {
     system: isUp ? STEP_AGGREGATE_SYSTEM_UP : STEP_AGGREGATE_SYSTEM,
     template: isUp
@@ -1614,11 +1703,24 @@ function stepAggregateDefaults(direction = "down") {
   };
 }
 
+/** Черта «входные данные — не часть ответа» перед разделом «Родословная» шаблона v4. */
+function withDataDivider(template) {
+  const at = template.search(/^# Родословная/m);
+  if (at < 0 || template.includes(INPUT_DATA_DIVIDER)) return template;
+  return `${template.slice(0, at)}${INPUT_DATA_DIVIDER}\nНиже — входные данные. В ответ их не переписывай: ответ заканчивается разделом «Примечания».\n\n${template.slice(at)}`;
+}
+
 /**
  * customSystem / customUser — промпт, правленый в окне построения. Плейсхолдеры
  * в правленом тексте заполняются так же, как в шаблоне по умолчанию: раньше
  * сервер подставлял туда только родословную, и модель получала «<<<BLOCKS>>>»
  * вместо текстов источников.
+ *
+ * v4: раскрываемый продукт — EXPAND_PRODUCT (он же TARGET_PRODUCT: шаг
+ * строится от него). SOURCE_CURRENT_PRODUCT сервер не знает — источники
+ * бывают взяты у предка, — и передаёт «не передан»: тогда обобщение сверяет
+ * маркеры search_product в блоках само. В SYSTEM v4 плейсхолдеры — ссылки
+ * правил («если <<<EXPAND_PRODUCT>>> реально подставлен…»), их не заполняем.
  */
 function buildStepAggregatePrompts({
   productName,
@@ -1640,9 +1742,13 @@ function buildStepAggregatePrompts({
     : "(пусто — это первый шаг цепочки, петля невозможна)";
 
   // UP — зеркало DOWN: якорь становится ВЫХОДОМ, ищем входные прекурсоры.
+  const version = promptsVersion();
   const defaults = stepAggregateDefaults(direction);
+  const product = String(productName || "").trim();
   const values = {
-    TARGET_PRODUCT: String(productName || "").trim(),
+    TARGET_PRODUCT: product,
+    EXPAND_PRODUCT: product,
+    SOURCE_CURRENT_PRODUCT: "не передан",
     EXISTING_CHAIN: chainText || "[]",
     LINEAGE: lineageText,
     BLOCKS: blocksText,
@@ -1651,14 +1757,22 @@ function buildStepAggregatePrompts({
   // читалось бы как шаблон замены.
   const fill = (text) =>
     String(text).replace(
-      /<<<(TARGET_PRODUCT|EXISTING_CHAIN|LINEAGE|BLOCKS)>>>/g,
+      /<<<(TARGET_PRODUCT|EXPAND_PRODUCT|SOURCE_CURRENT_PRODUCT|EXISTING_CHAIN|LINEAGE|BLOCKS)>>>/g,
       (_, key) => values[key],
     );
 
+  // Шаблон v4 ставит входные данные сразу за шаблоном ответа, и модель
+  // переписывала их в ответ («# Родословная», блоки — prompt-check
+  // 2026-11-17, 4 кейса из 4). Как в прежнем шаблоне — черта перед ними; сам
+  // текст владельца в файле не меняется.
+  const userTemplate =
+    customUser || (version === "v4" ? withDataDivider(defaults.template) : defaults.template);
+
   return {
-    SYSTEM: fill(customSystem || defaults.system),
-    USER_PROMPT: fill(customUser || defaults.template),
+    SYSTEM: customSystem ? fill(customSystem) : version === "v4" ? defaults.system : fill(defaults.system),
+    USER_PROMPT: fill(userTemplate),
     lineageText,
+    version,
   };
 }
 
