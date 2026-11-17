@@ -120,6 +120,16 @@ test("группа вместо конечного кода и чужая под
   assert.match(wrong.okpd2.reason, /не из подгруппы 20\.14/);
 });
 
+test("код xx.xx.xx.000 без уточнений — конечный, группа над ним — нет", () => {
+  const cs = require("../routes/industry/utils/codeSearch");
+  assert.equal(cs.isLeaf("okpd2", "29.10.21.000"), true);
+  assert.equal(cs.isLeaf("okpd2", "29.10.21"), false);
+  assert.equal(cs.isLeaf("okpd2", "20.14.61.100"), false);
+  assert.equal(cs.isLeaf("okpd2", "20.14.61.110"), true);
+  assert.equal(cs.isLeaf("tnved", "291211000"), true);
+  assert.equal(cs.isLeaf("tnved", "291211"), false);
+});
+
 test("поиск по названию не нашёл ничего — сперва класс, потом подгруппа", async () => {
   asked.length = 0;
   answer = (text) => {
@@ -151,4 +161,62 @@ test("свой промпт без фрагмента — фрагмент до�
 test("без названия или видов кодов — 400", async () => {
   assert.equal((await call(determine, {})).http_status, 400);
   assert.equal((await call(determine, { name: "Фенол", kinds: ["cas"] })).http_status, 400);
+});
+
+test("общее название с изделием по графу: контекст в запросах, код не хранится по имени", async () => {
+  asked.length = 0;
+  answer = (text) => {
+    if (isGroup(text)) return /подгруппу ОКПД2/.test(text) ? "29.10" : "8407";
+    return isLeaf("okpd2", text) ? "29.10.12.000" : "8407 34 910 0";
+  };
+  const r = await call(determine, { name: "Двигатель", usedFor: ["Автомобиль"], madeFrom: ["Блок цилиндров"] });
+  const group = asked.flat().find((m) => isGroup(m.content) && /ОКПД2/.test(m.content)).content;
+  assert.match(group, /Где используется \(по графу\): идёт на производство: Автомобиль; получают из: Блок цилиндров/);
+  // Подгруппы изделия — среди кандидатов, хоть «Двигатель» в них и не назван.
+  assert.match(group, /29\.10 Средства автотранспортные/);
+  const leaf = asked.flat().find((m) => isLeaf("okpd2", m.content)).content;
+  assert.match(leaf, /\nProduct usage: идёт на производство: Автомобиль; получают из: Блок цилиндров\n/);
+  assert.equal(r.okpd2.status, "found");
+  assert.equal(r.shared, false);
+  const l = await call(lookup, { products: ["Двигатель"] });
+  assert.equal(l.modelCodes["Двигатель"], undefined);
+});
+
+test("деталь: подгруппа не берётся по точному названию; модель отвергла найденное — поиск сверху", async () => {
+  asked.length = 0;
+  answer = (text) => {
+    if (isGroup(text) && /класс ОКПД2/.test(text)) return "30";
+    if (isGroup(text) && /найденный поиском/.test(text)) return "NONE";
+    if (isGroup(text)) return "30.30";
+    return isLeaf("okpd2", text) ? "30.30.50.110" : "NONE";
+  };
+  const r = await call(determine, { name: "Крылья", usedFor: ["Самолёт"], kinds: ["okpd2"] });
+  assert.equal(r.okpd2.code, "30.30.50.110");
+  assert.deepEqual(asked.map((ms) => (isGroup(ms[0].content) ? (/Определи класс/.test(ms[0].content) ? "top" : /найденный/.test(ms[0].content) ? "found" : "under") : "leaf")), ["found", "top", "under", "leaf"]);
+});
+
+test("NONE с причиной — в ответе; повтор без кода стирает прежний сохранённый", async () => {
+  answer = (text) => (isLeaf("okpd2", text) ? "20.14.61.110" : "NONE");
+  await call(determine, { name: "Формальдегид", kinds: ["okpd2"] });
+  assert.equal((await call(lookup, { products: ["Формальдегид"] })).modelCodes["Формальдегид"].okpd2.code, "20.14.61.110");
+
+  answer = (text) => (isLeaf("okpd2", text) ? "NONE: код зависит от концентрации раствора." : "NONE");
+  const r = await call(determine, { name: "Формальдегид", kinds: ["okpd2"] });
+  assert.equal(r.okpd2.status, "none");
+  assert.equal(r.okpd2.missing, "код зависит от концентрации раствора");
+  assert.equal(r.okpd2.reason, "код зависит от концентрации раствора");
+  assert.equal(r.okpd2.subgroup, "20.14");
+  assert.deepEqual(r.cleared, ["okpd2"]);
+  const l = await call(lookup, { products: ["Формальдегид"] });
+  assert.equal(l.modelCodes["Формальдегид"]?.okpd2, undefined);
+  // ТН ВЭД, найденный раньше, остался.
+  assert.equal(l.modelCodes["Формальдегид"].tnved.code, "2912110000");
+});
+
+test("записанное раньше по общему названию не отдаётся", async () => {
+  const data = JSON.parse(fs.readFileSync(store, "utf8"));
+  data["name:шасси"] = { name: "Шасси", tnved: { code: "8716901000", subgroup: "8716" } };
+  fs.writeFileSync(store, JSON.stringify(data));
+  const l = await call(lookup, { products: ["Шасси", "Шасси (Автомобиль)"] });
+  assert.equal(l.modelCodes["Шасси"], undefined);
 });

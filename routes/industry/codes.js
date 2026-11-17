@@ -6,12 +6,16 @@
 // POST /graphs/gpt/product-codes — один продукт за запрос: клиент идёт по
 //   выбранным продуктам сам и показывает ход по каждому. Путь под
 //   /graphs/gpt — как у остальных вызовов модели.
-//   Тело: { name, description?, kinds?: ["okpd2", "tnved"], current?: {
-//     okpd2?, tnved? } — коды, что уже стоят в карточке, prompts?: { okpd2?,
-//     tnved? } — свой текст промпта, provider?, model? }.
+//   Тело: { name, description?, kinds?: ["okpd2", "tnved"], usedFor?: [] —
+//     во что продукт идёт по графу, madeFrom?: [] — из чего его делают,
+//     current?: { okpd2?, tnved? } — коды, что уже стоят в карточке,
+//     prompts?: { okpd2?, tnved? } — свой текст промпта, provider?, model? }.
 //   Ответ: { success, name, okpd2?, tnved? — { status: found | none, code,
-//     name, subgroup, subgroupName, display?, path?, reason? }, saved: {
-//     okpd2?, tnved? } — что записано, requests — запросов к модели }.
+//     name, subgroup, subgroupName, display?, path?, reason?, missing? },
+//     saved: { okpd2?, tnved? } — что записано, shared — записано ли по
+//     названию (у общих названий «Двигатель» — нет: код зависит от изделия),
+//     cleared: [] — виды, у которых прежний код стёрт («не определён» при
+//     повторе), requests — запросов к модели }.
 // GET /industry/codes/prompts — промпты по умолчанию для окна «Определить
 //   коды» (чтение, поэтому не под /graphs/gpt).
 
@@ -21,7 +25,15 @@ const router = express.Router();
 const { callOpenAIResponsesRaw, extractOutputText } = require("../sources/utils");
 const { determineCode } = require("./utils/determineCode");
 const { DEFAULT_PROMPTS } = require("./utils/codePrompts");
-const { storeCodes } = require("./utils/modelCodes");
+const { storeCodes, clearCodes } = require("./utils/modelCodes");
+const { isUnqualifiedGeneric } = require("../shared/genericParts");
+
+/** Список названий из тела: строки, без пустых, не длиннее 120 знаков, до 6. */
+const names = (raw) =>
+  (Array.isArray(raw) ? raw : [])
+    .map((x) => String(x ?? "").replace(/\s+/g, " ").trim().slice(0, 120))
+    .filter(Boolean)
+    .slice(0, 6);
 const { startAntiIdle } = require("../step/utils/antiIdle");
 
 const KINDS = ["okpd2", "tnved"];
@@ -75,6 +87,8 @@ router.post("/graphs/gpt/product-codes", async (req, res) => {
           {
             name,
             description,
+            usedFor: names(req.body?.usedFor),
+            madeFrom: names(req.body?.madeFrom),
             current: req.body?.current?.[kind] ? String(req.body.current[kind]) : undefined,
             prompt: typeof prompts[kind] === "string" && prompts[kind].trim() ? prompts[kind] : undefined,
           },
@@ -97,12 +111,21 @@ router.post("/graphs/gpt/product-codes", async (req, res) => {
         `[product-codes] «${name}» ${kind}: ${r.status === "found" ? r.code : `не определён (${r.reason})`}; запросов ${requests}; ${steps.map((s) => s.stage + (s.problem ? `!(${s.problem})` : "")).join(" → ")}`,
       );
     });
-    if (Object.keys(saved).length) storeCodes(name, saved);
+    // Общее название («Двигатель») по имени не храним: код зависит от
+    // изделия, и он ушёл бы на двигатели других графов. Клиент держит его на
+    // самом узле. Повторное определение без кода стирает прежний: его
+    // переспросили — значит, он под сомнением.
+    const shared = !isUnqualifiedGeneric(name);
+    const cleared = shared ? kinds.filter((k) => out[k].status !== "found") : [];
+    if (shared && Object.keys(saved).length) storeCodes(name, saved);
+    if (cleared.length) clearCodes(name, cleared);
     return reply(200, {
       success: true,
       name,
       ...out,
       saved,
+      shared,
+      cleared,
       requests: results.reduce((n, r) => n + r.requests, 0),
       ai: { model: usedModel },
     });

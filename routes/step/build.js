@@ -21,27 +21,13 @@ const { withoutProspective } = require("../local-sources/utils/prospective");
 
 const STEP_ANSWER = { acc: "шаг", gen: "шага" };
 
+// Общие названия деталей («Двигатель», «Шасси») — routes/shared/genericParts.js.
+const { isGenericPart } = require("../shared/genericParts");
+
 /**
  * Шаг из ответа модели: без строгой схемы модель порой заворачивает его в
  * { "step": {…} } или { "StepChainApiStep": {…} }.
  */
-/**
- * Общее название узла или детали — само по себе не продукт: такие есть у
- * машины, самолёта и корабля. «Электроника и авионика», «Интерьер и
- * сиденья» — тоже общие.
- */
-const GENERIC_PART =
-  /^(двигател[ьи]|мотор|электродвигател[ьи]|силовая установка|шасси|кузов|рама|крыл[оья]+|фюзеляж|оперение|винт|винты|редуктор|насос|насосы|генератор|аккумулятор|аккумуляторы|аккумуляторная батарея|трансмисси[яи]|коробка передач|подвеска|колеса|колёса|шины|салон|интерьер|сиденья|электроника|электрооборудование|авионика|корпус|оборудование|комплектующие|узлы|агрегаты|детали|приборы|система управления|топливная система)$/;
-
-function isGenericPart(name) {
-  const parts = String(name || "")
-    .toLowerCase()
-    .split(/\s+и\s+|,\s*/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-  return parts.length > 0 && parts.every((x) => GENERIC_PART.test(x));
-}
-
 function unwrapStep(parsed) {
   if (!parsed || typeof parsed !== "object" || parsed.transformation) {
     return parsed;

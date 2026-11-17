@@ -59,12 +59,16 @@ function entriesOf(kind) {
   if (index[kind]) return index[kind];
   const out = [];
   if (kind === "okpd2") {
-    for (const [code, name] of okpd2Entries()) out.push({ code, name, stems: stems(name) });
+    for (const [code, name] of okpd2Entries()) {
+      const st = stems(name);
+      out.push({ code, name, stems: st, own: st });
+    }
   } else {
+    // По цепочке уровней, а не по одной строке: «части и принадлежности
+    // кузовов» — заголовок без кода над 8708 29, а «– – прочие» без него не
+    // называют ничего. Точное совпадение (exact) — по самой строке.
     for (const [code, e] of tnvedEntries()) {
-      // «прочие» без уровней над ними не называют ничего — по ним не ищем.
-      if (/^проч/i.test(e.name)) continue;
-      out.push({ code, name: e.name, path: e.path, stems: stems(e.name) });
+      out.push({ code, name: e.name, path: e.path, stems: stems(e.path || e.name), own: stems(e.name) });
     }
   }
   index[kind] = out;
@@ -114,14 +118,35 @@ function isLeaf(kind, code) {
   const all = kind === "okpd2" ? okpd2Entries() : tnvedEntries();
   const c = kind === "okpd2" ? code : digits(code);
   const prefix = refinementPrefix(kind, c);
-  for (const other of all.keys()) if (other !== c && other.startsWith(prefix)) return false;
+  // Предков не считаем: у 29.10.21.000 начало уточнений — «29.10.21», а с
+  // него начинается и сама группа 29.10.21 над кодом. Без этого любой код
+  // xx.xx.xx.000 (их в ОКПД2 1749) считался группой, и верный ответ модели
+  // отклонялся (2026-11-17: «Автомобиль» → 29.10.21.000).
+  for (const other of all.keys()) {
+    if (other !== c && other.startsWith(prefix) && !c.startsWith(other)) return false;
+  }
   return true;
+}
+
+/**
+ * «Детали кузова» = «Части кузова»: в классификаторах детали и компоненты
+ * называются «частями» и «комплектующими» (8708 «Части и принадлежности…»,
+ * 29.32 «Комплектующие…»), и по слову «детали» поиск не находил ничего.
+ */
+function partSpellings(text) {
+  const t = String(text ?? "");
+  if (!/(^|\s)(детал|компонент|запчаст)/i.test(t)) return [];
+  const rest = t.replace(/(^|\s)(внутренн\S*\s+)?(детал\S*|компонент\S*|запчаст\S*)/i, " ").replace(/\s+/g, " ").trim();
+  return rest ? [`Части ${rest}`, `Комплектующие ${rest}`] : ["Части", "Комплектующие"];
 }
 
 /**
  * Написания товара: само название, оно же без уточнения в скобках и
  * уточнение отдельно («Двигатель (Самолёт)» — и «Двигатель», и «Самолёт»),
- * синонимы из справочника («Кумол» — «Изопропилбензол», «ИПБ»).
+ * синонимы из справочника («Кумол» — «Изопропилбензол», «ИПБ»), «части»
+ * вместо «деталей». Изделия из графа — отдельно (contextSpellings): по ним
+ * поиск находит и подгруппы изделия («Крылья» для «Самолёта» — 8807 «прочие
+ * части самолётов», а не куриные крылья 0207).
  */
 function spellingsFor(name) {
   const raw = String(name ?? "").trim();
@@ -136,7 +161,8 @@ function spellingsFor(name) {
     if (hit?.canon) out.add(hit.canon);
     for (const sp of hit?.spellings ?? []) out.add(sp);
   }
-  return [...out].filter((s) => s && /[a-zа-яё]{3}/i.test(s)).slice(0, 15);
+  for (const sp of partSpellings(m ? m[1] : raw)) out.add(sp);
+  return [...out].filter((s) => s && /[a-zа-яё]{3}/i.test(s)).slice(0, 20);
 }
 
 /**
@@ -155,7 +181,7 @@ function namesOf(name) {
  *
  * @returns {{ hits: {code, name, extra, exact, by}[], groups: {code, name, hits}[] }}
  */
-function searchByName(kind, spellings, { maxGroups = 8 } = {}) {
+function searchByName(kind, spellings, { maxGroups = 10, contextFrom = Infinity } = {}) {
   const hits = [];
   const seen = new Set();
   spellings.forEach((spelling, rank) => {
@@ -165,27 +191,64 @@ function searchByName(kind, spellings, { maxGroups = 8 } = {}) {
     for (const e of entriesOf(kind)) {
       if (seen.has(e.code) || !need.every((w) => e.stems.has(w))) continue;
       seen.add(e.code);
+      // Слова в самой строке, а не только в уровнях над ней: «двигатели
+      // авиационные» точнее, чем любой код под «Двигателями…».
+      const inName = need.every((w) => e.own.has(w));
+      // Строка начинается с товара: «Двигатели внутреннего сгорания для
+      // автотранспортных средств» — о двигателях, а «Автосамосвалы с
+      // дизельным двигателем» — об автосамосвалах.
+      const lead = inName && [...e.own][0] === need[0];
       hits.push({
         code: e.code,
         name: e.name,
         rank,
-        extra: e.stems.size - need.length,
+        context: rank >= contextFrom,
+        inName,
+        lead,
+        extra: (inName ? e.own.size : e.stems.size) - need.length,
         exact: namesOf(e.name).includes(wanted),
         by: spelling,
       });
     }
   });
-  hits.sort((a, b) => Number(b.exact) - Number(a.exact) || a.rank - b.rank || a.extra - b.extra || b.code.length - a.code.length);
+  hits.sort(
+    (a, b) =>
+      Number(b.exact) - Number(a.exact) ||
+      Number(a.context) - Number(b.context) ||
+      Number(b.inName) - Number(a.inName) ||
+      Number(b.lead) - Number(a.lead) ||
+      a.rank - b.rank ||
+      a.extra - b.extra ||
+      b.code.length - a.code.length,
+  );
 
-  const groups = new Map();
+  // Подгруппы — по лучшей находке; найденным по изделию из графа (контекст)
+  // — свои места, иначе их вытеснили бы находки по самому названию.
+  const own = new Map();
+  const ctx = new Map();
   for (const h of hits) {
     const g = groupOf(kind, h.code);
     if (!g || !groupExists(kind, g)) continue;
-    if (!groups.has(g)) groups.set(g, { code: g, name: nameOf(kind, g), hits: [] });
-    const list = groups.get(g).hits;
+    const bucket = h.context && !own.has(g) ? ctx : own;
+    if (!bucket.has(g)) bucket.set(g, { code: g, name: nameOf(kind, g), hits: [] });
+    const list = bucket.get(g).hits;
     if (list.length < 3) list.push(h);
   }
-  return { hits: hits.slice(0, 40), groups: [...groups.values()].slice(0, maxGroups) };
+  const ctxGroups = [...ctx.values()].filter((g) => !own.has(g.code));
+  // Своих находок мало — места отдаём изделию: у «Крыльев» в ОКПД2 своих нет.
+  const ctxSlots = Math.min(ctxGroups.length, Math.max(3, maxGroups - own.size));
+  const groups = [...[...own.values()].slice(0, maxGroups - ctxSlots), ...ctxGroups.slice(0, ctxSlots)];
+  return { hits: hits.slice(0, 40), groups };
+}
+
+/** Названия изделий из графа — запасные написания для поиска (spellingsFor). */
+function contextSpellings(usedFor = []) {
+  const out = [];
+  for (const owner of usedFor ?? []) {
+    const o = String(owner ?? "").replace(/\s*\([^)]*\)\s*$/, "").trim();
+    if (o && /[a-zа-яё]{3}/i.test(o) && !out.includes(o)) out.push(o);
+  }
+  return out.slice(0, 6);
 }
 
 /** Верхний уровень: классы ОКПД2 (xx), группы ТН ВЭД (2 цифры). */
@@ -283,6 +346,7 @@ const tnvedFull = (inFile) => (inFile.length === 9 ? `${inFile}0` : inFile);
 
 module.exports = {
   spellingsFor,
+  contextSpellings,
   searchByName,
   topLevels,
   groupsUnder,
