@@ -2,14 +2,18 @@
 //
 // Код ОКПД2 или ТН ВЭД для продукта — моделью по файлу классификатора.
 //
-//   1. Поиск по файлу (codeSearch.js): позиции по названию и синонимам → их
-//      подгруппы. Позиция с названием ровно как у товара или единственная
-//      подгруппа — подгруппа известна без модели.
-//   2. Иначе модель выбирает подгруппу из найденных (groupPrompt). Поиск не
-//      нашёл ничего — сперва верхний уровень (класс ОКПД2, группа ТН ВЭД) из
-//      всех, потом подгруппу внутри него.
-//   3. Конечный код — промпт владельца с фрагментом файла: все коды подгруппы.
-//   4. Ответ сверяется с файлом: код есть, начинается с подгруппы и конечный.
+//   1. Поиск по файлу (codeSearch.js): позиции по названию, синонимам и — с
+//      меньшим весом — по изделиям, куда продукт идёт по графу → их подгруппы.
+//   2. Подгруппа без модели — только у вещества: позиция названа ровно как
+//      оно (или подгруппа одна, а вещество знает справочник). У деталей и
+//      изделий так ошибались: «Крылья» — куриные (0207), «Шасси» — прицепа
+//      (8716), «Трансмиссия» — электросамоката (30.99), 2026-11-17.
+//   3. Иначе модель выбирает подгруппу из найденных (groupPrompt). Не нашлось
+//      ничего или модель отвергла все — сверху: класс ОКПД2 (группа ТН ВЭД) из
+//      всех, потом подгруппа внутри него.
+//   4. Конечный код — промпт владельца с фрагментом файла: все коды подгруппы.
+//      NONE — с причиной (missing): какого признака товара не хватает.
+//   5. Ответ сверяется с файлом: код есть, начинается с подгруппы и конечный.
 //      Не так — один раз переспрашиваем в той же переписке; снова не так —
 //      «не определён», а не чужой код.
 //
@@ -17,8 +21,18 @@
 // подставные ответы); messages — [{ role, content }].
 
 const cs = require("./codeSearch");
-const { groupPrompt, leafPrompt } = require("./codePrompts");
+const { groupPrompt, leafPrompt, usageText } = require("./codePrompts");
 const { formatTnved, tnvedEntries } = require("./classifiers");
+const { identify } = require("./synonyms");
+
+/** Подгруппы химии: ОКПД2 20.xx, ТН ВЭД группы 28–29 — там названия позиций и есть вещества. */
+const isChemistry = (kind, group) => (kind === "okpd2" ? /^20\./.test(group) : /^2[89]/.test(group));
+
+/** Причина после NONE: «NONE: код зависит от тяги» → «код зависит от тяги». */
+function noneReason(answer) {
+  const m = /^\s*NONE\s*[:—–-]?\s*(.*)$/is.exec(String(answer ?? ""));
+  return m ? m[1].replace(/\s+/g, " ").trim().replace(/[.«»"]+$/, "").slice(0, 200) : "";
+}
 
 /**
  * Код подгруппы из ответа — только из списка кандидатов. Ответ подробнее
@@ -75,7 +89,7 @@ function resultOf(kind, code, subgroup) {
 
 /**
  * @param {"okpd2"|"tnved"} kind
- * @param {{ name: string, description?: string, current?: string, prompt?: string }} product
+ * @param {{ name: string, description?: string, usedFor?: string[], madeFrom?: string[], current?: string, prompt?: string }} product
  * @param {(messages: {role: string, content: string}[]) => Promise<string>} ask
  * @returns {Promise<{ status: "found"|"none", code?, name?, subgroup?, reason?, requests: number, steps: object[] }>}
  */
@@ -88,8 +102,9 @@ async function determineCode(kind, product, ask) {
   };
   const none = (reason) => ({ status: "none", reason, requests, steps });
 
-  const spellings = cs.spellingsFor(product.name);
-  const found = cs.searchByName(kind, spellings);
+  const usage = usageText(product);
+  const own = cs.spellingsFor(product.name);
+  const found = cs.searchByName(kind, [...own, ...cs.contextSpellings(product.usedFor)], { contextFrom: own.length });
   let candidates = found.groups;
   // Код, что уже стоит в карточке (реестр, справочник), — ещё один кандидат:
   // чаще всего он верен хотя бы до подгруппы.
@@ -98,37 +113,48 @@ async function determineCode(kind, product, ask) {
     candidates = [...candidates, { code: currentGroup, name: cs.nameOf(kind, currentGroup), hits: [] }];
   }
 
-  // Позиция названа ровно как товар — и только в одной подгруппе.
-  const exactGroups = [...new Set(found.hits.filter((h) => h.exact).map((h) => cs.groupOf(kind, h.code)))];
-  let subgroup = exactGroups.length === 1 ? exactGroups[0] : candidates.length === 1 ? candidates[0].code : null;
+  // Вещество, названное позицией ровно как оно, — подгруппа без модели.
+  const substance = Boolean(identify(product.name));
+  const exactGroups = [...new Set(found.hits.filter((h) => h.exact && !h.context).map((h) => cs.groupOf(kind, h.code)))];
+  let subgroup =
+    exactGroups.length === 1 && (substance || isChemistry(kind, exactGroups[0]))
+      ? exactGroups[0]
+      : substance && candidates.length === 1
+        ? candidates[0].code
+        : null;
   if (subgroup) steps.push({ stage: "group", by: "search", subgroup });
 
+  const ask1 = (list, opts) =>
+    call([{ role: "user", content: groupPrompt(kind, { product: product.name, description: product.description, usage, candidates: list, ...opts }) }]);
+
+  if (!subgroup && candidates.length) {
+    const answer = await ask1(candidates, { searched: true });
+    subgroup = pickFrom(kind, answer, candidates);
+    steps.push({ stage: "group", answer, subgroup, candidates: candidates.map((c) => c.code) });
+  }
   if (!subgroup) {
-    let searched = true;
-    if (!candidates.length) {
-      // Поиск по названию ничего не дал: верхний уровень — из всех.
-      const tops = cs.topLevels(kind);
-      const answer = await call([{ role: "user", content: groupPrompt(kind, { product: product.name, description: product.description, candidates: tops, top: true, searched: false }) }]);
-      const top = pickFrom(kind, answer, tops);
-      steps.push({ stage: "top", answer, top });
-      if (!top) return none("модель не отнесла товар ни к одному разделу классификатора");
-      candidates = cs.groupsUnder(kind, top);
-      searched = false;
-    }
-    if (candidates.length === 1) {
-      subgroup = candidates[0].code;
+    // Поиск не нашёл ничего или модель отвергла все найденное — сверху.
+    const tops = cs.topLevels(kind);
+    const answer = await ask1(tops, { top: true, searched: false });
+    const top = pickFrom(kind, answer, tops);
+    steps.push({ stage: "top", answer, top });
+    if (!top) return none("модель не отнесла товар ни к одному разделу классификатора");
+    const under = cs.groupsUnder(kind, top);
+    if (under.length === 1) {
+      subgroup = under[0].code;
     } else {
-      const answer = await call([{ role: "user", content: groupPrompt(kind, { product: product.name, description: product.description, candidates, searched }) }]);
-      subgroup = pickFrom(kind, answer, candidates);
-      steps.push({ stage: "group", answer, subgroup, candidates: candidates.map((c) => c.code) });
-      if (!subgroup) return none("модель не выбрала подгруппу классификатора");
+      const a2 = await ask1(under, { searched: false });
+      subgroup = pickFrom(kind, a2, under);
+      steps.push({ stage: "group-top", answer: a2, subgroup });
     }
+    if (!subgroup) return none("модель не выбрала подгруппу классификатора");
   }
 
   const fragment = cs.fragmentOf(kind, subgroup);
   const prompt = leafPrompt(kind, product.prompt, {
     product: product.name,
     description: product.description,
+    usage,
     subgroup,
     fragment,
   });
@@ -150,9 +176,17 @@ async function determineCode(kind, product, ask) {
     steps.push({ stage: "leaf-retry", answer, problem });
   }
 
-  if (!code || /^\s*NONE\b/i.test(answer)) return { ...none("модель не нашла в подгруппе подходящего кода"), subgroup, subgroupName: cs.nameOf(kind, subgroup) };
+  if (!code || /^\s*NONE\b/i.test(answer)) {
+    const missing = noneReason(answer);
+    return {
+      ...none(missing || "модель не нашла в подгруппе подходящего кода"),
+      ...(missing ? { missing } : {}),
+      subgroup,
+      subgroupName: cs.nameOf(kind, subgroup),
+    };
+  }
   if (problem) return { ...none(problem), subgroup, subgroupName: cs.nameOf(kind, subgroup) };
   return { status: "found", ...resultOf(kind, code, subgroup), requests, steps };
 }
 
-module.exports = { determineCode, pickFrom, leafProblem };
+module.exports = { determineCode, pickFrom, leafProblem, noneReason };

@@ -20,6 +20,7 @@ const path = require("path");
 
 const { normalizeName } = require("./normalize");
 const { identify } = require("./synonyms");
+const { isUnqualifiedGeneric } = require("../../shared/genericParts");
 
 // PRODUCT_CODES_FILE — другой файл: для тестов и пробных прогонов.
 const FILE = process.env.PRODUCT_CODES_FILE || path.resolve(__dirname, "../../../data/product-codes.json");
@@ -59,6 +60,9 @@ function keysOf(name) {
  * главнее канона: коды могли определить и для синонима, и для него самого.
  */
 function savedCodes(name) {
+  // Общее название («Двигатель») — код зависит от изделия; записанное по
+  // имени до 2026-11-17 (двигатель автомобиля с кодом 28.11) не отдаём.
+  if (isUnqualifiedGeneric(name)) return null;
   const data = load();
   const [own, canon] = keysOf(name);
   const a = data[own];
@@ -81,4 +85,22 @@ function storeCodes(name, codes) {
   save(data);
 }
 
-module.exports = { savedCodes, storeCodes, keysOf, FILE };
+/** Стереть коды видов kinds у продукта (по названию и канону). */
+function clearCodes(name, kinds) {
+  const data = { ...load() };
+  let changed = false;
+  for (const key of keysOf(name)) {
+    const rec = data[key];
+    if (!rec) continue;
+    const next = { ...rec };
+    for (const k of kinds) if (next[k]) {
+      delete next[k];
+      changed = true;
+    }
+    if (next.okpd2 || next.tnved) data[key] = next;
+    else delete data[key];
+  }
+  if (changed) save(data);
+}
+
+module.exports = { savedCodes, storeCodes, clearCodes, keysOf, FILE };
