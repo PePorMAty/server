@@ -21,6 +21,7 @@ const transformationBetween = require("./routes/transformation-between/transform
 const techDescription = require("./routes/tech-description/tech-description");
 const shareRoutes = require("./routes/share/share");
 const industryRoutes = require("./routes/industry/industry");
+const productCodesRoutes = require("./routes/industry/codes");
 const localSourcesRoutes = require("./routes/local-sources/local-sources");
 const materialBalanceRoutes = require("./routes/material-balance/material-balance");
 
@@ -112,6 +113,8 @@ app.use("/api/graphs", shareRoutes);
 app.use("/api/graphs", materialBalanceRoutes);
 // Слой промышленных данных (ГИСП) — свой префикс: это не про графы.
 app.use("/api", industryRoutes);
+// Коды ОКПД2 и ТН ВЭД моделью по файлам классификаторов («Определение кодов»).
+app.use("/api", productCodesRoutes);
 // Локальная база источников: PDF заказчика и найденное моделью.
 app.use("/api", localSourcesRoutes);
 

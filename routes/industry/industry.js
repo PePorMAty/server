@@ -19,6 +19,7 @@ const { lookupProduct, status } = require("./utils/store");
 const { identify, synonymsStatus } = require("./utils/synonyms");
 const { describeOkpd2, describeTnved } = require("./utils/classifiers");
 const { ecicsStatus } = require("./utils/ecics");
+const { savedCodes } = require("./utils/modelCodes");
 
 const router = express.Router();
 
@@ -146,6 +147,14 @@ router.post("/industry/lookup", (req, res) => {
     // один раз, а в ответе раскладываем по всем присланным написаниям.
     const names = readProductNames(raw);
 
+    // Коды, определённые моделью (кнопка «Определение кодов»), — отдельным
+    // полем: от реестра они не зависят и приходят, даже если его нет.
+    const modelCodes = {};
+    for (const name of names) {
+      const saved = savedCodes(name);
+      if (saved) modelCodes[name] = saved;
+    }
+
     const info = status();
     if (!info.ready) {
       return res.json({
@@ -153,6 +162,7 @@ router.post("/industry/lookup", (req, res) => {
         ready: false,
         reason: info.reason,
         results: {},
+        modelCodes,
       });
     }
 
@@ -166,6 +176,7 @@ router.post("/industry/lookup", (req, res) => {
       ready: true,
       actualAt: info.actualAt,
       results,
+      modelCodes,
     });
   } catch (e) {
     console.error("Industry lookup error:", e);
