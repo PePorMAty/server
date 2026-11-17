@@ -48,7 +48,8 @@ Node.js, Express 5, CommonJS.
   исправление — переименованиями; зовут превью шага и отказ баланса,
   `utils/stepCheck.js`), промпты — `routes/step/utils/prompts.js`.
   Промпты построения v4 (владелец, 2026-11-17) — дословно в
-  `routes/step/prompts-v4/` (README там же); откат без git —
+  `routes/step/prompts-v4/`, одобренные владельцем правки помечены
+  «(ПРАВКА дата)» и перечислены в README там же; откат без git —
   `STEP_PROMPTS=legacy` в `.env` и `pm2 restart all`.
 - `routes/sources/utils/openai.js` — единый транспорт к моделям (`MODELS.md`).
 - `routes/graph-files/` — файлы графов и данные рядом с ними (закладки,

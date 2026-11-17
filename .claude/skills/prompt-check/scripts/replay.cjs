@@ -35,6 +35,7 @@ const SKILL = path.resolve(__dirname, "..");
 const REPO = path.resolve(SKILL, "../../..");
 const FIXTURES = path.join(SKILL, "fixtures");
 const { checkAnswer } = require("./checks.cjs");
+const { promptsVersion } = require("../../../../routes/step/utils/promptVersion");
 
 const opts = { api: "https://sorangptgraph.xyz", out: path.join(os.tmpdir(), "prompt-check"), cases: [] };
 for (const a of process.argv.slice(2)) {
@@ -226,9 +227,18 @@ async function ask(body, tail = "", { raw = false } = {}) {
           const r = await aggregate(asBranchServer(fx.request));
           const input = captured?.input || "";
           add(r.status === 200 && !!captured, "обработчик принял запрос и позвал модель", `HTTP ${r.status}`);
-          add(!/<<<[A-Z_]+>>>/.test(input + (captured?.instructions || "")), "все подстановки заполнены");
-          add(["<lineage>", "<target_product>", "<existing_chain>", "<blocks>"].every((t) => input.includes(t)) && input.includes(fx.request.productName),
-            "данные отделены от шаблона метками", `промпт ${input.length} симв., инструкция ${(captured?.instructions || "").length} симв.`);
+          // v4 (STEP_PROMPTS): системный текст владельца упоминает подстановки
+          // в правилах («если сервер передал <<<SOURCE_CURRENT_PRODUCT>>>…») —
+          // заполненными должны быть подстановки запроса; данные отделены
+          // чертой «ВХОДНЫЕ ДАННЫЕ» и заголовками v4, а не метками <lineage>.
+          const v4 = promptsVersion() === "v4";
+          add(!/<<<[A-Z_]+>>>/.test(v4 ? input : input + (captured?.instructions || "")), "все подстановки заполнены");
+          const marks = v4
+            ? ["ВХОДНЫЕ ДАННЫЕ", "# Существующая цепочка", "# Текстовые блоки"]
+            : ["<lineage>", "<target_product>", "<existing_chain>", "<blocks>"];
+          add(marks.every((t) => input.includes(t)) && input.includes(fx.request.productName),
+            v4 ? "данные отделены от шаблона (черта и заголовки v4)" : "данные отделены от шаблона метками",
+            `промпт ${input.length} симв., инструкция ${(captured?.instructions || "").length} симв.`);
         } else {
           const got = opts.answers
             ? { md: fs.readFileSync(path.join(opts.answers, `${name}.md`), "utf8"), followUp: null }

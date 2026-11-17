@@ -12,7 +12,7 @@ const base = (s) =>
     .trim();
 const same = (a, b) => !!base(a) && base(a) === base(b);
 
-/** «[А, Б (В, Г)]» → ["А", "Б (В, Г)"]; без скобок — строка целиком. */
+/** «[А, Б (В, Г)]» → ["А", "Б (В, Г)"]; «Нейлон 6,6» — одно название (как routes/step/utils/productList.js). */
 function list(raw) {
   let s = String(raw || "").trim();
   if (s.startsWith("[")) {
@@ -25,10 +25,12 @@ function list(raw) {
   }
   const items = [];
   let depth = 0, cur = "";
-  for (const ch of s) {
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
     if (ch === "(" || ch === "[") depth++;
     if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
-    if ((ch === "," || ch === ";") && depth === 0) { items.push(cur); cur = ""; } else cur += ch;
+    const digitComma = ch === "," && /\d/.test(s[i - 1] || "") && /\d/.test(s[i + 1] || "");
+    if ((ch === ";" || (ch === "," && !digitComma)) && depth === 0) { items.push(cur); cur = ""; } else cur += ch;
   }
   items.push(cur);
   return items.map((x) => x.trim().replace(/\.$/, "")).filter((x) => x && !/^(нет|—|-)$/i.test(x));
@@ -66,6 +68,9 @@ function parseAnswer(md) {
   return { main: variant("основной", main), alts, control, product: (/\*\*Продукт:\*\*\s*([^\n]+)/.exec(text) || [])[1]?.trim() };
 }
 
+// Слова шаблона, которые модель переписывала в ответ (v4, нейлон 6,6 2026-11-17).
+const TEMPLATE_TEXT = ["Если альтернатив нет", "Иначе для каждой альтернативы", "<краткое название>", "<название продукта"];
+
 const ECHO = ["<lineage>", "<blocks>", "<existing_chain>", "ВХОДНЫЕ ДАННЫЕ", "# Родословная", "# Текстовые блоки", "# Существующая цепочка", "# Целевой продукт"];
 
 /**
@@ -88,6 +93,9 @@ function checkAnswer(md, request, expect = {}) {
 
   const echoed = ECHO.filter((m) => md.includes(m));
   add("нет эха входных данных", !echoed.length, echoed.join(", "));
+  const template = TEMPLATE_TEXT.filter((m) => md.includes(m));
+  add("нет слов шаблона в ответе", !template.length, template.join(", "));
+  add("«Альтернативы: []» — только когда альтернатив нет", !(a.alts.length && /\*\*Альтернативы:\s*\[\]/.test(md)), `альтернатив: ${a.alts.length}`);
   add(v4 ? "шаблон соблюдён (продукт, шаг, два поля списком; v4)" : "шаблон соблюдён (продукт, шаг, три поля списком)",
     same(a.product, anchor) && a.main.raw.out && a.main.raw.inp && (v4 || a.main.raw.by !== undefined) && /^\[/.test(a.main.raw.inp),
     `Продукт: ${a.product ?? "—"}; Из чего: ${a.main.raw.inp ?? "—"}; Побочные: ${a.main.raw.by ?? "нет поля"}`);
@@ -97,7 +105,8 @@ function checkAnswer(md, request, expect = {}) {
     add("у каждой альтернативы раскрываемый продукт во входах", a.alts.every((v) => v.inputs.some((x) => same(x, anchor))),
       a.alts.filter((v) => !v.inputs.some((x) => same(x, anchor))).map((v) => v.title).join(", "));
   } else {
-    add("раскрываемый продукт — выход основного шага", a.main.outputs.some((x) => same(x, anchor)), a.main.outputs.join(", "));
+    if (unresolved && !a.main.inputs.length && !a.main.outputs.length) add("unresolved — оба списка шага пусты (v4)", true);
+    else add("раскрываемый продукт — выход основного шага", a.main.outputs.some((x) => same(x, anchor)), a.main.outputs.join(", "));
   }
   const ancestors = (request.ancestorProducts || []).filter((x) => !same(x, anchor));
   const loops = allOutputs.filter((x) => ancestors.some((y) => same(x, y)));
@@ -124,6 +133,8 @@ function checkAnswer(md, request, expect = {}) {
   }
   if (expect.someOutputs)
     add(`среди вариантов есть ${expect.someOutputs.join(", ")}`, expect.someOutputs.every((x) => allOutputs.some((y) => same(x, y))), allOutputs.join(", "));
+  if (expect.minAlternatives)
+    add(`альтернатив не меньше ${expect.minAlternatives}`, a.alts.length >= expect.minAlternatives, a.alts.map((v) => v.title).join("; ") || "нет");
   if (expect.mainOutputs)
     add(`основной выход: ${expect.mainOutputs.join(", ")}`, expect.mainOutputs.every((x) => a.main.outputs.some((y) => same(x, y))), a.main.outputs.join(", "));
   if (expect.mainInputs)
