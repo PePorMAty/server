@@ -120,6 +120,16 @@ test("группа вместо конечного кода и чужая под
   assert.match(wrong.okpd2.reason, /не из подгруппы 20\.14/);
 });
 
+test("код xx.xx.xx.000 без уточнений — конечный, группа над ним — нет", () => {
+  const cs = require("../routes/industry/utils/codeSearch");
+  assert.equal(cs.isLeaf("okpd2", "29.10.21.000"), true);
+  assert.equal(cs.isLeaf("okpd2", "29.10.21"), false);
+  assert.equal(cs.isLeaf("okpd2", "20.14.61.100"), false);
+  assert.equal(cs.isLeaf("okpd2", "20.14.61.110"), true);
+  assert.equal(cs.isLeaf("tnved", "291211000"), true);
+  assert.equal(cs.isLeaf("tnved", "291211"), false);
+});
+
 test("поиск по названию не нашёл ничего — сперва класс, потом подгруппа", async () => {
   asked.length = 0;
   answer = (text) => {

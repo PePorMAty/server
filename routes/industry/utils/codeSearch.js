@@ -114,7 +114,13 @@ function isLeaf(kind, code) {
   const all = kind === "okpd2" ? okpd2Entries() : tnvedEntries();
   const c = kind === "okpd2" ? code : digits(code);
   const prefix = refinementPrefix(kind, c);
-  for (const other of all.keys()) if (other !== c && other.startsWith(prefix)) return false;
+  // Предков не считаем: у 29.10.21.000 начало уточнений — «29.10.21», а с
+  // него начинается и сама группа 29.10.21 над кодом. Без этого любой код
+  // xx.xx.xx.000 (их в ОКПД2 1749) считался группой, и верный ответ модели
+  // отклонялся (2026-11-17: «Автомобиль» → 29.10.21.000).
+  for (const other of all.keys()) {
+    if (other !== c && other.startsWith(prefix) && !c.startsWith(other)) return false;
+  }
   return true;
 }
 
