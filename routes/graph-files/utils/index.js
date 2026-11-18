@@ -1,8 +1,10 @@
 // routes/graph-files/utils/index.js
 //
-// Реэкспорт файлового хранилища плюс общая для роутов проверка графа.
+// Реэкспорт файловых помощников плюс общая для роутов проверка графа.
+// Сами данные графов — через хранилище (../store: файлы или PostgreSQL).
 
 const store = require("./store");
+const { getStore } = require("../store");
 
 /**
  * Начало любого роута, работающего с приложением к графу (закладки, история):
@@ -18,8 +20,7 @@ async function resolveGraph(req, res) {
     return null;
   }
 
-  const existing = await store.readGraphFile(fileName);
-  if (!existing) {
+  if (!(await getStore().graphExists(fileName))) {
     res.status(404).json({ error: "Graph not found" });
     return null;
   }

@@ -86,6 +86,14 @@ const connectDB = async () => {
 
 connectDB();
 
+// Хранилище библиотеки графов: файлы (по умолчанию) или PostgreSQL
+// (GRAPH_STORE=pg, PG-MIGRATION.md, этап 1). Схемы нет — говорим сразу, что
+// делать, а не 500 на каждом запросе к библиотеке.
+require("./routes/graph-files/store")
+  .checkPgStore()
+  .then(({ kind }) => console.log(`📚 Библиотека графов: ${kind === "pg" ? "PostgreSQL (схема app)" : "файлы data/"}`))
+  .catch((e) => console.error(`❌ Библиотека графов: ${e.message}`));
+
 // Routes
 app.use("/api/graphs", graphRoutes);
 app.use("/api/graphs", graphSources);

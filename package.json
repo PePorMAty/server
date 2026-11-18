@@ -9,7 +9,8 @@
     "backup": "node scripts/backup.js",
     "db:create": "npx sequelize-cli db:create",
     "db:migrate": "npx sequelize-cli db:migrate",
-    "db:seed": "npx sequelize-cli db:seed:all"
+    "db:seed": "npx sequelize-cli db:seed:all",
+    "pg:migrate": "node scripts/db-migrate.js"
   },
   "keywords": [],
   "author": "",

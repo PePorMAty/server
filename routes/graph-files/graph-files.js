@@ -1,20 +1,23 @@
-const express = require("express");
-const fs = require("fs/promises");
-const path = require("path");
+// routes/graph-files/graph-files.js
+//
+// Библиотека графов: список, открыть, сохранить новый, перезаписать,
+// переименовать, удалить. Где лежат графы — файлы или PostgreSQL — решает
+// хранилище (store/index.js, GRAPH_STORE); адреса и ответы те же.
+//
+// Версия графа (meta.version, растёт с каждым сохранением): клиент присылает
+// в PUT ту, с которой открыл граф, — если граф тем временем сохранил кто-то
+// другой, ответ 409 с метой свежей версии, и клиент предлагает открыть её или
+// сохранить свою копией. Без версии (старый клиент) — сохраняет как раньше.
 
-const {
-  GRAPH_DIR,
-  BALANCES_DIR,
-  PRODUCT_IDS_DIR,
-  safeId,
-  sidecarPath,
-  removeFile,
-  readGraphFile,
-  graphMeta,
-  removeSidecars,
-} = require("./utils");
+const express = require("express");
+
+const { safeId } = require("./utils");
+const { getStore, metaOf, ConflictError } = require("./store");
 
 const router = express.Router();
+
+/** Кто делает: появится с пользователями (этап 5 PG-MIGRATION.md). */
+const actorOf = (req) => req.actor ?? null;
 
 router.post("/save", async (req, res) => {
   try {
@@ -33,8 +36,6 @@ router.post("/save", async (req, res) => {
       return res.status(400).json({ error: "nodes and edges required" });
     }
 
-    await fs.mkdir(GRAPH_DIR, { recursive: true });
-
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 
     const safeName = (name || prompt || "graph")
@@ -43,7 +44,6 @@ router.post("/save", async (req, res) => {
       .slice(0, 50);
 
     const fileName = `${safeName}_${timestamp}.json`;
-    const filePath = path.join(GRAPH_DIR, fileName);
 
     // Создание — тоже изменение: проставляем updatedAt сразу, чтобы сортировка
     // «Сначала изменённые» не спотыкалась о пустое поле у свежих графов.
@@ -70,12 +70,12 @@ router.post("/save", async (req, res) => {
       },
     };
 
-    await fs.writeFile(filePath, JSON.stringify(fileData, null, 2), "utf-8");
+    const created = await getStore().createGraph(fileName, fileData, { actor: actorOf(req) });
 
     res.json({
       success: true,
       file: fileName,
-      data: graphMeta(fileName, fileData),
+      data: metaOf(fileName, created.content),
     });
   } catch (e) {
     console.error("Save graph error:", e);
@@ -85,29 +85,9 @@ router.post("/save", async (req, res) => {
 
 router.get("/", async (req, res) => {
   try {
-    await fs.mkdir(GRAPH_DIR, { recursive: true });
-
-    const files = await fs.readdir(GRAPH_DIR);
-
     // Отдаём только мету, без узлов: библиотека грузит граф целиком лишь для
-    // выбранной строки. Один нечитаемый файл не должен ронять весь список —
-    // пропускаем его с записью в лог.
-    const result = [];
-
-    for (const file of files) {
-      if (!file.toLowerCase().endsWith(".json")) continue;
-
-      try {
-        const content = JSON.parse(
-          await fs.readFile(path.join(GRAPH_DIR, file), "utf-8"),
-        );
-        result.push(graphMeta(file, content));
-      } catch (e) {
-        console.warn(`List graphs: пропускаю ${file} — ${e.message}`);
-      }
-    }
-
-    res.json({ success: true, data: result });
+    // выбранной строки.
+    res.json({ success: true, data: await getStore().listGraphs() });
   } catch (e) {
     console.error("List graphs error:", e);
     res.status(500).json({ error: "Failed to read graphs" });
@@ -116,7 +96,8 @@ router.get("/", async (req, res) => {
 
 router.get("/:id", async (req, res) => {
   try {
-    const existing = await readGraphFile(req.params.id);
+    const id = safeId(req.params.id);
+    const existing = id ? await getStore().getGraph(id) : null;
     if (!existing) {
       return res.status(404).json({ error: "Graph not found" });
     }
@@ -132,71 +113,78 @@ router.delete("/:id", async (req, res) => {
     const fileName = safeId(req.params.id);
     if (!fileName) return res.status(400).json({ error: "Bad graph id" });
 
-    await fs.unlink(path.join(GRAPH_DIR, fileName));
-    // Закладки и история графа без него бессмысленны — уносим вместе с ним.
-    await removeSidecars(fileName);
+    // Закладки и история графа без него бессмысленны — хранилище уносит их
+    // вместе с ним (в базе — мягко, восстановимо).
+    const removed = await getStore().deleteGraph(fileName, { actor: actorOf(req) });
+    if (!removed) return res.status(404).json({ error: "Graph not found" });
 
     res.status(204).end();
   } catch (e) {
-    if (e && e.code === "ENOENT") {
-      return res.status(404).json({ error: "Graph not found" });
-    }
     console.error("Delete graph error:", e);
     res.status(500).json({ error: "Failed to delete graph" });
   }
 });
 
 // Обновить (перезаписать содержимое) существующий сохранённый граф.
-// Имя файла/id НЕ меняется — перезаписываем содержимое того же файла.
+// Имя файла/id НЕ меняется — перезаписываем содержимое того же графа.
 router.put("/:id", async (req, res) => {
   try {
-    const { name, prompt, description, nodes, edges, leaf_nodes, has_more, sources } =
+    const { name, prompt, description, nodes, edges, leaf_nodes, has_more, sources, version } =
       req.body;
 
     if (!nodes || !edges) {
       return res.status(400).json({ error: "nodes and edges required" });
     }
+    const id = safeId(req.params.id);
+    if (!id) return res.status(404).json({ error: "Graph not found" });
 
-    const existing = await readGraphFile(req.params.id);
-    if (!existing) {
+    const store = getStore();
+    const saved = await store.updateGraph(
+      id,
+      (content) => {
+        const prevMeta = content.meta ?? {};
+        const prevState = content.state ?? {};
+        return {
+          meta: {
+            name: name != null ? name : prevMeta.name,
+            prompt: prompt != null ? prompt : prevMeta.prompt,
+            // Описание и источники не приходят в обычном «Сохранить» —
+            // сохраняем прежние значения, иначе перезапись графа их стирает.
+            description:
+              typeof description === "string"
+                ? description
+                : (prevMeta.description ?? null),
+            createdAt: prevMeta.createdAt,
+            updatedAt: new Date().toISOString(),
+          },
+          graph: { nodes, edges },
+          state: {
+            leaf_nodes: leaf_nodes || [],
+            has_more: !!has_more,
+            sources: sources ?? prevState.sources ?? null,
+          },
+        };
+      },
+      { expectedVersion: version, actor: actorOf(req) },
+    );
+    if (!saved) {
       return res.status(404).json({ error: "Graph not found" });
     }
 
-    const { fileName, filePath, content } = existing;
-    const prevMeta = content.meta ?? {};
-    const prevState = content.state ?? {};
+    // Расчёты баланса и идентификаторы продуктов теперь в самом графе, в
+    // данных узлов: сайдкары с ними (material-balances.js, product-ids.js)
+    // больше не нужны — и не должны перекрыть сохранённое при следующем
+    // открытии.
+    await store.clearBalances(id);
+    await store.clearProductIds(id);
 
-    const updated = {
-      meta: {
-        name: name != null ? name : prevMeta.name,
-        prompt: prompt != null ? prompt : prevMeta.prompt,
-        // Описание и источники не приходят в обычном «Сохранить» — сохраняем
-        // прежние значения, иначе перезапись графа их стирает.
-        description:
-          typeof description === "string"
-            ? description
-            : (prevMeta.description ?? null),
-        createdAt: prevMeta.createdAt,
-        updatedAt: new Date().toISOString(),
-      },
-      graph: { nodes, edges },
-      state: {
-        leaf_nodes: leaf_nodes || [],
-        has_more: !!has_more,
-        sources: sources ?? prevState.sources ?? null,
-      },
-    };
-
-    await fs.writeFile(filePath, JSON.stringify(updated, null, 2), "utf-8");
-    // Расчёты баланса теперь в самом файле, в данных узлов: сайдкар с ними
-    // (см. material-balances.js) больше не нужен — и не должен перекрыть то,
-    // что сохранили, при следующем открытии.
-    await removeFile(sidecarPath(BALANCES_DIR, fileName));
-    // Идентификаторы продуктов — тоже в файле (см. product-ids.js).
-    await removeFile(sidecarPath(PRODUCT_IDS_DIR, fileName));
-
-    res.json({ success: true, data: graphMeta(fileName, updated) });
+    res.json({ success: true, data: metaOf(id, saved.content) });
   } catch (e) {
+    if (e instanceof ConflictError) {
+      // Граф сохранили, пока его правили: клиент предложит открыть свежую
+      // версию или сохранить свою копией.
+      return res.status(409).json({ success: false, error: "conflict", current: e.current.meta });
+    }
     console.error("Update graph error:", e);
     res.status(500).json({ error: "Failed to update graph" });
   }
@@ -222,21 +210,28 @@ router.patch("/:id", async (req, res) => {
       return res.status(400).json({ error: "description must be a string" });
     }
 
-    const existing = await readGraphFile(req.params.id);
-    if (!existing) {
+    const id = safeId(req.params.id);
+    const saved = id
+      ? await getStore().updateGraph(
+          id,
+          (content) => {
+            const meta = { ...(content.meta ?? {}) };
+            if (hasName) meta.name = name.trim();
+            if (hasDescription) meta.description = description;
+            meta.updatedAt = new Date().toISOString();
+            return { ...content, meta };
+          },
+          // Имя и описание — не правка графа: версию не трогаем, чтобы
+          // переименование в библиотеке не давало конфликт тому, кто граф
+          // сейчас правит.
+          { bump: false, actor: actorOf(req) },
+        )
+      : null;
+    if (!saved) {
       return res.status(404).json({ error: "Graph not found" });
     }
 
-    const { fileName, filePath, content } = existing;
-    content.meta = content.meta ?? {};
-
-    if (hasName) content.meta.name = name.trim();
-    if (hasDescription) content.meta.description = description;
-    content.meta.updatedAt = new Date().toISOString();
-
-    await fs.writeFile(filePath, JSON.stringify(content, null, 2), "utf-8");
-
-    res.json({ success: true, data: graphMeta(fileName, content) });
+    res.json({ success: true, data: metaOf(id, saved.content) });
   } catch (e) {
     console.error("Patch graph error:", e);
     res.status(500).json({ error: "Failed to update graph meta" });
