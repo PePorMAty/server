@@ -15,8 +15,8 @@ const { promptsVersion } = require("./promptVersion");
 /**
  * Промпты v4 (владелец, 2026-11-17) — дословно, файлами в
  * routes/step/prompts-v4/: так их удобно сверять и править, и они не
- * смешиваются с прежними. Прежние остаются ниже: STEP_PROMPTS=legacy
- * возвращает их без git (promptVersion.js).
+ * смешиваются с прежними. С 2026-11-18 действуют прежние (ниже); v4 —
+ * по STEP_PROMPTS=v4 без git (promptVersion.js).
  */
 const V4_DIR = path.join(__dirname, "../prompts-v4");
 const v4Cache = new Map();

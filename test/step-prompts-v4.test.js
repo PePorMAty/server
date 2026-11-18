@@ -1,6 +1,6 @@
-// Промпты построения v4 (routes/step/prompts-v4/) и откат к прежним
-// (STEP_PROMPTS=legacy): что получает модель в поиске источников и в
-// обобщении, что отдаёт обобщение.
+// Промпты построения: прежние (по умолчанию с 2026-11-18) и v4
+// (routes/step/prompts-v4/, STEP_PROMPTS=v4): что получает модель в поиске
+// источников и в обобщении, что отдаёт обобщение.
 //
 //   npm test
 
@@ -56,8 +56,8 @@ const withVersion = async (v, fn) => {
   }
 };
 
-test("по умолчанию — v4: обобщение вниз и вверх, плейсхолдеры USER заполнены, правила SYSTEM — как есть", () =>
-  withVersion(undefined, () => {
+test("STEP_PROMPTS=v4: обобщение вниз и вверх, плейсхолдеры USER заполнены, правила SYSTEM — как есть", () =>
+  withVersion("v4", () => {
     for (const direction of ["down", "up"]) {
       const p = prompts.buildStepAggregatePrompts({ productName: "Фенол", existingChain: [], blocks: ["Блок о феноле"], ancestorProducts: ["Кумол"], direction });
       assert.equal(p.version, "v4");
@@ -86,8 +86,8 @@ test("v4: поиск источников — параметры строкам�
     assert.match(brief, /Адрес страницы и продукт поиска в строках не пиши/);
   }));
 
-test("STEP_PROMPTS=legacy — прежние промпты целиком", () =>
-  withVersion("legacy", () => {
+test("по умолчанию и при STEP_PROMPTS=legacy — прежние промпты целиком", () =>
+  withVersion(undefined, () => {
     const p = prompts.buildStepAggregatePrompts({ productName: "Фенол", existingChain: [], blocks: ["Блок"], direction: "down" });
     assert.equal(p.version, "legacy");
     assert.doesNotMatch(p.SYSTEM, /единый контракт шага/);
@@ -112,7 +112,7 @@ test("обобщение отдаёт версию промптов и «Дос�
     "# Примечания",
     "- **Достаточность данных:** partial — не использовать как полный шаг до проверки",
   ].join("\n");
-  const r = await withVersion(undefined, () =>
+  const r = await withVersion("v4", () =>
     aggregate({ productName: "Фенол", direction: "down", sources: [{ title: "Бисфенол", url: "https://example.com/bpa", technology_description: "Бисфенол А получают из фенола и ацетона." }] }),
   );
   assert.equal(r.success, true);
@@ -131,7 +131,7 @@ test("GET /gpt/step/sources/prompt — промпт поиска действу�
   const sources = require("../routes/step/sources.js");
   const get = sources.stack.find((l) => l.route?.path === "/gpt/step/sources/prompt" && l.route.methods.get).route.stack[0].handle;
   const call = (query) => new Promise((resolve) => get({ query }, { json: resolve }));
-  const v4 = await withVersion(undefined, () => call({ direction: "up", productName: "Фенол", maxItems: "4" }));
+  const v4 = await withVersion("v4", () => call({ direction: "up", productName: "Фенол", maxItems: "4" }));
   assert.equal(v4.version, "v4");
   assert.equal(v4.direction, "up");
   assert.match(v4.prompt, /^Параметры сервера:\nEXPAND_PRODUCT: Фенол\nПРОДУКТ: Фенол\nN: 4\n/);
