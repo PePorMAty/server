@@ -24,6 +24,7 @@ const STEP_ANSWER = { acc: "шаг", gen: "шага" };
 // Общие названия деталей («Двигатель», «Шасси») — routes/shared/genericParts.js.
 const { isGenericPart } = require("../shared/genericParts");
 const { splitProductList } = require("./utils/productList");
+const { identify } = require("../industry/utils/synonyms");
 
 /**
  * Шаг из ответа модели: без строгой схемы модель порой заворачивает его в
@@ -577,6 +578,24 @@ router.post("/gpt/step/build", async (req, res) => {
       return x.length >= 3 && x === wordsKey(b);
     };
 
+    // Одно вещество под двумя названиями — по справочнику синонимов:
+    // «Углекислый газ» и «Оксид углерода IV», «Едкий натр» и «Гидроксид
+    // натрия». Обобщение писало одно, разборщик — другое, и страховки ниже
+    // возвращали «потерянное» вторым узлом: в карбоксилировании алкилфенола
+    // углекислый газ стоял сырьём дважды (граф владельца 2026-11-17).
+    // Справочник различает близкие вещества (угарный и углекислый газ,
+    // этилен и оксид этилена) — незнакомое ему название ни с чем не сливается.
+    const canonCache = new Map();
+    const canonOf = (s) => {
+      const key = normalize(s);
+      if (!canonCache.has(key)) canonCache.set(key, key ? normalize(identify(s)?.canon || "") : "");
+      return canonCache.get(key);
+    };
+    const sameSubstance = (a, b) => {
+      const x = canonOf(a);
+      return !!x && x === canonOf(b);
+    };
+
     const findExistingMatch = (name) => {
       const norm = normalize(name);
       const base = baseName(name);
@@ -588,6 +607,9 @@ router.post("/gpt/step/build", async (req, res) => {
       }
       for (const ep of existingProducts) {
         if (sameWordSet(ep, name)) return ep;
+      }
+      for (const ep of existingProducts) {
+        if (sameSubstance(ep, name)) return ep;
       }
       return null;
     };
@@ -638,12 +660,12 @@ router.post("/gpt/step/build", async (req, res) => {
       const x = baseName(a);
       const y = baseName(b);
       if (!x || !y) return false;
-      if (x === y || sameWordSet(a, b)) return true;
+      if (x === y || sameWordSet(a, b) || sameSubstance(a, b)) return true;
       return Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x));
     };
     const restored = [];
     for (const name of farSideListed(techText, direction)) {
-      if (normalize(name) === normalize(productName)) continue;
+      if (normalize(name) === normalize(productName) || sameSubstance(name, productName)) continue;
       if (farList.some((p) => sameProduct(p.name, name))) continue;
       farList.push(markProduct({ name }));
       restored.push(name);
@@ -672,7 +694,7 @@ router.post("/gpt/step/build", async (req, res) => {
     const sameWords = (a, b) => {
       const [x, y] = [baseName(a), baseName(b)].sort((p, q) => p.length - q.length);
       if (!x) return false;
-      if (x === y || sameWordSet(a, b)) return true;
+      if (x === y || sameWordSet(a, b) || sameSubstance(a, b)) return true;
       const escaped = x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return x.length >= 4 && new RegExp(`(^|[\\s-])${escaped}($|[\\s-])`).test(y);
     };
@@ -680,7 +702,7 @@ router.post("/gpt/step/build", async (req, res) => {
       direction === "up" ? step.outputProducts : step.inputProducts;
     const restoredNear = [];
     for (const name of nearSideListed(techText, direction)) {
-      if (baseName(name) === baseName(productName)) continue;
+      if (baseName(name) === baseName(productName) || sameSubstance(name, productName)) continue;
       if ([...nearList, ...farList].some((p) => sameWords(p.name, name))) continue;
       nearList.push(markProduct({ name: capitalized(name) }));
       restoredNear.push(name);
@@ -696,7 +718,7 @@ router.post("/gpt/step/build", async (req, res) => {
     // сочло бы «Фенол» тем же, что «Бисфенол А», и побочный фенол
     // поликонденсации пропал бы как «уже есть во входах».
     const sameName = (a, b) =>
-      !!baseName(a) && (baseName(a) === baseName(b) || sameWordSet(a, b));
+      !!baseName(a) && (baseName(a) === baseName(b) || sameWordSet(a, b) || sameSubstance(a, b));
     const listedOutputs = listedInMain(techText, "Что производят");
     const listedByproducts = listedInMain(techText, "Побочные продукты");
     const byproducts = [];
@@ -731,6 +753,22 @@ router.post("/gpt/step/build", async (req, res) => {
       );
     }
     step.byproducts = byproducts;
+
+    // Одно вещество дважды на одной стороне — и от разборщика, а не только от
+    // страховок выше («Углекислый газ, Оксид углерода IV»): оставляем одно,
+    // то, что уже стоит на графе, иначе — первое.
+    const oneBySubstance = (list) => {
+      const out = [];
+      for (const p of list) {
+        const i = out.findIndex((q) => sameSubstance(q.name, p.name));
+        if (i < 0) out.push(p);
+        else if (p.isExisting && !out[i].isExisting) out[i] = p;
+      }
+      return out;
+    };
+    step.inputProducts = oneBySubstance(step.inputProducts);
+    step.outputProducts = oneBySubstance(step.outputProducts);
+    step.byproducts = oneBySubstance(step.byproducts);
 
     // Шаг вверх от изделия: общее название узла («Двигатель», «Шасси»,
     // «Электроника») уточняем изделием — «Двигатель (Автомобиль)». Иначе
