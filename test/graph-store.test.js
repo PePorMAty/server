@@ -40,13 +40,17 @@ if (PG_URL) {
     async setup() {
       const { Pool } = require("pg");
       const { migrate } = require("../db/migrate");
-      const pool = new Pool({ connectionString: PG_URL, max: 4 });
+      const pool = new Pool({ connectionString: PG_URL, max: 5 });
+      const unlock = await require("./helpers/pg").lockTestDb(pool);
       await migrate(pool);
       return {
         pool,
         store: createPgStore({ pool, revisionsKeep: 2 }),
         reset: () => pool.query("TRUNCATE app.graphs, app.shares, app.settings CASCADE"),
-        close: () => pool.end(),
+        close: async () => {
+          await unlock();
+          await pool.end();
+        },
       };
     },
   });
