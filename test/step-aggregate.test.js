@@ -286,6 +286,7 @@ test("«Смесь X и Y» — дозапрос; продукты по отде
 
 // ---------- строки поиска в блоках обобщения v4 (utils/searchHints.js) ----------
 test("v4: строки стадий и цитаты поиска — в блоке, с адресом и продуктом поиска; раздел базы — без строк", async () => {
+  process.env.STEP_PROMPTS = "v4";
   const sectionId = addSection([]);
   const page = "Текст страницы (загружен сервером):\n" + "Nylon 6,6 is produced by polycondensation. ".repeat(80);
   await aggregate({
@@ -327,6 +328,7 @@ test("v4: строки стадий и цитаты поиска — в блок
   assert.equal(input.match(/source_id=url:https:\/\/example\.com\/old/g).length, 1);
   // Сводка раздела базы («… → Капролактам») в блок не идёт.
   assert.doesNotMatch(input, /Производство капролактама: Фенол/);
+  delete process.env.STEP_PROMPTS;
 });
 
 test("прежние промпты (STEP_PROMPTS=legacy) — блок без строк поиска", async () => {
