@@ -19,13 +19,8 @@
 
 const express = require("express");
 
-const {
-  PRODUCT_IDS_DIR,
-  sidecarPath,
-  readJson,
-  writeJson,
-  resolveGraph,
-} = require("./utils");
+const { resolveGraph } = require("./utils");
+const { getStore } = require("./store");
 
 const router = express.Router();
 
@@ -33,12 +28,6 @@ const SOURCES = new Set(["manual", "tnved", "cas", "dictionary"]);
 
 /** Сколько узлов принимаем за раз — больше, чем продуктов в самом большом графе. */
 const MAX_IDS = 5000;
-
-async function readIds(fileName) {
-  const stored = await readJson(sidecarPath(PRODUCT_IDS_DIR, fileName));
-  const items = stored?.items;
-  return items && typeof items === "object" && !Array.isArray(items) ? items : {};
-}
 
 /**
  * Запись узла из тела запроса; не годится — null. Без идентификатора, но с
@@ -70,27 +59,14 @@ function readEntry(raw) {
   };
 }
 
-// «Прочитать, поправить, записать»: две пачки подряд иначе затирали бы друг
-// друга. Очередь на каждый граф.
-const queues = new Map();
-
-function serialized(fileName, task) {
-  const prev = queues.get(fileName) ?? Promise.resolve();
-  const next = prev.catch(() => {}).then(task);
-  queues.set(fileName, next);
-  next
-    .finally(() => {
-      if (queues.get(fileName) === next) queues.delete(fileName);
-    })
-    .catch(() => {});
-  return next;
-}
+// Две пачки подряд не затирают друг друга: это держит хранилище (очередь на
+// граф в файле, транзакция в базе).
 
 router.get("/:id/product-ids", async (req, res) => {
   try {
     const fileName = await resolveGraph(req, res);
     if (!fileName) return;
-    res.json({ success: true, data: await readIds(fileName) });
+    res.json({ success: true, data: await getStore().getProductIds(fileName) });
   } catch (e) {
     console.error("List product ids error:", e);
     res.status(500).json({ error: "Failed to read product ids" });
@@ -108,24 +84,17 @@ router.put("/:id/product-ids", async (req, res) => {
     }
     const entries = Object.entries(ids).slice(0, MAX_IDS);
 
-    await serialized(fileName, async () => {
-      const items = await readIds(fileName);
-      for (const [nodeId, raw] of entries) {
-        const id = String(nodeId || "").trim();
-        if (!id) continue;
-        if (raw === null) {
-          delete items[id];
-          continue;
-        }
+    const changes = [];
+    for (const [nodeId, raw] of entries) {
+      const id = String(nodeId || "").trim();
+      if (!id) continue;
+      if (raw === null) changes.push([id, null]);
+      else {
         const entry = readEntry(raw);
-        if (entry) items[id] = entry;
+        if (entry) changes.push([id, entry]);
       }
-      await writeJson(sidecarPath(PRODUCT_IDS_DIR, fileName), {
-        graphId: fileName,
-        updatedAt: new Date().toISOString(),
-        items,
-      });
-    });
+    }
+    await getStore().putProductIds(fileName, changes);
 
     res.json({ success: true });
   } catch (e) {

@@ -13,14 +13,8 @@
 
 const express = require("express");
 
-const {
-  HISTORY_DIR,
-  sidecarPath,
-  readJson,
-  writeJson,
-  removeFile,
-  resolveGraph,
-} = require("./utils");
+const { resolveGraph } = require("./utils");
+const { getStore } = require("./store");
 
 const router = express.Router();
 
@@ -45,19 +39,6 @@ const KINDS = new Set([
 ]);
 
 let seq = 0;
-
-async function readHistory(fileName) {
-  const stored = await readJson(sidecarPath(HISTORY_DIR, fileName));
-  return Array.isArray(stored?.entries) ? stored.entries : [];
-}
-
-async function writeHistory(fileName, entries) {
-  await writeJson(sidecarPath(HISTORY_DIR, fileName), {
-    graphId: fileName,
-    updatedAt: new Date().toISOString(),
-    entries,
-  });
-}
 
 /**
  * Привести пришедшую запись к хранимому виду. Возвращает строку с ошибкой
@@ -101,15 +82,13 @@ router.get("/:id/history", async (req, res) => {
     const fileName = await resolveGraph(req, res);
     if (!fileName) return;
 
-    const entries = await readHistory(fileName);
-
     const rawLimit = Number.parseInt(req.query.limit, 10);
     const limit =
       Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(rawLimit, LIMIT)
         : LIMIT;
 
-    res.json({ success: true, data: entries.slice(0, limit) });
+    res.json({ success: true, data: await getStore().listHistory(fileName, limit) });
   } catch (e) {
     console.error("Read history error:", e);
     res.status(500).json({ error: "Failed to read history" });
@@ -143,11 +122,9 @@ router.post("/:id/history", async (req, res) => {
       normalized.push(entry);
     }
 
-    // Пачка приходит в порядке событий, а храним свежими вперёд.
-    const entries = [...normalized.reverse(), ...(await readHistory(fileName))];
-    if (entries.length > LIMIT) entries.length = LIMIT;
-
-    await writeHistory(fileName, entries);
+    // Пачка приходит в порядке событий, хранилище отдаёт свежие вперёд и
+    // держит не больше LIMIT записей.
+    const entries = await getStore().appendHistory(fileName, normalized, { actor: req.actor ?? null });
 
     res.status(201).json({ success: true, added: normalized.length, data: entries });
   } catch (e) {
@@ -161,7 +138,7 @@ router.delete("/:id/history", async (req, res) => {
     const fileName = await resolveGraph(req, res);
     if (!fileName) return;
 
-    await removeFile(sidecarPath(HISTORY_DIR, fileName));
+    await getStore().clearHistory(fileName);
     res.status(204).end();
   } catch (e) {
     console.error("Clear history error:", e);

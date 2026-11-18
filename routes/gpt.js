@@ -9,11 +9,9 @@ const {
   extractOutputText,
   explainBadAnswer,
 } = require("./sources/utils");
-const {
-  PROMPT_LAYOUT_FILE,
-  readJson,
-  writeJson,
-} = require("./graph-files/utils");
+// Шаблон промпта «Создание графа» — настройка в хранилище библиотеки
+// (файл data/prompt-layout.json или app.settings, GRAPH_STORE).
+const { getStore } = require("./graph-files/store");
 
 const router = express.Router();
 
@@ -118,11 +116,11 @@ router.post("/gpt", async (req, res) => {
 });
 
 // Шаблон промта для раздела «Создание графа». Пользователь может его править,
-// поэтому правка живёт в файле, а переменная окружения остаётся дефолтом: без
-// файла (и после его удаления) отдаём то же, что и раньше.
+// поэтому правка живёт в хранилище, а переменная окружения остаётся дефолтом:
+// без сохранённой правки отдаём то же, что и раньше.
 router.get("/prompt-layout", async (req, res) => {
   try {
-    const stored = await readJson(PROMPT_LAYOUT_FILE);
+    const stored = await getStore().getSetting("prompt-layout");
     res.json({
       promptLayout:
         typeof stored?.promptLayout === "string"
@@ -142,7 +140,7 @@ router.put("/prompt-layout", async (req, res) => {
       return res.status(400).json({ error: "promptLayout must be a string" });
     }
 
-    await writeJson(PROMPT_LAYOUT_FILE, {
+    await getStore().putSetting("prompt-layout", {
       promptLayout,
       updatedAt: new Date().toISOString(),
     });

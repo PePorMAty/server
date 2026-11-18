@@ -19,51 +19,21 @@
 
 const express = require("express");
 
-const {
-  BALANCES_DIR,
-  sidecarPath,
-  readJson,
-  writeJson,
-  resolveGraph,
-} = require("./utils");
+const { resolveGraph } = require("./utils");
+const { getStore } = require("./store");
 
 const router = express.Router();
 
-async function readBalances(fileName) {
-  const stored = await readJson(sidecarPath(BALANCES_DIR, fileName));
-  const items = stored?.items;
-  return items && typeof items === "object" && !Array.isArray(items) ? items : {};
-}
-
-// Запись — «прочитать, поправить, записать»: две правки разных узлов подряд
-// иначе затирали бы друг друга. Очередь на каждый граф.
-const queues = new Map();
-
-function serialized(fileName, task) {
-  const prev = queues.get(fileName) ?? Promise.resolve();
-  const next = prev.catch(() => {}).then(task);
-  queues.set(fileName, next);
-  next
-    .finally(() => {
-      if (queues.get(fileName) === next) queues.delete(fileName);
-    })
-    .catch(() => {});
-  return next;
-}
+// Запись узла — одна строка (в базе) или «прочитать, поправить, записать»
+// с очередью на граф (в файле): две правки разных узлов подряд не затирают
+// друг друга — это делает хранилище.
 
 router.get("/:id/material-balances", async (req, res) => {
   try {
     const fileName = await resolveGraph(req, res);
     if (!fileName) return;
 
-    const items = await readBalances(fileName);
-    const data = Object.fromEntries(
-      Object.entries(items).map(([nodeId, entry]) => [
-        nodeId,
-        Array.isArray(entry?.calcs) ? entry.calcs : [],
-      ]),
-    );
-    res.json({ success: true, data });
+    res.json({ success: true, data: await getStore().getBalances(fileName) });
   } catch (e) {
     console.error("List material balances error:", e);
     res.status(500).json({ error: "Failed to read material balances" });
@@ -83,15 +53,7 @@ router.put("/:id/material-balances/:nodeId", async (req, res) => {
       return res.status(400).json({ error: "calcs must be an array" });
     }
 
-    await serialized(fileName, async () => {
-      const items = await readBalances(fileName);
-      items[nodeId] = { calcs, updatedAt: new Date().toISOString() };
-      await writeJson(sidecarPath(BALANCES_DIR, fileName), {
-        graphId: fileName,
-        updatedAt: new Date().toISOString(),
-        items,
-      });
-    });
+    await getStore().putBalance(fileName, nodeId, calcs);
 
     res.json({ success: true });
   } catch (e) {

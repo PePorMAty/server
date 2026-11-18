@@ -1,13 +1,19 @@
+// routes/share/share.js
+//
+// Ссылки «Поделиться»: снимок графа только для чтения по короткому токену.
+// Где лежат снимки — файлы data/shared-graphs/ или таблица app.shares —
+// решает хранилище библиотеки (graph-files/store, GRAPH_STORE).
+
 const express = require("express");
-const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 
+const { getStore } = require("../graph-files/store");
+
 const router = express.Router();
-const SHARE_DIR = path.resolve(__dirname, "../../data/shared-graphs");
 
 // Короткий URL-безопасный токен (base62). 8 символов ≈ 47.6 бит — без коллизий
-// на нашем объёме; уникальность дополнительно проверяется по файловой системе.
+// на нашем объёме; уникальность дополнительно проверяется в хранилище.
 const ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const TOKEN_LENGTH = 8;
@@ -22,24 +28,6 @@ function generateToken(len = TOKEN_LENGTH) {
   return token;
 }
 
-async function fileExists(filePath) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function generateUniqueToken() {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const token = generateToken();
-    if (!(await fileExists(path.join(SHARE_DIR, `${token}.json`)))) {
-      return token;
-    }
-  }
-  throw new Error("Failed to generate a unique share token");
-}
 
 // Создать шарный снапшот текущего графа и вернуть короткий id для ссылки.
 router.post("/share", async (req, res) => {
@@ -52,11 +40,6 @@ router.post("/share", async (req, res) => {
     if (!Array.isArray(nodes) || nodes.length === 0) {
       return res.status(400).json({ error: "nodes must be a non-empty array" });
     }
-
-    await fs.mkdir(SHARE_DIR, { recursive: true });
-
-    const token = await generateUniqueToken();
-    const filePath = path.join(SHARE_DIR, `${token}.json`);
 
     // Та же форма, что и у graph-files (meta/graph/state) — клиент переиспользует
     // парсинг SavedGraphFile.
@@ -73,9 +56,15 @@ router.post("/share", async (req, res) => {
       },
     };
 
-    await fs.writeFile(filePath, JSON.stringify(fileData, null, 2), "utf-8");
-
-    res.json({ success: true, id: token });
+    // Токен занят — пробуем другой: хранилище не перезаписывает чужой снимок.
+    const store = getStore();
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const token = generateToken();
+      if (await store.createShare(token, fileData, { actor: req.actor ?? null })) {
+        return res.json({ success: true, id: token });
+      }
+    }
+    throw new Error("Failed to generate a unique share token");
   } catch (e) {
     console.error("Share graph error:", e);
     res.status(500).json({ error: "Failed to share graph" });
@@ -91,9 +80,9 @@ router.get("/share/:id", async (req, res) => {
       return res.status(404).json({ error: "Graph not found" });
     }
 
-    const filePath = path.join(SHARE_DIR, `${id}.json`);
-    const data = await fs.readFile(filePath, "utf-8");
-    res.json(JSON.parse(data));
+    const data = await getStore().getShare(id);
+    if (!data) return res.status(404).json({ error: "Graph not found" });
+    res.json(data);
   } catch {
     res.status(404).json({ error: "Graph not found" });
   }

@@ -21,7 +21,9 @@ Node.js, Express 5, CommonJS.
 - `node server.js` (порт `PORT`, по умолчанию 3001; проверка — `/api/health`).
   Ключи моделей и подключение к Postgres — в `.env` (в git не попадает).
 - `npm test` — тесты разбора шага на подставных ответах модели
-  (`test/`, node:test). Линтера нет; минимум для остального — модуль
+  (`test/`, node:test). Тесты хранилища графов на PostgreSQL — с
+  `TEST_DATABASE_URL` (тестовая база, не боевая: тесты чистят `app.*`); без
+  неё — только на файлах. Линтера нет; минимум для остального — модуль
   загружается: `node -e "require('./routes/step/build.js')"`.
 - Промпты обобщения и разбор шага проверяй скиллом `prompt-check`
   (`.claude/skills/prompt-check/`): `--dry` бесплатно, живой прогон — по
@@ -54,9 +56,15 @@ Node.js, Express 5, CommonJS.
   блоках обобщения v4 (`utils/searchHints.js`) выключает
   `STEP_SEARCH_HINTS=off`.
 - `routes/sources/utils/openai.js` — единый транспорт к моделям (`MODELS.md`).
-- `routes/graph-files/` — файлы графов и данные рядом с ними (закладки,
-  история, расчёты баланса, идентификаторы) в `data/<вид>/<граф>.json`;
-  `data/` не в git.
+- `routes/graph-files/` — библиотека графов и данные рядом с ними (закладки,
+  история, расчёты баланса, идентификаторы), снимки «Поделиться», шаблон
+  промпта — через хранилище `routes/graph-files/store/`: файлы
+  `data/<вид>/<граф>.json` (по умолчанию) или PostgreSQL (`GRAPH_STORE=pg`,
+  схема `app`). `data/` не в git.
+- `db/` — PostgreSQL: подключение (`pool.js`, те же `DB_*`), миграции
+  `db/migrations/NNN_*.sql` (`npm run pg:migrate`), перенос библиотеки
+  файлы ⇄ база (`graphTransfer.js`, `scripts/migrate-graphs-to-pg.js`,
+  `scripts/export-graphs-from-pg.js`).
 - `routes/industry/` — справочники и идентификация продуктов
   (`IDENTIFICATION.md`); коды ОКПД2/ТН ВЭД моделью по файлам `reference/`
   — `codes.js` (`/graphs/gpt/product-codes`, сохранённые — в

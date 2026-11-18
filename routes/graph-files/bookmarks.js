@@ -12,38 +12,20 @@
 
 const express = require("express");
 
-const {
-  BOOKMARKS_DIR,
-  sidecarPath,
-  readJson,
-  writeJson,
-  resolveGraph,
-} = require("./utils");
+const { resolveGraph } = require("./utils");
+const { getStore } = require("./store");
 
 const router = express.Router();
 
 /** Тип узла, на который указывает закладка: от него зависит иконка в панели. */
 const KINDS = new Set(["product", "transformation"]);
 
-async function readBookmarks(fileName) {
-  const stored = await readJson(sidecarPath(BOOKMARKS_DIR, fileName));
-  return Array.isArray(stored?.items) ? stored.items : [];
-}
-
-async function writeBookmarks(fileName, items) {
-  await writeJson(sidecarPath(BOOKMARKS_DIR, fileName), {
-    graphId: fileName,
-    updatedAt: new Date().toISOString(),
-    items,
-  });
-}
-
 router.get("/:id/bookmarks", async (req, res) => {
   try {
     const fileName = await resolveGraph(req, res);
     if (!fileName) return;
 
-    res.json({ success: true, data: await readBookmarks(fileName) });
+    res.json({ success: true, data: await getStore().listBookmarks(fileName) });
   } catch (e) {
     console.error("List bookmarks error:", e);
     res.status(500).json({ error: "Failed to read bookmarks" });
@@ -72,35 +54,17 @@ router.put("/:id/bookmarks/:nodeId", async (req, res) => {
         .json({ error: `kind must be one of: ${[...KINDS].join(", ")}` });
     }
 
-    const items = await readBookmarks(fileName);
-    const existing = items.find((b) => b.nodeId === nodeId);
-
-    if (existing) {
-      // Правка существующей закладки: пришедшие поля меняем, остальные (и, что
-      // важно, createdAt) оставляем — иначе список перетасовывается на каждой
-      // правке заметки.
-      if (label !== undefined) existing.label = label;
-      if (note !== undefined) existing.note = note;
-      if (kind !== undefined) existing.kind = kind;
-
-      await writeBookmarks(fileName, items);
-      return res.json({ success: true, data: existing });
-    }
-
-    const created = {
-      graphId: fileName,
+    // Правка существующей закладки меняет только пришедшие поля (и не
+    // createdAt) — иначе список перетасовывается на каждой правке заметки.
+    const { item, created } = await getStore().upsertBookmark(
+      fileName,
       nodeId,
-      label: label ?? "",
-      kind: kind ?? "product",
-      note: note ?? "",
-      createdAt: new Date().toISOString(),
-    };
+      { label, kind, note },
+      { actor: req.actor ?? null },
+    );
+    if (!created) return res.json({ success: true, data: item });
 
-    // Свежие — первыми, как в панели закладок на клиенте.
-    items.unshift(created);
-    await writeBookmarks(fileName, items);
-
-    res.status(201).json({ success: true, data: created });
+    res.status(201).json({ success: true, data: item });
   } catch (e) {
     console.error("Save bookmark error:", e);
     res.status(500).json({ error: "Failed to save bookmark" });
@@ -113,14 +77,9 @@ router.delete("/:id/bookmarks/:nodeId", async (req, res) => {
     if (!fileName) return;
 
     const nodeId = String(req.params.nodeId || "").trim();
-    const items = await readBookmarks(fileName);
-    const rest = items.filter((b) => b.nodeId !== nodeId);
-
-    if (rest.length === items.length) {
+    if (!(await getStore().deleteBookmark(fileName, nodeId))) {
       return res.status(404).json({ error: "Bookmark not found" });
     }
-
-    await writeBookmarks(fileName, rest);
     res.status(204).end();
   } catch (e) {
     console.error("Delete bookmark error:", e);
