@@ -42,16 +42,16 @@ function transformationEnds(nodeObj, chainObj) {
 }
 
 /** Готовый расчёт баланса с тем же сырьём и продуктами — самый свежий. */
-function readyBalance(transformation, inputs, outputs) {
+async function readyBalance(transformation, inputs, outputs) {
   try {
-    const { exact, similar } = balanceStore.lookup({ transformation, inputs, targets: outputs });
+    const { exact, similar } = await balanceStore.lookup({ transformation, inputs, targets: outputs });
     const want = new Set(outputs.map(norm));
     const pick =
       exact ||
       (similar || []).find(
         (s) => s.kind === "transformation" && (s.targets || []).every((t) => want.has(norm(t))),
       );
-    return pick ? balanceStore.get(pick.id) : null;
+    return pick ? await balanceStore.get(pick.id) : null;
   } catch (e) {
     console.warn("[fill-card] база расчётов баланса недоступна:", e.message);
     return null;
@@ -79,7 +79,7 @@ function balanceText(r) {
  * Возвращает { block, instruction }: block — в конец входных данных
  * (пусто — данных нет), instruction — в системный промпт.
  */
-function knownTransformationData(nodeObj, chainObj) {
+async function knownTransformationData(nodeObj, chainObj) {
   const transformation = String(nodeObj?.data?.label || "").trim();
   const { inputs, outputs } = transformationEnds(nodeObj, chainObj);
   const none = {
@@ -91,11 +91,13 @@ function knownTransformationData(nodeObj, chainObj) {
 
   let local = [];
   try {
-    local = findLocalSources({ inputs: inputs.map((name) => ({ name })), targets: outputs.map((name) => ({ name })) }).slice(0, MAX_SECTIONS);
+    local = (
+      await findLocalSources({ inputs: inputs.map((name) => ({ name })), targets: outputs.map((name) => ({ name })) })
+    ).slice(0, MAX_SECTIONS);
   } catch (e) {
     console.warn("[fill-card] база источников недоступна:", e.message);
   }
-  const ready = readyBalance(transformation, inputs, outputs);
+  const ready = await readyBalance(transformation, inputs, outputs);
   if (!local.length && !ready) return none;
 
   const parts = [

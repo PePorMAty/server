@@ -15,6 +15,10 @@
 //                    web_sources: найденное моделью раньше — с 2026-10-29
 //                    не пишется и не отдаётся, см. purgeWebSources);
 //   files/<sha256>.pdf — сами документы, чтобы открыть раздел на странице.
+//
+// С SOURCES_STORE=pg (этап 2 PG-MIGRATION.md) документы, разделы и связи —
+// в PostgreSQL (схема app), PDF — по-прежнему в files/. SQL один на обе базы
+// (db/sql.js), поэтому функции с базой — асинхронные.
 
 const fs = require("fs");
 const path = require("path");
@@ -26,6 +30,8 @@ const { extractPdf } = require("./pdf");
 const { buildUnits, documentTitles, isServiceSection, productsFromTitle } = require("./structure");
 const { productKey } = require("./query");
 const { isProspectiveSection } = require("./prospective");
+const { sqliteConn, pgConn, marks } = require("../../../db/sql");
+const { sourcesStoreKind, sourcesPool } = require("../../../db/sourcesDb");
 
 const DEFAULT_DIR = path.resolve(__dirname, "../../../data/local-sources");
 
@@ -62,13 +68,15 @@ const QUALIFIER =
 const GREEK = new Set(["альф", "бет", "гамм", "дельт", "омег"]);
 
 let db = null;
-let openedDir = null;
+/** Открытая база: { dir | pool, conn: промис адаптера db/sql.js }. */
+let opened = null;
 
 function columns(conn, table) {
   return new Set(conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
 }
 
-function migrate(conn) {
+/** Таблицы SQLite (в PostgreSQL их создаёт миграция db/migrations/002_sources.sql). */
+function createSqliteTables(conn) {
   conn.exec(`
     -- AUTOINCREMENT: номер удалённого документа не достаётся новому. Ссылка
     -- на PDF в сохранённом графе иначе молча открыла бы чужой документ.
@@ -151,98 +159,143 @@ function migrate(conn) {
   add("provider", "TEXT");
   add("model", "TEXT");
   add("parsed_at", "TEXT");
+  conn.exec("CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT)");
+}
 
+/** Служебные отметки базы: в SQLite — meta, в PostgreSQL — app.sources_meta. */
+const metaTable = (conn) => (conn.dialect === "pg" ? "sources_meta" : "meta");
+
+async function getMeta(conn, name) {
+  return (await conn.get(`SELECT value FROM ${metaTable(conn)} WHERE name = ?`, name))?.value;
+}
+
+async function setMeta(conn, name, value) {
+  await conn.run(
+    `INSERT INTO ${metaTable(conn)} (name, value) VALUES (?, ?)
+     ON CONFLICT (name) DO UPDATE SET value = excluded.value`,
+    name,
+    String(value),
+  );
+}
+
+/** Удалить разделы (и их связи) разом — разовые чистки базы. */
+async function dropSections(t, ids) {
+  for (const id of ids) {
+    await t.run("DELETE FROM section_products WHERE section_id = ?", id);
+    await t.run("DELETE FROM sections WHERE id = ?", id);
+  }
+}
+
+/**
+ * Разовые пересчёты и чистки при открытии базы — в обеих базах одинаково.
+ */
+async function upkeep(conn) {
   // Ключи продуктов считаются кодом (nameKeys). Поменялся расчёт — пересчитать
   // связи из сохранённых названий, иначе старые разделы перестали бы
   // находиться.
-  conn.exec("CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT)");
-  const version = conn.prepare("SELECT value FROM meta WHERE name = 'keys_version'").get()?.value;
-  if (Number(version) !== KEYS_VERSION) {
-    conn.transaction(() => {
+  if (Number(await getMeta(conn, "keys_version")) !== KEYS_VERSION) {
+    await conn.tx(async (t) => {
       // В прежнем порядке: модель пишет целевой продукт первым.
-      const links = conn
-        .prepare(
-          `SELECT section_id, label, role, origin FROM section_products
-           GROUP BY section_id, label, role, origin ORDER BY MIN(rowid)`,
-        )
-        .all();
-      conn.exec("DELETE FROM section_products");
-      for (const l of links) linkSection(conn, l.section_id, [l.label], l.role, l.origin);
-      conn
-        .prepare("INSERT OR REPLACE INTO meta (name, value) VALUES ('keys_version', ?)")
-        .run(String(KEYS_VERSION));
-    })();
+      const links = await t.all(
+        `SELECT section_id, label, role, origin FROM section_products
+         GROUP BY section_id, label, role, origin ORDER BY MIN(${t.rowid})`,
+      );
+      await t.run("DELETE FROM section_products");
+      for (const l of links) await linkSection(t, l.section_id, [l.label], l.role, l.origin);
+      await setMeta(t, "keys_version", KEYS_VERSION);
+    });
   }
 
   // Разделы о перспективных технологиях больше не источник (prospective.js):
   // записанные раньше удаляем один раз, новые writeSections не записывает.
-  const swept = conn.prepare("SELECT value FROM meta WHERE name = 'prospective_removed'").get();
-  if (!swept) {
-    conn.transaction(() => {
-      const ids = conn
-        .prepare("SELECT id, path, title, full_title FROM sections")
-        .all()
+  if ((await getMeta(conn, "prospective_removed")) === undefined) {
+    await conn.tx(async (t) => {
+      const ids = (await t.all("SELECT id, path, title, full_title FROM sections"))
         .filter((r) => isProspectiveSection(r.path, r.full_title || r.title))
         .map((r) => r.id);
-      const dropLinks = conn.prepare("DELETE FROM section_products WHERE section_id = ?");
-      const dropSection = conn.prepare("DELETE FROM sections WHERE id = ?");
-      for (const id of ids) {
-        dropLinks.run(id);
-        dropSection.run(id);
-      }
-      conn
-        .prepare("INSERT OR REPLACE INTO meta (name, value) VALUES ('prospective_removed', ?)")
-        .run(String(ids.length));
+      await dropSections(t, ids);
+      await setMeta(t, "prospective_removed", ids.length);
       if (ids.length) {
         console.log(`[local-sources] удалены разделы о перспективных технологиях: ${ids.length}`);
       }
-    })();
+    });
   }
 
   // Служебные разделы (structure.js, isServiceSection) — тоже не источник:
   // записанные раньше удаляем один раз, новые writeSections не записывает.
-  const serviceSwept = conn.prepare("SELECT value FROM meta WHERE name = 'service_removed'").get();
-  if (!serviceSwept) {
-    conn.transaction(() => {
-      const ids = conn
-        .prepare("SELECT id, path, title, full_title FROM sections")
-        .all()
+  if ((await getMeta(conn, "service_removed")) === undefined) {
+    await conn.tx(async (t) => {
+      const ids = (await t.all("SELECT id, path, title, full_title FROM sections"))
         .filter((r) => isServiceSection({ title: r.title, fullTitle: r.full_title, path: r.path }))
         .map((r) => r.id);
-      const dropLinks = conn.prepare("DELETE FROM section_products WHERE section_id = ?");
-      const dropSection = conn.prepare("DELETE FROM sections WHERE id = ?");
-      for (const id of ids) {
-        dropLinks.run(id);
-        dropSection.run(id);
-      }
-      conn
-        .prepare("INSERT OR REPLACE INTO meta (name, value) VALUES ('service_removed', ?)")
-        .run(String(ids.length));
+      await dropSections(t, ids);
+      await setMeta(t, "service_removed", ids.length);
       if (ids.length) console.log(`[local-sources] удалены служебные разделы: ${ids.length}`);
-    })();
+    });
   }
 }
 
-/** Открыть базу (создать при первом обращении). */
-function getDb() {
-  const dir = baseDir();
-  if (db && openedDir === dir) return db;
-  if (db) {
-    db.close();
-    db = null;
+/**
+ * Открыть базу (создать при первом обращении): SQLite в baseDir() или
+ * PostgreSQL (SOURCES_STORE=pg, db/sourcesDb.js). Возвращает адаптер
+ * db/sql.js.
+ */
+function getConn() {
+  if (sourcesStoreKind() === "pg") {
+    const pool = sourcesPool();
+    if (opened?.pool === pool) return opened.conn;
+    closeSqlite();
+    const conn = pgConn(pool);
+    opened = { pool, conn: upkeep(conn).then(() => conn) };
+    // Базы нет или таблиц нет (не выполнен pg:migrate) — повторить при
+    // следующем обращении, а не отдавать ту же ошибку до перезапуска.
+    opened.conn.catch(() => {
+      if (opened?.pool === pool) opened = null;
+    });
+    return opened.conn;
   }
+  const dir = baseDir();
+  if (opened?.dir === dir) return opened.conn;
+  closeSqlite();
   fs.mkdirSync(path.join(dir, "files"), { recursive: true });
   // Модуль требуем лениво: без базы источников сервер обязан подниматься.
   const Database = require("better-sqlite3");
-  const conn = new Database(path.join(dir, "sources.sqlite"));
+  const raw = new Database(path.join(dir, "sources.sqlite"));
   // WAL: скрипт загрузки и сервер пишут в одну базу, не мешая друг другу.
-  conn.pragma("journal_mode = WAL");
-  conn.pragma("busy_timeout = 5000");
-  conn.pragma("foreign_keys = ON");
-  migrate(conn);
-  db = conn;
-  openedDir = dir;
-  return db;
+  raw.pragma("journal_mode = WAL");
+  raw.pragma("busy_timeout = 5000");
+  raw.pragma("foreign_keys = ON");
+  createSqliteTables(raw);
+  db = raw;
+  const conn = sqliteConn(raw);
+  opened = { dir, conn: upkeep(conn).then(() => conn) };
+  // Пересчёт при открытии упал — следующее обращение откроет базу заново,
+  // а не будет вечно отдавать ту же ошибку.
+  opened.conn.catch(() => {
+    if (opened?.dir === dir) closeSqlite();
+  });
+  return opened.conn;
+}
+
+function closeSqlite() {
+  if (db) db.close();
+  db = null;
+  opened = null;
+}
+
+/**
+ * Файл SQLite базы в каталоге dir — отдельно от открытой сервером
+ * (перенос в PostgreSQL и обратно): таблицы, разовые пересчёты.
+ * Возвращает { conn, raw }; закрыть — raw.close().
+ */
+async function openSqliteAt(file) {
+  const Database = require("better-sqlite3");
+  const raw = new Database(file);
+  raw.pragma("foreign_keys = ON");
+  createSqliteTables(raw);
+  const conn = sqliteConn(raw);
+  await upkeep(conn);
+  return { conn, raw };
 }
 
 function filePath(sha256) {
@@ -343,25 +396,23 @@ function misfiled(name, role) {
  *   intermediate — промежуточный поток: получают и тут же перерабатывают.
  * Отходы и катализаторы от модели (misfiled) не связываются.
  */
-function linkSection(conn, sectionId, names, role, origin) {
+async function linkSection(conn, sectionId, names, role, origin) {
   const dirs =
     role === "raw" ? ["down"] : role === "intermediate" ? ["up", "down"] : ["up"];
   // Связь из заголовка уступает связи от модели: у модели название в
   // именительном падеже («Этилен»), у заголовка — как в тексте («этилена»).
   // Между связями одного происхождения первая остаётся (целевой продукт
   // пишется раньше попутного).
-  const stmt = conn.prepare(
-    `INSERT INTO section_products (section_id, key, label, direction, role, origin)
+  const sql = `INSERT INTO section_products (section_id, key, label, direction, role, origin)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT (section_id, key, direction) DO UPDATE SET
        label = excluded.label, role = excluded.role, origin = excluded.origin
-     WHERE section_products.origin = 'title' AND excluded.origin = 'model'`,
-  );
+     WHERE section_products.origin = 'title' AND excluded.origin = 'model'`;
   for (const name of names) {
     const label = String(name || "").trim();
     if (!label || (origin === "model" && misfiled(label, role))) continue;
     for (const key of nameKeys(label)) {
-      for (const dir of dirs) stmt.run(sectionId, key, label, dir, role, origin);
+      for (const dir of dirs) await conn.run(sql, sectionId, key, label, dir, role, origin);
     }
   }
 }
@@ -393,9 +444,10 @@ function editionOf(shortTitle) {
  * Новее — с большим годом; если год есть не у обоих (черновик «202_»), —
  * загруженный позже.
  */
-function supersededDocs(conn = getDb()) {
+async function supersededDocs(conn) {
+  conn = conn || (await getConn());
   const bySeries = new Map();
-  for (const d of conn.prepare("SELECT id, title, short_title, added_at FROM documents").all()) {
+  for (const d of await conn.all("SELECT id, title, short_title, added_at FROM documents")) {
     const e = editionOf(d.short_title);
     if (!e) continue;
     if (!bySeries.has(e.series)) bySeries.set(e.series, []);
@@ -441,29 +493,28 @@ function docRow(d, superseded = new Map()) {
   };
 }
 
+// CAST: PostgreSQL отдаёт COUNT как bigint — драйвер вернул бы строку.
 const DOC_SELECT = `
   SELECT d.*,
-    (SELECT COUNT(*) FROM sections s WHERE s.doc_id = d.id) AS s_total,
-    (SELECT COUNT(*) FROM sections s WHERE s.doc_id = d.id AND s.status = 'done') AS s_done,
-    (SELECT COUNT(*) FROM sections s WHERE s.doc_id = d.id AND s.status = 'failed') AS s_failed,
-    (SELECT COUNT(*) FROM sections s WHERE s.doc_id = d.id AND s.status = 'pending') AS s_pending,
-    (SELECT COUNT(*) FROM sections s WHERE s.doc_id = d.id AND s.status = 'working') AS s_working
+    (SELECT CAST(COUNT(*) AS INTEGER) FROM sections s WHERE s.doc_id = d.id) AS s_total,
+    (SELECT CAST(COUNT(*) AS INTEGER) FROM sections s WHERE s.doc_id = d.id AND s.status = 'done') AS s_done,
+    (SELECT CAST(COUNT(*) AS INTEGER) FROM sections s WHERE s.doc_id = d.id AND s.status = 'failed') AS s_failed,
+    (SELECT CAST(COUNT(*) AS INTEGER) FROM sections s WHERE s.doc_id = d.id AND s.status = 'pending') AS s_pending,
+    (SELECT CAST(COUNT(*) AS INTEGER) FROM sections s WHERE s.doc_id = d.id AND s.status = 'working') AS s_working
   FROM documents d`;
 
 /** Разделы документа из текста: удалить прежние, записать новые (к разбору). */
-function writeSections(conn, docId, units) {
-  conn.prepare("DELETE FROM sections WHERE doc_id = ?").run(docId);
-  const insert = conn.prepare(
-    `INSERT INTO sections (doc_id, ord, number, title, full_title, path, page_from, page_to, text, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-  );
+async function writeSections(conn, docId, units) {
+  await conn.run("DELETE FROM sections WHERE doc_id = ?", docId);
   for (const u of units) {
     // Перспективные технологии — не источник (prospective.js): не записываем
     // и, значит, не разбираем.
     if (isProspectiveSection(u.path, u.fullTitle || u.title)) continue;
     // Служебные разделы — краткое содержание, обзор отрасли, приложения.
     if (isServiceSection(u)) continue;
-    const id = insert.run(
+    const id = await conn.insert(
+      `INSERT INTO sections (doc_id, ord, number, title, full_title, path, page_from, page_to, text, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
       docId,
       u.ord,
       u.number,
@@ -473,10 +524,10 @@ function writeSections(conn, docId, units) {
       u.pageFrom,
       u.pageTo,
       u.text,
-    ).lastInsertRowid;
+    );
     // Пока модель раздел не разобрала, продукт из заголовка «Производство
     // X» уже знаем: раздел — источник для X «вверх».
-    linkSection(conn, Number(id), u.titleProducts || [], "product", "title");
+    await linkSection(conn, id, u.titleProducts || [], "product", "title");
   }
 }
 
@@ -510,9 +561,9 @@ async function addDocument(
   buf,
   { fileName = "document.pdf", via = "ui", provider = null, model = null } = {},
 ) {
-  const conn = getDb();
+  const conn = await getConn();
   const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
-  const existing = conn.prepare(`${DOC_SELECT} WHERE d.sha256 = ?`).get(sha256);
+  const existing = await conn.get(`${DOC_SELECT} WHERE d.sha256 = ?`, sha256);
   if (existing) {
     return { document: docRow(existing), duplicate: true, warnings: [] };
   }
@@ -533,38 +584,33 @@ async function addDocument(
 
   fs.writeFileSync(filePath(sha256), buf);
   const now = new Date().toISOString();
-  const docId = conn.transaction(() => {
-    const id = Number(
-      conn
-        .prepare(
-          `INSERT INTO documents (sha256, file_name, title, short_title, pages, textless, chars, bytes,
-             added_at, added_via, structure, page_offset, provider, model, parsed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          sha256,
-          fileName,
-          titles.title,
-          titles.short,
-          doc.pages.length,
-          doc.textlessPages.length,
-          chars,
-          buf.length,
-          now,
-          via,
-          structure,
-          offset,
-          provider,
-          model,
-          now,
-        ).lastInsertRowid,
+  const docId = await conn.tx(async (t) => {
+    const id = await t.insert(
+      `INSERT INTO documents (sha256, file_name, title, short_title, pages, textless, chars, bytes,
+         added_at, added_via, structure, page_offset, provider, model, parsed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sha256,
+      fileName,
+      titles.title,
+      titles.short,
+      doc.pages.length,
+      doc.textlessPages.length,
+      chars,
+      buf.length,
+      now,
+      via,
+      structure,
+      offset,
+      provider,
+      model,
+      now,
     );
-    writeSections(conn, id, units);
+    await writeSections(t, id, units);
     return id;
-  })();
+  });
 
   return {
-    document: docRow(conn.prepare(`${DOC_SELECT} WHERE d.id = ?`).get(docId)),
+    document: docRow(await conn.get(`${DOC_SELECT} WHERE d.id = ?`, docId)),
     duplicate: false,
     warnings,
   };
@@ -575,28 +621,30 @@ async function addDocument(
  * заново из сохранённого файла. Возвращает, сколько разобрано.
  */
 async function reparseLegacyDocuments() {
-  const conn = getDb();
-  const legacy = conn.prepare("SELECT * FROM documents WHERE parsed_at IS NULL").all();
+  const conn = await getConn();
+  const legacy = await conn.all("SELECT * FROM documents WHERE parsed_at IS NULL");
   let n = 0;
   for (const d of legacy) {
     try {
       const buf = fs.readFileSync(filePath(d.sha256));
       const { structure, offset, units, titles } = await parseDocument(buf, d.file_name);
-      conn.transaction(() => {
-        conn
-          .prepare(
-            `UPDATE documents SET title = ?, short_title = ?, structure = ?, page_offset = ?, parsed_at = ?
-             WHERE id = ?`,
-          )
-          .run(titles.title, titles.short, structure, offset, new Date().toISOString(), d.id);
-        writeSections(conn, d.id, units);
-      })();
+      await conn.tx(async (t) => {
+        await t.run(
+          `UPDATE documents SET title = ?, short_title = ?, structure = ?, page_offset = ?, parsed_at = ?
+           WHERE id = ?`,
+          titles.title,
+          titles.short,
+          structure,
+          offset,
+          new Date().toISOString(),
+          d.id,
+        );
+        await writeSections(t, d.id, units);
+      });
       n++;
     } catch (e) {
       console.error(`[local-sources] разбор «${d.file_name}» заново: ${e.message}`);
-      conn
-        .prepare("UPDATE documents SET parsed_at = ? WHERE id = ?")
-        .run(new Date().toISOString(), d.id);
+      await conn.run("UPDATE documents SET parsed_at = ? WHERE id = ?", new Date().toISOString(), d.id);
     }
   }
   return n;
@@ -610,83 +658,89 @@ async function reparseLegacyDocuments() {
  * запросу к модели на раздел. Возвращает { before, after, kept, structure }.
  */
 async function reparseDocument(id) {
-  const conn = getDb();
-  const d = conn.prepare("SELECT * FROM documents WHERE id = ?").get(id);
+  const conn = await getConn();
+  const d = await conn.get("SELECT * FROM documents WHERE id = ?", id);
   if (!d) return null;
-  const prev = conn
-    .prepare(
-      `SELECT id, title, text, status, summary, io, extracted, model, decoded_at
-       FROM sections WHERE doc_id = ?`,
-    )
-    .all(id);
-  const prevLinks = conn
-    .prepare(
-      `SELECT section_id, label, role FROM section_products
-       WHERE origin = 'model' AND section_id IN (SELECT id FROM sections WHERE doc_id = ?)
-       ORDER BY rowid`,
-    )
-    .all(id);
+  const prev = await conn.all(
+    `SELECT id, title, text, status, summary, io, extracted, model, decoded_at
+     FROM sections WHERE doc_id = ?`,
+    id,
+  );
+  const prevLinks = await conn.all(
+    `SELECT section_id, label, role FROM section_products
+     WHERE origin = 'model' AND section_id IN (SELECT id FROM sections WHERE doc_id = ?)
+     ORDER BY ${conn.rowid}`,
+    id,
+  );
   const buf = fs.readFileSync(filePath(d.sha256));
   const { structure, offset, units, titles } = await parseDocument(buf, d.file_name);
   let kept = 0;
-  conn.transaction(() => {
-    conn
-      .prepare(
-        "DELETE FROM section_products WHERE section_id IN (SELECT id FROM sections WHERE doc_id = ?)",
-      )
-      .run(id);
-    conn
-      .prepare(
-        `UPDATE documents SET title = ?, short_title = ?, structure = ?, page_offset = ?, parsed_at = ?
-         WHERE id = ?`,
-      )
-      .run(titles.title, titles.short, structure, offset, new Date().toISOString(), id);
-    writeSections(conn, id, units);
-    const keep = conn.prepare(
-      `UPDATE sections SET status = 'done', summary = ?, io = ?, extracted = ?, model = ?, decoded_at = ?
-       WHERE id = ?`,
+  await conn.tx(async (t) => {
+    await t.run(
+      "DELETE FROM section_products WHERE section_id IN (SELECT id FROM sections WHERE doc_id = ?)",
+      id,
     );
-    for (const f of conn.prepare("SELECT id, title, text FROM sections WHERE doc_id = ?").all(id)) {
+    await t.run(
+      `UPDATE documents SET title = ?, short_title = ?, structure = ?, page_offset = ?, parsed_at = ?
+       WHERE id = ?`,
+      titles.title,
+      titles.short,
+      structure,
+      offset,
+      new Date().toISOString(),
+      id,
+    );
+    await writeSections(t, id, units);
+    for (const f of await t.all("SELECT id, title, text FROM sections WHERE doc_id = ?", id)) {
       const old = prev.find((p) => p.status === "done" && p.title === f.title && p.text === f.text);
       if (!old) continue;
-      keep.run(old.summary, old.io, old.extracted, old.model, old.decoded_at, f.id);
-      for (const l of prevLinks) if (l.section_id === old.id) linkSection(conn, f.id, [l.label], l.role, "model");
+      await t.run(
+        `UPDATE sections SET status = 'done', summary = ?, io = ?, extracted = ?, model = ?, decoded_at = ?
+         WHERE id = ?`,
+        old.summary,
+        old.io,
+        old.extracted,
+        old.model,
+        old.decoded_at,
+        f.id,
+      );
+      for (const l of prevLinks) {
+        if (l.section_id === old.id) await linkSection(t, f.id, [l.label], l.role, "model");
+      }
       kept++;
     }
-  })();
-  const after = conn.prepare("SELECT COUNT(*) AS n FROM sections WHERE doc_id = ?").get(id).n;
+  });
+  const after = (await conn.get("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM sections WHERE doc_id = ?", id)).n;
   return { before: prev.length, after, kept, structure };
 }
 
 /** Все документы, новые сверху, со счётом разделов по состоянию разбора. */
-function listDocuments() {
-  const superseded = supersededDocs();
-  return getDb()
-    .prepare(`${DOC_SELECT} ORDER BY d.id DESC`)
-    .all()
-    .map((d) => docRow(d, superseded));
+async function listDocuments() {
+  const conn = await getConn();
+  const superseded = await supersededDocs(conn);
+  return (await conn.all(`${DOC_SELECT} ORDER BY d.id DESC`)).map((d) => docRow(d, superseded));
 }
 
 /** Документ по id с путём к файлу, или null. */
-function getDocument(id) {
-  const d = getDb().prepare(`${DOC_SELECT} WHERE d.id = ?`).get(id);
-  return d ? { ...docRow(d, supersededDocs()), filePath: filePath(d.sha256) } : null;
+async function getDocument(id) {
+  const conn = await getConn();
+  const d = await conn.get(`${DOC_SELECT} WHERE d.id = ?`, id);
+  return d ? { ...docRow(d, await supersededDocs(conn)), filePath: filePath(d.sha256) } : null;
 }
 
 /** Удалить документ, его разделы и файл. Возвращает true, если было что удалять. */
-function deleteDocument(id) {
-  const conn = getDb();
-  const d = conn.prepare("SELECT * FROM documents WHERE id = ?").get(id);
+async function deleteDocument(id) {
+  const conn = await getConn();
+  const d = await conn.get("SELECT * FROM documents WHERE id = ?", id);
   if (!d) return false;
-  conn.transaction(() => {
-    conn
-      .prepare(
-        "DELETE FROM section_products WHERE section_id IN (SELECT id FROM sections WHERE doc_id = ?)",
-      )
-      .run(id);
-    conn.prepare("DELETE FROM sections WHERE doc_id = ?").run(id);
-    conn.prepare("DELETE FROM documents WHERE id = ?").run(id);
-  })();
+  await conn.tx(async (t) => {
+    await t.run(
+      "DELETE FROM section_products WHERE section_id IN (SELECT id FROM sections WHERE doc_id = ?)",
+      id,
+    );
+    await t.run("DELETE FROM sections WHERE doc_id = ?", id);
+    await t.run("DELETE FROM documents WHERE id = ?", id);
+  });
   fs.rmSync(filePath(d.sha256), { force: true });
   return true;
 }
@@ -717,18 +771,17 @@ function titleLabel(label) {
 }
 
 /** Разделы документа с их продуктами — для списка в интерфейсе. */
-function listSections(docId) {
-  const conn = getDb();
-  const doc = conn.prepare("SELECT page_offset FROM documents WHERE id = ?").get(docId);
+async function listSections(docId) {
+  const conn = await getConn();
+  const doc = await conn.get("SELECT page_offset FROM documents WHERE id = ?", docId);
   if (!doc) return null;
-  const links = conn
-    .prepare(
-      `SELECT sp.section_id, sp.label, sp.role, sp.origin
-       FROM section_products sp JOIN sections s ON s.id = sp.section_id
-       WHERE s.doc_id = ?
-       ORDER BY sp.rowid`,
-    )
-    .all(docId);
+  const links = await conn.all(
+    `SELECT sp.section_id, sp.label, sp.role, sp.origin
+     FROM section_products sp JOIN sections s ON s.id = sp.section_id
+     WHERE s.doc_id = ?
+     ORDER BY sp.${conn.rowid}`,
+    docId,
+  );
   // Названия — от модели; пока модель раздел не разобрала — из заголовка.
   const byId = new Map();
   for (const l of links) {
@@ -743,53 +796,52 @@ function listSections(docId) {
     const fromModel = [...e.model.values()].some((s) => s.size);
     return [...((fromModel ? e.model : e.title).get(role) ?? [])];
   };
-  return conn
-    .prepare(
-      `SELECT id, ord, number, title, full_title, path, page_from, page_to, status, summary,
-              extracted, model, error, decoded_at, length(text) AS chars
-       FROM sections WHERE doc_id = ? ORDER BY ord`,
-    )
-    .all(docId)
-    .map((s) => {
-      let extra = {};
-      try {
-        extra = JSON.parse(s.extracted || "{}") || {};
-      } catch {
-        // старый или битый разбор — без вспомогательного и отходов
-      }
-      const list = (v) => (Array.isArray(v) ? v.map(String) : []);
-      const made = [...names(s.id, "product"), ...names(s.id, "byproduct")];
-      const intermediates = names(s.id, "intermediate");
-      const raw = names(s.id, "raw");
-      return {
-        id: s.id,
-        number: s.number,
-        title: s.full_title || s.title,
-        path: s.path,
-        pageFrom: s.page_from,
-        pageTo: s.page_to,
-        pages: pageLabel(s.page_from, s.page_to, doc.page_offset),
-        chars: s.chars,
-        status: s.status,
-        summary: s.summary,
-        model: s.model,
-        error: s.error,
-        decodedAt: s.decoded_at,
-        // Что раздел знает о веществах. Связаны с продуктами (источник
-        // «вверх» для получаемых, «вниз» для сырья) первые четыре списка.
-        products: {
-          products: names(s.id, "product"),
-          byproducts: names(s.id, "byproduct"),
-          intermediates,
-          raw,
-          auxiliaries: list(extra.auxiliaries),
-          wastes: list(extra.wastes),
-          // Как раньше, по направлениям — для клиента, ещё не обновлённого.
-          up: [...made, ...intermediates],
-          down: [...intermediates, ...raw],
-        },
-      };
-    });
+  const rows = await conn.all(
+    `SELECT id, ord, number, title, full_title, path, page_from, page_to, status, summary,
+            extracted, model, error, decoded_at, length(sections.text) AS chars
+     FROM sections WHERE doc_id = ? ORDER BY ord`,
+    docId,
+  );
+  return rows.map((s) => {
+    let extra = {};
+    try {
+      extra = JSON.parse(s.extracted || "{}") || {};
+    } catch {
+      // старый или битый разбор — без вспомогательного и отходов
+    }
+    const list = (v) => (Array.isArray(v) ? v.map(String) : []);
+    const made = [...names(s.id, "product"), ...names(s.id, "byproduct")];
+    const intermediates = names(s.id, "intermediate");
+    const raw = names(s.id, "raw");
+    return {
+      id: s.id,
+      number: s.number,
+      title: s.full_title || s.title,
+      path: s.path,
+      pageFrom: s.page_from,
+      pageTo: s.page_to,
+      pages: pageLabel(s.page_from, s.page_to, doc.page_offset),
+      chars: s.chars,
+      status: s.status,
+      summary: s.summary,
+      model: s.model,
+      error: s.error,
+      decodedAt: s.decoded_at,
+      // Что раздел знает о веществах. Связаны с продуктами (источник
+      // «вверх» для получаемых, «вниз» для сырья) первые четыре списка.
+      products: {
+        products: names(s.id, "product"),
+        byproducts: names(s.id, "byproduct"),
+        intermediates,
+        raw,
+        auxiliaries: list(extra.auxiliaries),
+        wastes: list(extra.wastes),
+        // Как раньше, по направлениям — для клиента, ещё не обновлённого.
+        up: [...made, ...intermediates],
+        down: [...intermediates, ...raw],
+      },
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -800,18 +852,23 @@ function listSections(docId) {
  * Взять следующий раздел в разбор. Атомарно: скрипт загрузки и сервер
  * могут разбирать одновременно и не возьмут один раздел дважды.
  */
-function claimSection(worker = process.pid) {
-  const conn = getDb();
-  const row = conn
-    .prepare(
-      `UPDATE sections
-       SET status = 'working', claimed_by = ?, claimed_at = ?, attempts = attempts + 1
-       WHERE id = (SELECT id FROM sections WHERE status = 'pending' ORDER BY doc_id, ord LIMIT 1)
-       RETURNING *`,
-    )
-    .get(worker, new Date().toISOString());
+async function claimSection(worker = process.pid) {
+  const conn = await getConn();
+  // В PostgreSQL два разборщика иначе могли бы выбрать одну строку и оба её
+  // обновить: SKIP LOCKED пропускает строку, которую уже берут, а повторная
+  // проверка status — ту, что взяли, пока мы ждали.
+  const skipLocked = conn.dialect === "pg" ? "FOR UPDATE SKIP LOCKED" : "";
+  const row = await conn.get(
+    `UPDATE sections
+     SET status = 'working', claimed_by = ?, claimed_at = ?, attempts = attempts + 1
+     WHERE id = (SELECT id FROM sections WHERE status = 'pending' ORDER BY doc_id, ord LIMIT 1 ${skipLocked})
+       AND status = 'pending'
+     RETURNING *`,
+    worker,
+    new Date().toISOString(),
+  );
   if (!row) return null;
-  const doc = conn.prepare("SELECT * FROM documents WHERE id = ?").get(row.doc_id);
+  const doc = await conn.get("SELECT * FROM documents WHERE id = ?", row.doc_id);
   return { section: row, document: doc };
 }
 
@@ -857,73 +914,72 @@ function assignRoles(result) {
  * Вспомогательное (катализаторы, растворители, пар) и отходы с продуктами не
  * связываются, но у раздела их видно (в extracted).
  */
-function finishSection(id, result, model) {
-  const conn = getDb();
+async function finishSection(id, result, model) {
+  const conn = await getConn();
   const roles = assignRoles(result);
   const extracted = {
     ...(result.extracted || {}),
     auxiliaries: roles.auxiliaries,
     wastes: roles.wastes,
   };
-  conn.transaction(() => {
-    const updated = conn
-      .prepare(
-        `UPDATE sections SET status = 'done', summary = ?, io = ?, extracted = ?, model = ?,
-           error = NULL, decoded_at = ?, claimed_by = NULL
-         WHERE id = ?`,
-      )
-      .run(
-        result.summary,
-        JSON.stringify(result.io || []),
-        JSON.stringify(extracted),
-        model || null,
-        new Date().toISOString(),
-        id,
-      );
+  await conn.tx(async (t) => {
+    const updated = await t.run(
+      `UPDATE sections SET status = 'done', summary = ?, io = ?, extracted = ?, model = ?,
+         error = NULL, decoded_at = ?, claimed_by = NULL
+       WHERE id = ?`,
+      result.summary,
+      JSON.stringify(result.io || []),
+      JSON.stringify(extracted),
+      model || null,
+      new Date().toISOString(),
+      id,
+    );
     // Раздел удалили, пока модель его разбирала (документ удалён, раздел о
     // перспективных технологиях вычищен) — связывать не с чем.
     if (!updated.changes) return;
-    conn.prepare("DELETE FROM section_products WHERE section_id = ? AND origin = 'model'").run(id);
-    linkSection(conn, id, roles.products, "product", "model");
-    linkSection(conn, id, roles.byproducts, "byproduct", "model");
-    linkSection(conn, id, roles.intermediates, "intermediate", "model");
-    linkSection(conn, id, roles.raw, "raw", "model");
-  })();
+    await t.run("DELETE FROM section_products WHERE section_id = ? AND origin = 'model'", id);
+    await linkSection(t, id, roles.products, "product", "model");
+    await linkSection(t, id, roles.byproducts, "byproduct", "model");
+    await linkSection(t, id, roles.intermediates, "intermediate", "model");
+    await linkSection(t, id, roles.raw, "raw", "model");
+  });
 }
 
-function failSection(id, message) {
-  getDb()
-    .prepare(
-      "UPDATE sections SET status = 'failed', error = ?, claimed_by = NULL WHERE id = ?",
-    )
-    .run(String(message || "ошибка").slice(0, 1000), id);
+async function failSection(id, message) {
+  await (await getConn()).run(
+    "UPDATE sections SET status = 'failed', error = ?, claimed_by = NULL WHERE id = ?",
+    String(message || "ошибка").slice(0, 1000),
+    id,
+  );
 }
 
 /** Разобрать заново: упавшие или все разделы документа. */
-function requeue(docId, { only = "failed", provider, model } = {}) {
-  const conn = getDb();
+async function requeue(docId, { only = "failed", provider, model } = {}) {
+  const conn = await getConn();
   if (provider !== undefined || model !== undefined) {
-    conn
-      .prepare("UPDATE documents SET provider = COALESCE(?, provider), model = COALESCE(?, model) WHERE id = ?")
-      .run(provider || null, model || null, docId);
+    await conn.run(
+      "UPDATE documents SET provider = COALESCE(?, provider), model = COALESCE(?, model) WHERE id = ?",
+      provider || null,
+      model || null,
+      docId,
+    );
   }
   const where = only === "all" ? "status IN ('done', 'failed')" : "status = 'failed'";
-  return conn
-    .prepare(
+  return (
+    await conn.run(
       `UPDATE sections SET status = 'pending', error = NULL, attempts = 0 WHERE doc_id = ? AND ${where}`,
+      docId,
     )
-    .run(docId).changes;
+  ).changes;
 }
 
 /**
  * Разделы «в работе», чей разбор умер вместе с процессом (перезапуск
  * сервера, прерванный скрипт), — снова в очередь.
  */
-function resetStale() {
-  const conn = getDb();
-  const rows = conn
-    .prepare("SELECT id, claimed_by, claimed_at FROM sections WHERE status = 'working'")
-    .all();
+async function resetStale() {
+  const conn = await getConn();
+  const rows = await conn.all("SELECT id, claimed_by, claimed_at FROM sections WHERE status = 'working'");
   const alive = (pid) => {
     if (!pid || pid === process.pid) return pid === process.pid;
     try {
@@ -934,12 +990,11 @@ function resetStale() {
     }
   };
   const now = Date.now();
-  const reset = conn.prepare("UPDATE sections SET status = 'pending', claimed_by = NULL WHERE id = ?");
   let n = 0;
   for (const r of rows) {
     const old = now - Date.parse(r.claimed_at || 0) > STALE_WORK_MS;
     if (old || !alive(r.claimed_by)) {
-      reset.run(r.id);
+      await conn.run("UPDATE sections SET status = 'pending', claimed_by = NULL WHERE id = ?", r.id);
       n++;
     }
   }
@@ -1002,11 +1057,11 @@ const LIGHT_SECTION_COLUMNS =
  * Разделы базы по ключам продукта в направлении. withText: false — без
  * колонок text/io/extracted (см. LIGHT_SECTION_COLUMNS); порядок и состав те же.
  */
-function sectionRows(keys, direction, limit = 0, { withText = true } = {}) {
+async function sectionRows(keys, direction, limit = 0, { withText = true, old } = {}) {
   if (!keys.length) return [];
-  const conn = getDb();
+  const conn = await getConn();
   const dir = direction === "up" ? "up" : "down";
-  const marks = keys.map(() => "?").join(",");
+  const keyMarks = marks(keys);
   // «Вниз» — где продукт сырьё, а не там, где его самого производят. Кроме
   // совмещённого производства: раздел «10.1 Поликарбонаты» описывает и
   // бисфенол А, и поликарбонат из него — для бисфенола А он и «вверх», и
@@ -1016,32 +1071,37 @@ function sectionRows(keys, direction, limit = 0, { withText = true } = {}) {
     dir === "down"
       ? `AND s.id NOT IN (
            SELECT p.section_id FROM section_products p
-           WHERE p.direction = 'up' AND p.role = 'product' AND p.key IN (${marks})
+           WHERE p.direction = 'up' AND p.role = 'product' AND p.key IN (${keyMarks})
              AND NOT EXISTS (
                SELECT 1 FROM section_products o
                WHERE o.section_id = p.section_id AND o.direction = 'up' AND o.role = 'product'
                  AND NOT EXISTS (
                    SELECT 1 FROM section_products o2
                    WHERE o2.section_id = o.section_id AND o2.label = o.label
-                     AND o2.key IN (${marks}))))`
+                     AND o2.key IN (${keyMarks}))))`
       : "";
-  // Издание, вместо которого есть новее, не отдаём (supersededDocs).
-  const old = [...supersededDocs(conn).keys()];
-  const notOld = old.length ? `AND s.doc_id NOT IN (${old.map(() => "?").join(",")})` : "";
-  const rows = conn
-    .prepare(
-      `SELECT ${withText ? "s.*" : LIGHT_SECTION_COLUMNS}, d.title AS doc_title, d.short_title, d.page_offset,
-              MIN(CASE sp.role WHEN 'product' THEN 0 WHEN 'byproduct' THEN 1
-                               WHEN 'intermediate' THEN 2 ELSE 3 END) AS rank,
-              MAX(sp.origin = 'model') AS by_model
-       FROM section_products sp
-       JOIN sections s ON s.id = sp.section_id
-       JOIN documents d ON d.id = s.doc_id
-       WHERE sp.direction = ? AND sp.key IN (${marks}) ${notProduced} ${notOld}
-       GROUP BY s.id
-       ORDER BY rank, by_model DESC, d.id, s.ord`,
-    )
-    .all(dir, ...keys, ...(dir === "down" ? [...keys, ...keys] : []), ...old);
+  // Издание, вместо которого есть новее, не отдаём (supersededDocs). old —
+  // уже посчитанные номера, когда запросов много подряд (countsFor графа).
+  old = old ?? [...(await supersededDocs(conn)).keys()];
+  const notOld = old.length ? `AND s.doc_id NOT IN (${marks(old)})` : "";
+  // GROUP BY s.id, d.id и MAX(CASE …): так запрос понимает и PostgreSQL
+  // (колонки документа — через его ключ, сравнение — не число).
+  const rows = await conn.all(
+    `SELECT ${withText ? "s.*" : LIGHT_SECTION_COLUMNS}, d.title AS doc_title, d.short_title, d.page_offset,
+            MIN(CASE sp.role WHEN 'product' THEN 0 WHEN 'byproduct' THEN 1
+                             WHEN 'intermediate' THEN 2 ELSE 3 END) AS rank,
+            MAX(CASE WHEN sp.origin = 'model' THEN 1 ELSE 0 END) AS by_model
+     FROM section_products sp
+     JOIN sections s ON s.id = sp.section_id
+     JOIN documents d ON d.id = s.doc_id
+     WHERE sp.direction = ? AND sp.key IN (${keyMarks}) ${notProduced} ${notOld}
+     GROUP BY s.id, d.id
+     ORDER BY rank, by_model DESC, d.id, s.ord`,
+    dir,
+    ...keys,
+    ...(dir === "down" ? [...keys, ...keys] : []),
+    ...old,
+  );
   const want = new Set(keys);
   const named = (r) =>
     productsFromTitle(r.title).some((p) => nameKeys(p).some((k) => want.has(k)));
@@ -1053,8 +1113,8 @@ function sectionRows(keys, direction, limit = 0, { withText = true } = {}) {
 }
 
 /** Разделы-источники продукта графа в направлении — для обобщения шага. */
-function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT } = {}) {
-  return sectionRows(productKeys(productName), direction, limit).map(sectionSource);
+async function sourcesFor(productName, direction, { limit = MAX_SECTIONS_PER_PRODUCT } = {}) {
+  return (await sectionRows(productKeys(productName), direction, limit)).map(sectionSource);
 }
 
 /** Больше стольких промежуточных в строку блока не берём: это подсказка, а не перечень. */
@@ -1069,17 +1129,18 @@ const MAX_INTERMEDIATES_HINT = 20;
  * нет (сервер без источников, проверки без базы) — пусто, и файл базы ради
  * этого не создаём.
  */
-function sectionIntermediates(sectionIds) {
+async function sectionIntermediates(sectionIds) {
   const ids = [...new Set((sectionIds || []).map(Number).filter(Number.isInteger))];
   const out = new Map();
-  if (!ids.length || !fs.existsSync(path.join(baseDir(), "sources.sqlite"))) return out;
-  const rows = getDb()
-    .prepare(
-      `SELECT section_id, label FROM section_products
-       WHERE role = 'intermediate' AND origin = 'model' AND section_id IN (${ids.map(() => "?").join(",")})
-       ORDER BY rowid`,
-    )
-    .all(...ids);
+  if (!ids.length) return out;
+  if (sourcesStoreKind() === "sqlite" && !fs.existsSync(path.join(baseDir(), "sources.sqlite"))) return out;
+  const conn = await getConn();
+  const rows = await conn.all(
+    `SELECT section_id, label FROM section_products
+     WHERE role = 'intermediate' AND origin = 'model' AND section_id IN (${marks(ids)})
+     ORDER BY ${conn.rowid}`,
+    ...ids,
+  );
   for (const r of rows) {
     const list = out.get(r.section_id) ?? [];
     if (list.length < MAX_INTERMEDIATES_HINT && !list.includes(r.label)) list.push(r.label);
@@ -1100,7 +1161,9 @@ function sectionIntermediates(sectionIds) {
  * @returns [{ id, docId, docTitle, title, path, pageFrom, pageTo, pages,
  *             summary, text, targets: [названия], inputs: [названия], roles }]
  */
-function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3, withText = true } = {}) {
+async function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3, withText = true } = {}) {
+  const conn = await getConn();
+  const old = [...(await supersededDocs(conn)).keys()];
   const found = new Map();
   const entry = (r) => {
     let e = found.get(r.id);
@@ -1111,14 +1174,14 @@ function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3, w
     return e;
   };
   for (const name of targets) {
-    for (const r of sectionRows(productKeys(name), "up", 0, { withText })) {
+    for (const r of await sectionRows(productKeys(name), "up", 0, { withText, old })) {
       const e = entry(r);
       e.targets.add(name);
       e.rank = Math.min(e.rank, r.rank);
     }
   }
   for (const name of inputs) {
-    for (const r of sectionRows(productKeys(name), "down", 0, { withText })) {
+    for (const r of await sectionRows(productKeys(name), "down", 0, { withText, old })) {
       if (found.has(r.id)) found.get(r.id).inputs.add(name);
     }
   }
@@ -1132,24 +1195,30 @@ function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3, w
         a.r.doc_id - b.r.doc_id ||
         a.r.ord - b.r.ord,
     );
-  const roles = getDb().prepare(
-    "SELECT label, role FROM section_products WHERE section_id = ? GROUP BY label, role ORDER BY MIN(rowid)",
-  );
-  return ranked.slice(0, limit).map(({ r, targets: t, inputs: i }) => ({
-    id: r.id,
-    docId: r.doc_id,
-    docTitle: r.short_title || r.doc_title,
-    title: r.full_title || r.title,
-    path: r.path || "",
-    pageFrom: r.page_from,
-    pageTo: r.page_to,
-    pages: pageLabel(r.page_from, r.page_to, r.page_offset),
-    summary: r.summary || "",
-    text: r.text,
-    targets: [...t],
-    inputs: [...i],
-    roles: roles.all(r.id),
-  }));
+  const out = [];
+  for (const { r, targets: t, inputs: i } of ranked.slice(0, limit)) {
+    const roles = await conn.all(
+      `SELECT label, role FROM section_products WHERE section_id = ?
+       GROUP BY label, role ORDER BY MIN(${conn.rowid})`,
+      r.id,
+    );
+    out.push({
+      id: r.id,
+      docId: r.doc_id,
+      docTitle: r.short_title || r.doc_title,
+      title: r.full_title || r.title,
+      path: r.path || "",
+      pageFrom: r.page_from,
+      pageTo: r.page_to,
+      pages: pageLabel(r.page_from, r.page_to, r.page_offset),
+      summary: r.summary || "",
+      text: r.text,
+      targets: [...t],
+      inputs: [...i],
+      roles,
+    });
+  }
+  return out;
 }
 
 /**
@@ -1158,10 +1227,10 @@ function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3, w
  * продуктов. web — всегда нули: найденное моделью в базе больше не хранится
  * (поле оставлено для клиента, ещё не обновлённого).
  */
-function countsFor(productName) {
+async function countsFor(productName, { old } = {}) {
   const keys = productKeys(productName);
-  const up = sectionRows(keys, "up", 0, { withText: false });
-  const down = sectionRows(keys, "down", 0, { withText: false });
+  const up = await sectionRows(keys, "up", 0, { withText: false, old });
+  const down = await sectionRows(keys, "down", 0, { withText: false, old });
   return {
     local: new Set([...up, ...down].map((r) => r.id)).size,
     localDir: { up: up.length, down: down.length },
@@ -1181,10 +1250,12 @@ function countsFor(productName) {
  * записи не пишутся, старые не отдаются; удалить их — эта функция (скрипт
  * import-pdf.js --purge-web). dryRun — только посчитать.
  */
-function purgeWebSources({ dryRun = false } = {}) {
-  const conn = getDb();
-  const n = conn.prepare("SELECT COUNT(*) AS n FROM web_sources").get().n;
-  if (!dryRun && n) conn.prepare("DELETE FROM web_sources").run();
+async function purgeWebSources({ dryRun = false } = {}) {
+  const conn = await getConn();
+  // В PostgreSQL таблицы нет: при переносе найденное моделью не берём.
+  if (conn.dialect === "pg") return 0;
+  const n = (await conn.get("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM web_sources")).n;
+  if (!dryRun && n) await conn.run("DELETE FROM web_sources");
   return n;
 }
 
@@ -1237,17 +1308,19 @@ function casing(label) {
  * @param graphNames продукты графа: у продукта базы отмечаем, каким узлам
  *                   графа он отвечает (сверка — как у значков на узлах)
  */
-function listProducts(graphNames = []) {
-  const conn = getDb();
+async function listProducts(graphNames = []) {
+  const conn = await getConn();
   // Разделы заменённых изданий (supersededDocs) — не в счёт, как и в sourcesFor.
-  const old = new Set(supersededDocs(conn).keys());
-  const links = conn
-    .prepare(
+  const old = new Set((await supersededDocs(conn)).keys());
+  // Порядок вставки: из равных подпись продукта берётся по нему, а без
+  // ORDER BY PostgreSQL отдаёт строки в своём порядке.
+  const links = (
+    await conn.all(
       `SELECT sp.section_id, sp.key, sp.label, sp.direction, sp.role, sp.origin, s.doc_id
-       FROM section_products sp JOIN sections s ON s.id = sp.section_id`,
+       FROM section_products sp JOIN sections s ON s.id = sp.section_id
+       ORDER BY sp.${conn.rowid}`,
     )
-    .all()
-    .filter((l) => !old.has(l.doc_id));
+  ).filter((l) => !old.has(l.doc_id));
   // Разделы, где модель назвала получаемое: догадка по заголовку там уже не
   // нужна («Производство ацетатов» → «Метилацетат», «Бутилацетат»…).
   const namedByModel = new Set(
@@ -1402,40 +1475,44 @@ function sectionItem(r) {
  * Все источники продукта базы (его ключи — из listProducts): разделы вверх
  * и вниз. web — пустой: найденное моделью в базе больше не хранится.
  */
-function productSources(keys) {
+async function productSources(keys) {
+  const old = [...(await supersededDocs()).keys()];
   return {
-    up: sectionRows(keys, "up", 0, { withText: false }).map(sectionItem),
-    down: sectionRows(keys, "down", 0, { withText: false }).map(sectionItem),
+    up: (await sectionRows(keys, "up", 0, { withText: false, old })).map(sectionItem),
+    down: (await sectionRows(keys, "down", 0, { withText: false, old })).map(sectionItem),
     web: { up: [], down: [] },
   };
 }
 
 /** Сводка базы — для страницы состояния и скрипта. */
-function stats() {
-  const conn = getDb();
+async function stats() {
+  const conn = await getConn();
   const byStatus = {};
-  for (const r of conn.prepare("SELECT status, COUNT(*) AS n FROM sections GROUP BY status").all()) {
-    byStatus[r.status] = r.n;
-  }
+  const rows = await conn.all("SELECT status, CAST(COUNT(*) AS INTEGER) AS n FROM sections GROUP BY status");
+  for (const r of rows) byStatus[r.status] = r.n;
+  const count = async (table) => (await conn.get(`SELECT CAST(COUNT(*) AS INTEGER) AS n FROM ${table}`)).n;
   return {
-    documents: conn.prepare("SELECT COUNT(*) AS n FROM documents").get().n,
+    documents: await count("documents"),
     sections: byStatus,
     // Сколько найденного моделью ещё лежит в таблице (не отдаётся; удалить —
-    // import-pdf.js --purge-web).
-    webSources: conn.prepare("SELECT COUNT(*) AS n FROM web_sources").get().n,
+    // import-pdf.js --purge-web). В PostgreSQL его нет.
+    webSources: conn.dialect === "pg" ? 0 : await count("web_sources"),
     dir: baseDir(),
+    store: conn.dialect === "pg" ? "postgres" : "sqlite",
   };
 }
 
-/** Закрыть базу (скрипты и тесты). */
+/** Закрыть базу (скрипты и тесты). Пул PostgreSQL закрывает его владелец. */
 function close() {
-  if (db) db.close();
-  db = null;
-  openedDir = null;
+  closeSqlite();
 }
 
 module.exports = {
   baseDir,
+  // Адаптер открытой базы (db/sql.js) — тестам и скрипту переноса.
+  connection: getConn,
+  openSqliteAt,
+  createSqliteTables,
   addDocument,
   reparseLegacyDocuments,
   reparseDocument,

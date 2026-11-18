@@ -106,10 +106,10 @@ const localUrl = (s) => `local://documents/${s.docId}/sections/${s.id}#page=${s.
  * База источников не поднялась (нет каталога, нет модуля) — пусто: баланс
  * считается и без неё.
  */
-function findLocalSources({ inputs, targets }) {
+async function findLocalSources({ inputs, targets }) {
   let sections = [];
   try {
-    sections = localStore.sectionsForTransformation(
+    sections = await localStore.sectionsForTransformation(
       { inputs: inputs.map((n) => n.name), targets: targets.map((n) => n.name) },
       { limit: MAX_SECTIONS },
     );
@@ -150,9 +150,9 @@ const localKey = (list) => list.map((l) => l.sectionId).sort((a, b) => a - b).jo
  * выдержки — на графе в 225 преобразований это секунды, когда сервер не
  * отвечает никому (боевой сервер 18.11).
  */
-function localSectionKey({ inputs, targets }) {
+async function localSectionKey({ inputs, targets }) {
   try {
-    const sections = localStore.sectionsForTransformation(
+    const sections = await localStore.sectionsForTransformation(
       { inputs: inputs.map((n) => n.name), targets: targets.map((n) => n.name) },
       { limit: MAX_SECTIONS, withText: false },
     );

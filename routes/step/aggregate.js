@@ -34,9 +34,9 @@ const { outputProblem, outputFollowUp, acceptOutputFollowUp } = require("./utils
  * блок). Правило промпта о перепрыгивании уровня ссылается на эту строку.
  * База недоступна — блоки как были: подсказка, а не условие обобщения.
  */
-function intermediatesOf(picked) {
+async function intermediatesOf(picked) {
   try {
-    return localStore.sectionIntermediates(picked.map((s) => s?.sectionId));
+    return await localStore.sectionIntermediates(picked.map((s) => s?.sectionId));
   } catch (e) {
     console.warn("[step/aggregate] промежуточные продукты разделов недоступны:", e.message);
     return new Map();
@@ -200,7 +200,7 @@ router.post("/gpt/step/aggregate", async (req, res) => {
     sources,
     10,
   );
-  const mid = intermediatesOf(picked);
+  const mid = await intermediatesOf(picked);
   const clipped = withIntermediates(picked, rawBlocks, mid).map((b) => clip(b, maxBlockChars));
   // Промпты v4 — со строками стадий и цитатами поиска (utils/searchHints.js);
   // прежние их не ждут. STEP_SEARCH_HINTS=off в .env — блок без строк, как до

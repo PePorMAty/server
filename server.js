@@ -124,6 +124,16 @@ require("./routes/graph-files/store")
   .then(({ kind }) => console.log(`📚 Библиотека графов: ${kind === "pg" ? "PostgreSQL (схема app)" : "файлы data/"}`))
   .catch((e) => console.error(`❌ Библиотека графов: ${e.message}`));
 
+// База источников и расчёты баланса: SQLite (по умолчанию) или PostgreSQL
+// (SOURCES_STORE=pg, PG-MIGRATION.md, этап 2).
+require("./db/sourcesDb")
+  .checkSourcesStore()
+  .then(({ kind, warning }) => {
+    console.log(`📄 Источники и расчёты баланса: ${kind === "pg" ? "PostgreSQL (схема app)" : "SQLite в data/"}`);
+    if (warning) console.warn(`⚠️  Источники: ${warning}`);
+  })
+  .catch((e) => console.error(`❌ Источники и расчёты баланса: ${e.message}`));
+
 // Routes
 app.use("/api/graphs", graphRoutes);
 app.use("/api/graphs", graphSources);

@@ -421,7 +421,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
     }
   }
 
-  const id = store.save({
+  const id = await store.save({
     transformation: input.transformation.name,
     inputs: inputNames(input),
     targets: targetNames(input),
@@ -436,7 +436,7 @@ async function calculate(input, { signal, setStage = () => {} } = {}) {
     model: resp?.model || input.model || null,
     tookMs: Date.now() - t0,
   });
-  return store.get(id);
+  return await store.get(id);
 }
 
 /**
@@ -487,7 +487,7 @@ const names = (v) =>
 
 // Новый вид: { transformation, inputs, targets } — названия или узлы.
 // Прежний: { transformation, basis, target } — пара.
-router.post("/material-balance/lookup", (req, res) => {
+router.post("/material-balance/lookup", async (req, res) => {
   const transformation = text(req.body?.transformation?.name ?? req.body?.transformation, 300);
   try {
     if (req.body?.target && !Array.isArray(req.body?.targets)) {
@@ -498,7 +498,7 @@ router.post("/material-balance/lookup", (req, res) => {
           .status(400)
           .json({ success: false, error: "Нужны transformation, basis и target" });
       }
-      return res.json({ success: true, ...store.lookupPair({ transformation, basis, target }) });
+      return res.json({ success: true, ...(await store.lookupPair({ transformation, basis, target })) });
     }
     const inputs = names(req.body?.inputs);
     const targets = names(req.body?.targets);
@@ -509,13 +509,13 @@ router.post("/material-balance/lookup", (req, res) => {
     }
     // Готовое — только если считалось с теми же разделами базы источников
     // (их номера, без текста — см. localSectionKey).
-    const key = localSectionKey({
+    const key = await localSectionKey({
       inputs: inputs.map((name) => ({ name })),
       targets: targets.map((name) => ({ name })),
     });
     res.json({
       success: true,
-      ...store.lookup({ transformation, inputs, targets, localKey: key }),
+      ...(await store.lookup({ transformation, inputs, targets, localKey: key })),
     });
   } catch (e) {
     console.error("[material-balance] lookup:", e);
@@ -534,36 +534,45 @@ const MAX_READY_ITEMS = 300;
 // данных: всё сырьё, все продукты, те же разделы базы источников, полный
 // расчёт. Ответ: { results: { [id преобразования]: { result, nodeIds } } } —
 // только найденное.
-// База источников и расчётов — SQLite, запросы синхронные: пока цикл идёт,
-// сервер не отвечает никому. Поэтому — без текста разделов (localSectionKey)
-// и с передышкой каждые READY_BATCH преобразований: открытие графа, список
-// библиотеки и сохранение проходят между ними, а не ждут весь граф.
-const READY_BATCH = 10;
+// В SQLite (SOURCES_STORE не pg) запросы синхронные: пока цикл идёт, сервер
+// не отвечает никому. Поэтому — без текста разделов (localSectionKey) и с
+// передышкой каждые READY_BATCH преобразований: открытие графа, список
+// библиотеки и сохранение проходят между ними, а не ждут весь граф. С
+// PostgreSQL запросы и так не держат сервер — передышка ничему не мешает.
+const READY_BATCH = 5;
 
 router.post("/material-balance/ready", async (req, res) => {
   const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, MAX_READY_ITEMS) : [];
   try {
-    const results = {};
-    let done = 0;
-    for (const raw of items) {
-      if (++done % READY_BATCH === 0) await new Promise((r) => setImmediate(r));
+    // Готовые расчёты — один раз на весь граф, а не на каждое преобразование.
+    const rows = await store.reusableRows();
+    const one = async (raw) => {
       const transformation = node(raw?.transformation);
-      if (!transformation) continue;
+      if (!transformation) return null;
       const inputs = uniq(nodes(raw?.inputs));
       const outputs = uniq(nodes(raw?.outputs), new Set(inputs.map((n) => n.id)));
-      if (!inputs.length || !outputs.length) continue;
-      const { exact } = store.lookup({
-        transformation: transformation.name,
-        inputs: inputs.map((n) => n.name),
-        targets: outputs.map((n) => n.name),
-        localKey: localSectionKey({ inputs, targets: outputs }),
-      });
-      const result = exact ? store.get(exact.id) : null;
-      if (!result) continue;
-      results[transformation.id] = {
-        result,
-        nodeIds: matchRefs(result.refs, { transformation, inputs, outputs }),
-      };
+      if (!inputs.length || !outputs.length) return null;
+      const { exact } = await store.lookup(
+        {
+          transformation: transformation.name,
+          inputs: inputs.map((n) => n.name),
+          targets: outputs.map((n) => n.name),
+          localKey: await localSectionKey({ inputs, targets: outputs }),
+        },
+        { rows },
+      );
+      const result = exact ? await store.get(exact.id) : null;
+      if (!result) return null;
+      return [transformation.id, { result, nodeIds: matchRefs(result.refs, { transformation, inputs, outputs }) }];
+    };
+    const results = {};
+    // По READY_BATCH преобразований разом (с PostgreSQL — параллельно, по
+    // сети), между пачками — передышка для остальных запросов.
+    for (let i = 0; i < items.length; i += READY_BATCH) {
+      if (i) await new Promise((r) => setImmediate(r));
+      for (const found of await Promise.all(items.slice(i, i + READY_BATCH).map(one))) {
+        if (found) results[found[0]] = found[1];
+      }
     }
     res.json({ success: true, results });
   } catch (e) {
@@ -572,7 +581,7 @@ router.post("/material-balance/ready", async (req, res) => {
   }
 });
 
-router.post("/material-balance", (req, res) => {
+router.post("/material-balance", async (req, res) => {
   const { input, error } = readInput(req.body);
   if (error) return res.status(400).json({ success: false, error });
 
@@ -583,19 +592,19 @@ router.post("/material-balance", (req, res) => {
     // запроса стоят за его обозначениями.
     // Разделы базы источников о преобразовании — в запрос первыми. Готовый
     // расчёт годится, только если считался с теми же разделами.
-    input.local = findLocalSources({
+    input.local = await findLocalSources({
       inputs: input.inputs,
       targets: input.outputs.filter((n) => input.targets.includes(n.id)),
     });
     if (!input.force && !input.knownData && !input.system && !input.template) {
-      const { exact } = store.lookup({
+      const { exact } = await store.lookup({
         transformation: input.transformation.name,
         inputs: inputNames(input),
         targets: targetNames(input),
         localKey: localKey(input.local),
       });
       if (exact) {
-        const result = store.get(exact.id);
+        const result = await store.get(exact.id);
         return res.json({
           success: true,
           fromCache: true,
@@ -641,11 +650,17 @@ router.post("/material-balance/jobs/:id/cancel", (req, res) => {
 // Копии веб-источников, загруженные сервером при проверке: текст — всегда
 // простым текстом; оригинал PDF — как есть, HTML — файлом для скачивания,
 // чтобы чужая страница не выполнялась на адресе сервера.
-router.get("/material-balance/sources/:id/:what", (req, res) => {
+router.get("/material-balance/sources/:id/:what", async (req, res) => {
   if (!["text", "file"].includes(req.params.what)) {
     return res.status(404).json({ success: false, error: "Нет такого вида копии: text или file" });
   }
-  const doc = store.webDocument(Number(req.params.id));
+  let doc;
+  try {
+    doc = await store.webDocument(Number(req.params.id));
+  } catch (e) {
+    console.error("[material-balance] копия источника:", e);
+    return res.status(500).json({ success: false, error: e.message });
+  }
   if (!doc) return res.status(404).json({ success: false, error: "Копия источника не найдена" });
   const files = store.webDocumentFiles(doc);
   if (req.params.what === "text") {
@@ -663,13 +678,13 @@ router.get("/material-balance/sources/:id/:what", (req, res) => {
   res.sendFile(files.original, (err) => err && !res.headersSent && res.status(404).end());
 });
 
-router.get("/material-balance/:id", (req, res) => {
+router.get("/material-balance/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ success: false, error: "Неверный номер расчёта" });
   }
   try {
-    const result = store.get(id);
+    const result = await store.get(id);
     if (!result) return res.status(404).json({ success: false, error: "Расчёт не найден" });
     res.json({ success: true, result });
   } catch (e) {

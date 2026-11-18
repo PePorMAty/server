@@ -254,7 +254,7 @@ async function worker() {
   for (;;) {
     let job;
     try {
-      job = store.claimSection();
+      job = await store.claimSection();
     } catch (e) {
       console.error(`[local-sources] очередь разбора: ${e.message}`);
       return;
@@ -264,12 +264,16 @@ async function worker() {
     const t0 = Date.now();
     try {
       const { result, model } = await decodeSection(job);
-      store.finishSection(job.section.id, result, model);
+      await store.finishSection(job.section.id, result, model);
       const msg = `разобран за ${Math.round((Date.now() - t0) / 1000)} с: ${result.products.length} продукт., ${result.raw.length} сырья`;
       console.log(`[local-sources] ${label} — ${msg}`);
       for (const fn of listeners) fn({ ok: true, section: job.section, document: job.document, result });
     } catch (e) {
-      store.failSection(job.section.id, e.message);
+      // База недоступна — раздел останется «в работе», resetStale вернёт его
+      // в очередь; разбор остальных не роняем.
+      await store.failSection(job.section.id, e.message).catch((e2) => {
+        console.error(`[local-sources] очередь разбора: ${e2.message}`);
+      });
       console.error(`[local-sources] ${label} — не разобран: ${e.message}`);
       for (const fn of listeners) fn({ ok: false, section: job.section, document: job.document, error: e.message });
     }
@@ -301,7 +305,7 @@ function start() {
   started = true;
   (async () => {
     try {
-      const reset = store.resetStale();
+      const reset = await store.resetStale();
       if (reset) console.log(`[local-sources] в очередь разбора возвращено разделов: ${reset}`);
       const reparsed = await store.reparseLegacyDocuments();
       if (reparsed) console.log(`[local-sources] документов разобрано на разделы заново: ${reparsed}`);
@@ -310,10 +314,10 @@ function start() {
     }
     kick();
     timer = setInterval(() => {
-      try {
-        store.resetStale();
-      } catch {}
-      kick();
+      store
+        .resetStale()
+        .catch(() => {})
+        .then(() => kick());
     }, 60 * 1000);
     timer.unref?.();
   })();

@@ -86,7 +86,7 @@ function valueCheck(text, values) {
 /** Проверить один веб-источник: копия из базы или загрузка, числа, сохранение. */
 async function checkWeb(src, { signal }) {
   const values = dataValues(src.block);
-  let doc = store.recentWebDocument(src.url, REUSE_DAYS);
+  let doc = await store.recentWebDocument(src.url, REUSE_DAYS);
   if (!doc) {
     let got;
     try {
@@ -95,9 +95,9 @@ async function checkWeb(src, { signal }) {
       if (signal?.aborted) throw e;
       return { status: "failed", reason: e instanceof SourceError ? e.message : `ошибка загрузки: ${e.message}` };
     }
-    doc = store.saveWebDocument({ url: src.url, ...got });
+    doc = await store.saveWebDocument({ url: src.url, ...got });
   }
-  const text = store.webDocumentText(doc.id);
+  const text = await store.webDocumentText(doc.id);
   const { found, missing } = valueCheck(text, values);
   const base = { documentId: `web-${doc.id}`, webDocumentId: doc.id, kind: doc.kind, finalUrl: doc.final_url };
   if (values.length && !found.length) {

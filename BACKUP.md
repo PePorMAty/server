@@ -10,7 +10,7 @@
 | Что | Как | Сколько хранится |
 |---|---|---|
 | `data/`: графы, закладки, история, расчёты баланса графов, идентификаторы, ссылки «Поделиться», шаблон промпта | ежедневный архив `daily/<дата>.tar.gz.age` | 7 последних дней + первый архив каждого месяца (`monthly/`) за полгода |
-| База источников `sources.sqlite` и расчёты баланса `material-balance.sqlite` | в том же архиве, снимком (сервер в это время может писать) | так же |
+| База источников `sources.sqlite` и расчёты баланса `material-balance.sqlite` | в том же архиве, снимком (сервер в это время может писать). С `SOURCES_STORE=pg` (этап 2 PG-MIGRATION.md) они больше не пополняются — живые данные в `postgres.dump` | так же |
 | PostgreSQL (`pg_dump`, если в `.env` есть `DB_NAME`) | в том же архиве, `postgres.dump` | так же |
 | PDF документов базы | `pdf/<sha256>.pdf.age`, каждый один раз | все |
 | `data/gisp.sqlite` и выгрузки для него в `data/data-base/` (`production.xlsx`, 138 МБ) | **не копируются**: справочник целиком пересобирает `scripts/import-gisp.js`, а выгрузку при нужде скачивают с ГИСП заново | — |
@@ -144,7 +144,8 @@ cp snapshot/sqlite/material-balance.sqlite /путь/к/server/data/
 mkdir -p /путь/к/server/data/local-sources/files
 # (из клона на своём компьютере; на сервере — git show main:pdf/<файл> | age -d …)
 for f in pdf/*.age; do age -d -i ~/graph-backup-key.txt -o "/путь/к/server/data/local-sources/files/$(basename "$f" .age)" "$f"; done
-# PostgreSQL, если нужен:
+# PostgreSQL, если нужен (с GRAPH_STORE=pg / SOURCES_STORE=pg графы,
+# источники и расчёты баланса — в нём, а не в data/ и не в sqlite/):
 pg_restore --clean --if-exists --no-owner -d <база> snapshot/postgres.dump
 pm2 start all
 ```

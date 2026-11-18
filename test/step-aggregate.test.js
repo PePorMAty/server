@@ -30,6 +30,7 @@ require.cache[utilsPath].exports = {
 };
 
 const store = require("../routes/local-sources/utils/store");
+const { addDoc, addSection: addSectionRow } = require("./helpers/sources");
 const router = require("../routes/step/aggregate.js");
 const handle = router.stack.find((l) => l.route?.path === "/gpt/step/aggregate" && l.route.methods.post)
   .route.stack[0].handle;
@@ -62,35 +63,18 @@ function aggregate(body, modelReplies = []) {
 }
 
 /** Раздел с промежуточными продуктами — как его записывает разбор моделью. */
-function addSection(intermediates) {
-  store.listDocuments(); // схема
-  store.close();
-  const db = new (require("better-sqlite3"))(path.join(store.baseDir(), "sources.sqlite"));
-  const doc = db
-    .prepare(
-      `INSERT INTO documents (sha256, file_name, title, short_title, pages, chars, bytes, added_at, added_via)
-       VALUES (?, 'its18.pdf', 'ИТС 18', 'ИТС 18', 100, 1000, 1000, '2026-10-29T00:00:00Z', 'ui')`,
-    )
-    .run(`its18-${Math.random()}`).lastInsertRowid;
-  const id = Number(
-    db
-      .prepare(
-        `INSERT INTO sections (doc_id, ord, title, path, page_from, page_to, text, status, summary)
-         VALUES (?, 0, 'Раздел 6', '', 1, 10, 'текст', 'done', 'описание')`,
-      )
-      .run(doc).lastInsertRowid,
+async function addSection(intermediates) {
+  const doc = await addDoc({ shortTitle: "ИТС 18" });
+  return addSectionRow(
+    doc,
+    "Раздел 6",
+    { intermediate: intermediates },
+    { text: "текст", summary: "описание", dirs: { intermediate: ["down"] } },
   );
-  const link = db.prepare(
-    `INSERT OR IGNORE INTO section_products (section_id, key, label, direction, role, origin)
-     VALUES (?, ?, ?, 'down', 'intermediate', 'model')`,
-  );
-  for (const name of intermediates) for (const key of store.nameKeys(name)) link.run(id, key, name);
-  db.close();
-  return id;
 }
 
 test("промежуточные продукты раздела базы — строкой в начале его блока", async () => {
-  const sectionId = addSection(["Циклогексанол", "Циклогексанон", "Циклогексаноноксим"]);
+  const sectionId = await addSection(["Циклогексанол", "Циклогексанон", "Циклогексаноноксим"]);
   const description = "Капролактам получают из фенола: гидрирование, окисление, оксимирование. ".repeat(40);
   const status = await aggregate({
     productName: "Фенол",
@@ -109,7 +93,7 @@ test("промежуточные продукты раздела базы — с
 });
 
 test("раздел без промежуточных и сервер без базы — блок как был", async () => {
-  const sectionId = addSection([]);
+  const sectionId = await addSection([]);
   await aggregate({
     productName: "Фенол",
     direction: "down",
@@ -171,7 +155,7 @@ const capro = () => addSection(["Циклогексанол", "Циклогек�
 test("выход мимо промежуточных раздела — один дозапрос в той же переписке", async () => {
   process.env.LOCAL_SOURCES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "step-aggregate-skip-"));
   store.close();
-  const sectionId = capro();
+  const sectionId = await capro();
   const status = await aggregate(
     { productName: "Фенол", direction: "down", sources: [{ origin: "local", sectionId, technology_description: "Капролактам из фенола." }] },
     [SKIP, FIXED],
@@ -191,7 +175,7 @@ test("выход мимо промежуточных раздела — один
 test("выход — сама ступень или схема без промежуточных — без дозапроса", async () => {
   process.env.LOCAL_SOURCES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "step-aggregate-ok-"));
   store.close();
-  const sectionId = capro();
+  const sectionId = await capro();
   const src = [{ origin: "local", sectionId, technology_description: "Капролактам из фенола." }];
   await aggregate({ productName: "Фенол", direction: "down", sources: src }, [FIXED]);
   assert.equal(calls.length, 1);
@@ -204,7 +188,7 @@ test("выход — сама ступень или схема без проме
 test("ответ на дозапрос — поток, которого сервер не называл, — остаётся первый ответ", async () => {
   process.env.LOCAL_SOURCES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "step-aggregate-reject-"));
   store.close();
-  const sectionId = capro();
+  const sectionId = await capro();
   const ALKYLATE = answer("Алкилат", "Фенол, водород", "Алкилат — реакционная масса.");
   await aggregate(
     { productName: "Фенол", direction: "down", sources: [{ origin: "local", sectionId, technology_description: "Капролактам из фенола." }] },
@@ -219,7 +203,7 @@ test("ответ на дозапрос — поток, которого серв
 test("потоки раздела (масло, смесь) в строку промежуточных не попадают", async () => {
   process.env.LOCAL_SOURCES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "step-aggregate-streams-"));
   store.close();
-  const sectionId = addSection(["Алкилат", "Лактамное масло", "Циклогексанон"]);
+  const sectionId = await addSection(["Алкилат", "Лактамное масло", "Циклогексанон"]);
   await aggregate({ productName: "Фенол", direction: "down", sources: [{ origin: "local", sectionId, technology_description: "Фенол." }] });
   assert.match(captured.input, /Промежуточные продукты раздела: Циклогексанон\.\n/);
 });
@@ -287,7 +271,7 @@ test("«Смесь X и Y» — дозапрос; продукты по отде
 // ---------- строки поиска в блоках обобщения v4 (utils/searchHints.js) ----------
 test("v4: строки стадий и цитаты поиска — в блоке, с адресом и продуктом поиска; раздел базы — без строк", async () => {
   process.env.STEP_PROMPTS = "v4";
-  const sectionId = addSection([]);
+  const sectionId = await addSection([]);
   const page = "Текст страницы (загружен сервером):\n" + "Nylon 6,6 is produced by polycondensation. ".repeat(80);
   await aggregate({
     productName: "Адипиновая кислота",
