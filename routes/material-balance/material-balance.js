@@ -42,7 +42,7 @@ const {
 } = require("./utils/prompt");
 const { productKey } = require("../local-sources/utils/query");
 const { parseAnswer, cleanAnswer } = require("./utils/parse");
-const { findLocalSources, localBlock, localChecks, localKey } = require("./utils/local");
+const { findLocalSources, localSectionKey, localBlock, localChecks, localKey } = require("./utils/local");
 const { checkSources, applyChecks } = require("./utils/sources");
 const { missingRefs, filledCount, mismatches, totalsGap, followUpText } = require("./utils/followup");
 const { searchMissing } = require("./utils/websearch");
@@ -507,14 +507,15 @@ router.post("/material-balance/lookup", (req, res) => {
         .status(400)
         .json({ success: false, error: "Нужны transformation, inputs и targets" });
     }
-    // Готовое — только если считалось с теми же разделами базы источников.
-    const local = findLocalSources({
+    // Готовое — только если считалось с теми же разделами базы источников
+    // (их номера, без текста — см. localSectionKey).
+    const key = localSectionKey({
       inputs: inputs.map((name) => ({ name })),
       targets: targets.map((name) => ({ name })),
     });
     res.json({
       success: true,
-      ...store.lookup({ transformation, inputs, targets, localKey: localKey(local) }),
+      ...store.lookup({ transformation, inputs, targets, localKey: key }),
     });
   } catch (e) {
     console.error("[material-balance] lookup:", e);
@@ -533,22 +534,29 @@ const MAX_READY_ITEMS = 300;
 // данных: всё сырьё, все продукты, те же разделы базы источников, полный
 // расчёт. Ответ: { results: { [id преобразования]: { result, nodeIds } } } —
 // только найденное.
-router.post("/material-balance/ready", (req, res) => {
+// База источников и расчётов — SQLite, запросы синхронные: пока цикл идёт,
+// сервер не отвечает никому. Поэтому — без текста разделов (localSectionKey)
+// и с передышкой каждые READY_BATCH преобразований: открытие графа, список
+// библиотеки и сохранение проходят между ними, а не ждут весь граф.
+const READY_BATCH = 10;
+
+router.post("/material-balance/ready", async (req, res) => {
   const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, MAX_READY_ITEMS) : [];
   try {
     const results = {};
+    let done = 0;
     for (const raw of items) {
+      if (++done % READY_BATCH === 0) await new Promise((r) => setImmediate(r));
       const transformation = node(raw?.transformation);
       if (!transformation) continue;
       const inputs = uniq(nodes(raw?.inputs));
       const outputs = uniq(nodes(raw?.outputs), new Set(inputs.map((n) => n.id)));
       if (!inputs.length || !outputs.length) continue;
-      const local = findLocalSources({ inputs, targets: outputs });
       const { exact } = store.lookup({
         transformation: transformation.name,
         inputs: inputs.map((n) => n.name),
         targets: outputs.map((n) => n.name),
-        localKey: localKey(local),
+        localKey: localSectionKey({ inputs, targets: outputs }),
       });
       const result = exact ? store.get(exact.id) : null;
       if (!result) continue;

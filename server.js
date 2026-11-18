@@ -61,6 +61,36 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// Медленные запросы — в журнал (pm2 logs): 18.11 после перехода библиотеки
+// на PostgreSQL открытие графа на сайте иногда шло минуту, а по отдельности
+// каждый запрос отвечал за доли секунды — без журнала не видно, кто держал
+// сервер. Вызовы модели и расчёты баланса долгие по природе — их не пишем.
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS) || 3000;
+app.use((req, res, next) => {
+  const t0 = process.hrtime.bigint();
+  res.on("finish", () => {
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    if (ms < SLOW_REQUEST_MS) return;
+    const url = req.originalUrl.split("?")[0];
+    if (url.startsWith("/api/graphs/gpt") || /\/material-balance(\/jobs.*)?$/.test(url)) return;
+    console.warn(`[медленно] ${req.method} ${url} → ${res.statusCode} за ${(ms / 1000).toFixed(1)} с`);
+  });
+  next();
+});
+
+// Node занят синхронной работой (SQLite, разбор больших JSON) — все запросы
+// ждут. Раз в минуту: если сервер был занят дольше секунды подряд — в журнал.
+{
+  const { monitorEventLoopDelay } = require("perf_hooks");
+  const lag = monitorEventLoopDelay({ resolution: 50 });
+  lag.enable();
+  setInterval(() => {
+    const max = lag.max / 1e6;
+    if (max > 1000) console.warn(`[занят] сервер был занят до ${(max / 1000).toFixed(1)} с подряд за последнюю минуту — запросы ждали`);
+    lag.reset();
+  }, 60_000).unref();
+}
+
 // Подключение к PostgreSQL
 const connectDB = async () => {
   try {

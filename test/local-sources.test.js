@@ -217,3 +217,25 @@ test("«Целевой алкилфенол» — тот же алкилфено
   assert.ok(titles(store.sourcesFor("Алкилфенол", "down")).some((t) => /алкилсалицилатных/.test(t)));
   assert.ok(!titles(store.sourcesFor("Углерод", "up")).some((t) => /технического углерода/.test(t)));
 });
+
+// ---------- без текста разделов (ready баланса, подсчёт источников) ----------
+test("разделы без текста — те же номера и порядок, что с текстом; ключ готового расчёта тот же", () => {
+  const { findLocalSources, localSectionKey, localKey } = require("../routes/material-balance/utils/local");
+  const cases = [
+    { inputs: ["Кумол"], targets: ["Фенол", "Ацетон"] },
+    { inputs: ["Бисфенол А", "Фосген"], targets: ["Поликарбонат"] },
+    { inputs: ["Этан"], targets: ["Этилен"] },
+    { inputs: ["Неизвестное"], targets: ["Тоже неизвестное"] },
+  ];
+  for (const c of cases) {
+    const full = store.sectionsForTransformation(c, { limit: 5 });
+    const light = store.sectionsForTransformation(c, { limit: 5, withText: false });
+    assert.deepEqual(light.map((s) => s.id), full.map((s) => s.id), JSON.stringify(c));
+    assert.equal(light[0]?.text, undefined);
+    const nodes = (l) => l.map((name) => ({ name }));
+    const args = { inputs: nodes(c.inputs), targets: nodes(c.targets) };
+    assert.equal(localSectionKey(args), localKey(findLocalSources(args)), JSON.stringify(c));
+  }
+  // Подсчёт источников продукта — без текста; издание-черновик не в счёт.
+  assert.deepEqual(store.countsFor("Фенол").localDir, { up: 1, down: 2 });
+});
