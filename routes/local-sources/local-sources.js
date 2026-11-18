@@ -94,12 +94,12 @@ async function addUploaded(req, res, buf) {
   }
 }
 
-router.get("/local-sources/documents", (req, res) => {
+router.get("/local-sources/documents", async (req, res) => {
   try {
     // Путь к базе на диске сервера наружу не отдаём: он нужен только скрипту.
-    const stats = store.stats();
+    const stats = await store.stats();
     delete stats.dir;
-    res.json({ success: true, documents: store.listDocuments(), stats });
+    res.json({ success: true, documents: await store.listDocuments(), stats });
   } catch (e) {
     console.error("[local-sources] список:", e);
     fail(res, 500, `База источников недоступна: ${e.message}`);
@@ -163,11 +163,11 @@ router.post("/local-sources/uploads/:uploadId", readChunkBody, async (req, res) 
   await addUploaded(req, res, buf);
 });
 
-router.delete("/local-sources/documents/:id", (req, res) => {
+router.delete("/local-sources/documents/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return fail(res, 400, "Неверный номер документа.");
   try {
-    if (!store.deleteDocument(id)) return fail(res, 404, "Такого документа нет.");
+    if (!(await store.deleteDocument(id))) return fail(res, 404, "Такого документа нет.");
     res.json({ success: true });
   } catch (e) {
     console.error("[local-sources] удаление:", e);
@@ -175,9 +175,15 @@ router.delete("/local-sources/documents/:id", (req, res) => {
   }
 });
 
-router.get("/local-sources/documents/:id/file", (req, res) => {
+router.get("/local-sources/documents/:id/file", async (req, res) => {
   const id = Number(req.params.id);
-  const doc = Number.isInteger(id) ? store.getDocument(id) : null;
+  let doc = null;
+  try {
+    doc = Number.isInteger(id) ? await store.getDocument(id) : null;
+  } catch (e) {
+    console.error("[local-sources] файл документа:", e);
+    return fail(res, 500, e.message);
+  }
   if (!doc) return fail(res, 404, "Такого документа нет.");
   res.setHeader("Content-Type", "application/pdf");
   // inline — браузер открывает PDF у себя, #page=N из ссылки ведёт на страницу.
@@ -190,11 +196,11 @@ router.get("/local-sources/documents/:id/file", (req, res) => {
   });
 });
 
-router.get("/local-sources/documents/:id/sections", (req, res) => {
+router.get("/local-sources/documents/:id/sections", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return fail(res, 400, "Неверный номер документа.");
   try {
-    const sections = store.listSections(id);
+    const sections = await store.listSections(id);
     if (!sections) return fail(res, 404, "Такого документа нет.");
     res.json({ success: true, sections });
   } catch (e) {
@@ -203,20 +209,20 @@ router.get("/local-sources/documents/:id/sections", (req, res) => {
   }
 });
 
-router.post("/local-sources/documents/:id/decode", (req, res) => {
+router.post("/local-sources/documents/:id/decode", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return fail(res, 400, "Неверный номер документа.");
-  if (!store.getDocument(id)) return fail(res, 404, "Такого документа нет.");
   const only = req.body?.only === "all" ? "all" : "failed";
   const clean = (v) => (v ? String(v).trim().slice(0, 100) : undefined);
   try {
-    const queued = store.requeue(id, {
+    if (!(await store.getDocument(id))) return fail(res, 404, "Такого документа нет.");
+    const queued = await store.requeue(id, {
       only,
       provider: clean(req.body?.provider),
       model: clean(req.body?.model),
     });
     decode.kick();
-    const { filePath, ...document } = store.getDocument(id);
+    const { filePath, ...document } = await store.getDocument(id);
     res.json({ success: true, queued, document });
   } catch (e) {
     console.error("[local-sources] разбор заново:", e);
@@ -224,7 +230,9 @@ router.post("/local-sources/documents/:id/decode", (req, res) => {
   }
 });
 
-router.post("/local-sources/lookup", (req, res) => {
+const LOOKUP_PARALLEL = 5;
+
+router.post("/local-sources/lookup", async (req, res) => {
   const products = Array.isArray(req.body?.products)
     ? [...new Set(req.body.products.map((p) => String(p || "").trim()).filter(Boolean))]
     : [];
@@ -233,7 +241,16 @@ router.post("/local-sources/lookup", (req, res) => {
   }
   try {
     const out = {};
-    for (const p of products) out[p] = store.countsFor(p);
+    // Заменённые издания — один раз на весь граф, а не на каждый продукт.
+    const old = [...(await store.supersededDocs()).keys()];
+    // С PostgreSQL каждый продукт — два запроса по сети; граф на 250
+    // продуктов по одному ждал полсекунды. По LOOKUP_PARALLEL сразу —
+    // впятеро быстрее, а соединений пула остаётся и другим запросам.
+    for (let i = 0; i < products.length; i += LOOKUP_PARALLEL) {
+      const part = products.slice(i, i + LOOKUP_PARALLEL);
+      const counts = await Promise.all(part.map((p) => store.countsFor(p, { old })));
+      part.forEach((p, k) => (out[p] = counts[k]));
+    }
     res.json({ success: true, products: out });
   } catch (e) {
     console.error("[local-sources] проверка продуктов:", e);
@@ -241,7 +258,7 @@ router.post("/local-sources/lookup", (req, res) => {
   }
 });
 
-router.post("/local-sources/for-product", (req, res) => {
+router.post("/local-sources/for-product", async (req, res) => {
   const product = String(req.body?.product || "").trim();
   const direction = req.body?.direction === "up" ? "up" : "down";
   if (!product) return fail(res, 400, "product is required");
@@ -250,7 +267,7 @@ router.post("/local-sources/for-product", (req, res) => {
       success: true,
       product,
       direction,
-      local: store.sourcesFor(product, direction),
+      local: await store.sourcesFor(product, direction),
       // Найденное моделью в базе больше не хранится; поле — для прежнего клиента.
       web: [],
     });
@@ -267,20 +284,20 @@ function stringList(v, max) {
     : [];
 }
 
-router.post("/local-sources/products", (req, res) => {
+router.post("/local-sources/products", async (req, res) => {
   try {
-    res.json({ success: true, ...store.listProducts(stringList(req.body?.graph, 2000)) });
+    res.json({ success: true, ...(await store.listProducts(stringList(req.body?.graph, 2000))) });
   } catch (e) {
     console.error("[local-sources] продукты базы:", e);
     fail(res, 500, e.message);
   }
 });
 
-router.post("/local-sources/product-sources", (req, res) => {
+router.post("/local-sources/product-sources", async (req, res) => {
   const keys = stringList(req.body?.keys, 100);
   if (!keys.length) return fail(res, 400, "keys is required");
   try {
-    res.json({ success: true, ...store.productSources(keys) });
+    res.json({ success: true, ...(await store.productSources(keys)) });
   } catch (e) {
     console.error("[local-sources] источники продукта базы:", e);
     fail(res, 500, e.message);

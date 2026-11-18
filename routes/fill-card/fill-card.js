@@ -74,7 +74,7 @@ router.post("/gpt/fill-card", async (req, res) => {
     // (rawText) граф не известен — данных не подбираем.
     const known =
       nodeType === "transformation" && keys.includes("material_balance") && !rawText
-        ? knownTransformationData(nodeObj, chainObj)
+        ? await knownTransformationData(nodeObj, chainObj)
         : null;
     // Формат ответа дописываем к любому промпту, и к правленому в интерфейсе
     // тоже: сам промпт описывает поля в виде «Поле: …», и без этой приписки

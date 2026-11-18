@@ -21,10 +21,12 @@ Node.js, Express 5, CommonJS.
 - `node server.js` (порт `PORT`, по умолчанию 3001; проверка — `/api/health`).
   Ключи моделей и подключение к Postgres — в `.env` (в git не попадает).
 - `npm test` — тесты разбора шага на подставных ответах модели
-  (`test/`, node:test). Тесты хранилища графов на PostgreSQL — с
-  `TEST_DATABASE_URL` (тестовая база, не боевая: тесты чистят `app.*`); без
-  неё — только на файлах. Линтера нет; минимум для остального — модуль
-  загружается: `node -e "require('./routes/step/build.js')"`.
+  (`test/`, node:test). Тесты хранилища графов, базы источников и расчётов
+  баланса на PostgreSQL — с `TEST_DATABASE_URL` (тестовая база, не боевая:
+  тесты чистят `app.*`); без неё — только на файлах и SQLite. Записи в
+  базу источников в тестах — через `test/helpers/sources.js`. Линтера нет;
+  минимум для остального — модуль загружается:
+  `node -e "require('./routes/step/build.js')"`.
 - Промпты обобщения и разбор шага проверяй скиллом `prompt-check`
   (`.claude/skills/prompt-check/`): `--dry` бесплатно, живой прогон — по
   запросу к модели на кейс.
@@ -64,10 +66,16 @@ Node.js, Express 5, CommonJS.
   пропускает); клиент шлёт так, на старом сервере повторяет несжатым. Файлы
   `data/<вид>/<граф>.json` (по умолчанию) или PostgreSQL (`GRAPH_STORE=pg`,
   схема `app`). `data/` не в git.
-- `db/` — PostgreSQL: подключение (`pool.js`, те же `DB_*`), миграции
-  `db/migrations/NNN_*.sql` (`npm run pg:migrate`), перенос библиотеки
-  файлы ⇄ база (`graphTransfer.js`, `scripts/migrate-graphs-to-pg.js`,
-  `scripts/export-graphs-from-pg.js`).
+- `db/` — PostgreSQL: подключение (`pool.js`, те же `DB_*`, search_path
+  `app`), миграции `db/migrations/NNN_*.sql` (`npm run pg:migrate`), перенос
+  библиотеки файлы ⇄ база (`graphTransfer.js`,
+  `scripts/migrate-graphs-to-pg.js`, `scripts/export-graphs-from-pg.js`).
+  База источников и расчёты баланса — SQLite или PostgreSQL
+  (`SOURCES_STORE=pg`, `sourcesDb.js`): хранилища пишут один SQL на обе
+  базы через `sql.js` (функции с базой — асинхронные; COUNT — через
+  CAST, порядок вставки — `conn.rowid`); перенос SQLite ⇄ база —
+  `sourcesTransfer.js`, `scripts/migrate-sources-to-pg.js`,
+  `scripts/export-sources-from-pg.js`.
 - `routes/industry/` — справочники и идентификация продуктов
   (`IDENTIFICATION.md`); коды ОКПД2/ТН ВЭД моделью по файлам `reference/`
   — `codes.js` (`/graphs/gpt/product-codes`, сохранённые — в
@@ -79,9 +87,10 @@ Node.js, Express 5, CommonJS.
   напоминай владельцу, когда работа касается этих мест (промпты v4:
   изделия вверх — если вернёмся к v4).
 - `PG-MIGRATION.md` — план перехода хранилищ (файлы графов, SQLite) на
-  PostgreSQL по этапам (порядок владельца 18.11): графы → источники и
-  балансы → слой знаний и векторы (GraphRAG) → чат с ИИ в открытом графе,
-  в отдельном окне → пользователи (JWT, свои и общие графы, сокеты,
+  PostgreSQL по этапам (порядок владельца 18.11): графы (включено на
+  боевом) → источники и балансы (готово, включает владелец) → слой знаний и
+  векторы (GraphRAG) → чат с ИИ в открытом графе, в отдельном окне →
+  пользователи (JWT, свои и общие графы, сокеты,
   комментарии). `node scripts/db-info.js` — что за Postgres на
   сервере (ничего не меняет).
 - `BACKUP.md` — резервные копии (`npm run backup`, `scripts/backup.js`):

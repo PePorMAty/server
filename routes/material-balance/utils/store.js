@@ -19,12 +19,17 @@
 // Колонка direction осталась от недолгой версии с расчётами «вверх» (на 1 т
 // продукта): такие строки, если успели появиться, в ответы не идут — их
 // числа посчитаны на другой базис.
+//
+// С SOURCES_STORE=pg (этап 2 PG-MIGRATION.md) таблицы — в PostgreSQL (схема
+// app), копии веб-страниц — по-прежнему файлами. SQL один на обе базы
+// (db/sql.js), поэтому функции с базой — асинхронные.
 
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const Database = require("better-sqlite3");
 
+const { sqliteConn, pgConn, marks } = require("../../../db/sql");
+const { sourcesStoreKind, sourcesPool } = require("../../../db/sourcesDb");
 const { productKey } = require("../../local-sources/utils/query");
 const {
   stemName,
@@ -40,6 +45,8 @@ const {
 const REUSABLE = ["calculated", "partial"];
 
 let db = null;
+/** Открытая база: { file | pool, conn: адаптер db/sql.js }. */
+let opened = null;
 
 function dbPath() {
   return (
@@ -48,12 +55,39 @@ function dbPath() {
   );
 }
 
-function getDb() {
-  if (db) return db;
+/**
+ * Открыть базу: SQLite (файл dbPath()) или PostgreSQL (SOURCES_STORE=pg).
+ * Возвращает адаптер db/sql.js.
+ */
+function getConn() {
+  if (sourcesStoreKind() === "pg") {
+    const pool = sourcesPool();
+    if (opened?.pool !== pool) {
+      closeSqlite();
+      opened = { pool, conn: pgConn(pool) };
+    }
+    return opened.conn;
+  }
   const file = dbPath();
+  if (opened?.file !== file) {
+    closeSqlite();
+    opened = { file, conn: sqliteConn(openSqlite(file)) };
+  }
+  return opened.conn;
+}
+
+/** Файл SQLite с таблицами. */
+function openSqlite(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  const Database = require("better-sqlite3");
   db = new Database(file);
   db.pragma("journal_mode = WAL");
+  createSqliteTables(db);
+  return db;
+}
+
+/** Таблицы SQLite и прежние колонки (в PostgreSQL — миграция 002). */
+function createSqliteTables(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS balances (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +146,6 @@ function getDb() {
     );
     CREATE INDEX IF NOT EXISTS web_documents_url ON web_documents (url);
   `);
-  return db;
 }
 
 /** Каталог копий веб-источников. */
@@ -124,45 +157,42 @@ function sourcesDir() {
  * Сохранить загруженный источник: оригинал (<sha>.pdf / .html) и текст
  * (<sha>.txt). Возвращает запись.
  */
-function saveWebDocument({ url, finalUrl, kind, contentType, title, body, text }) {
+async function saveWebDocument({ url, finalUrl, kind, contentType, title, body, text }) {
   const dir = sourcesDir();
   fs.mkdirSync(dir, { recursive: true });
   const sha = crypto.createHash("sha256").update(body).digest("hex");
   const ext = kind === "pdf" ? "pdf" : "html";
   fs.writeFileSync(path.join(dir, `${sha}.${ext}`), body);
   fs.writeFileSync(path.join(dir, `${sha}.txt`), text);
-  const info = getDb()
-    .prepare(
-      `INSERT INTO web_documents (url, final_url, kind, content_type, title, sha256, bytes, chars, fetched_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      String(url),
-      String(finalUrl || url),
-      kind,
-      contentType || null,
-      String(title || "").slice(0, 500),
-      sha,
-      body.length,
-      text.length,
-      new Date().toISOString(),
-    );
-  return webDocument(Number(info.lastInsertRowid));
+  const id = await getConn().insert(
+    `INSERT INTO web_documents (url, final_url, kind, content_type, title, sha256, bytes, chars, fetched_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    String(url),
+    String(finalUrl || url),
+    kind,
+    contentType || null,
+    String(title || "").slice(0, 500),
+    sha,
+    body.length,
+    text.length,
+    new Date().toISOString(),
+  );
+  return webDocument(id);
 }
 
-function webDocument(id) {
-  return getDb().prepare("SELECT * FROM web_documents WHERE id = ?").get(Number(id)) ?? null;
+async function webDocument(id) {
+  return (await getConn().get("SELECT * FROM web_documents WHERE id = ?", Number(id))) ?? null;
 }
 
 /** Свежая копия того же адреса — не старше days дней. */
-function recentWebDocument(url, days) {
+async function recentWebDocument(url, days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
   return (
-    getDb()
-      .prepare(
-        "SELECT * FROM web_documents WHERE url = ? AND fetched_at >= ? ORDER BY id DESC LIMIT 1",
-      )
-      .get(String(url), since) ?? null
+    (await getConn().get(
+      "SELECT * FROM web_documents WHERE url = ? AND fetched_at >= ? ORDER BY id DESC LIMIT 1",
+      String(url),
+      since,
+    )) ?? null
   );
 }
 
@@ -175,8 +205,8 @@ function webDocumentFiles(doc) {
   };
 }
 
-function webDocumentText(id) {
-  const doc = webDocument(id);
+async function webDocumentText(id) {
+  const doc = await webDocument(id);
   if (!doc) return "";
   try {
     return fs.readFileSync(webDocumentFiles(doc).text, "utf8");
@@ -265,7 +295,7 @@ function keysOf({ basis, target, transformation }) {
  * опорное), rec.targets — продукты, для которых посчитано, rec.basisAmount —
  * количество опорного сырья ({ amount, unit, kg }).
  */
-function save(rec) {
+async function save(rec) {
   const inputs = rec.inputs.map(String);
   const targets = rec.targets.map(String);
   const keys = keysOf({
@@ -273,42 +303,35 @@ function save(rec) {
     target: targets[0],
     transformation: rec.transformation,
   });
-  const info = getDb()
-    .prepare(
-      `INSERT INTO balances (basis_key, target_key, tech_key, basis_label, target_label,
-         tech_label, direction, kind, inputs_key, targets_key, inputs_label, targets_label,
-         title, basis_amount, local_key, status, answer, parsed, refs, known_data, custom_prompt,
-         provider, model, took_ms, created_at)
-       VALUES (@basis_key, @target_key, @tech_key, @basis_label, @target_label, @tech_label,
-         @direction, @kind, @inputs_key, @targets_key, @inputs_label, @targets_label,
-         @title, @basis_amount, @local_key, @status, @answer, @parsed, @refs, @known_data,
-         @custom_prompt, @provider, @model, @took_ms, @created_at)`,
-    )
-    .run({
-      ...keys,
-      ...setKeys(inputs, targets),
-      basis_label: inputs[0],
-      target_label: targets[0],
-      tech_label: String(rec.transformation),
-      direction: "down",
-      kind: "transformation",
-      inputs_label: JSON.stringify(inputs),
-      targets_label: JSON.stringify(targets),
-      title: titleOf(rec.transformation, targets),
-      basis_amount: JSON.stringify(rec.basisAmount),
-      local_key: String(rec.localKey || ""),
-      status: rec.parsed.status,
-      answer: rec.answer,
-      parsed: JSON.stringify(rec.parsed),
-      refs: JSON.stringify(rec.refs),
-      known_data: String(rec.knownData || ""),
-      custom_prompt: rec.customPrompt ? 1 : 0,
-      provider: rec.provider || null,
-      model: rec.model || null,
-      took_ms: rec.tookMs ?? null,
-      created_at: new Date().toISOString(),
-    });
-  return Number(info.lastInsertRowid);
+  const row = {
+    ...keys,
+    ...setKeys(inputs, targets),
+    basis_label: inputs[0],
+    target_label: targets[0],
+    tech_label: String(rec.transformation),
+    direction: "down",
+    kind: "transformation",
+    inputs_label: JSON.stringify(inputs),
+    targets_label: JSON.stringify(targets),
+    title: titleOf(rec.transformation, targets),
+    basis_amount: JSON.stringify(rec.basisAmount),
+    local_key: String(rec.localKey || ""),
+    status: rec.parsed.status,
+    answer: rec.answer,
+    parsed: JSON.stringify(rec.parsed),
+    refs: JSON.stringify(rec.refs),
+    known_data: String(rec.knownData || ""),
+    custom_prompt: rec.customPrompt ? 1 : 0,
+    provider: rec.provider || null,
+    model: rec.model || null,
+    took_ms: rec.tookMs ?? null,
+    created_at: new Date().toISOString(),
+  };
+  const cols = Object.keys(row);
+  return getConn().insert(
+    `INSERT INTO balances (${cols.join(", ")}) VALUES (${marks(cols)})`,
+    ...cols.map((c) => row[c]),
+  );
 }
 
 const list = (json) => {
@@ -361,8 +384,8 @@ function full(row) {
   };
 }
 
-function get(id) {
-  const row = getDb().prepare("SELECT * FROM balances WHERE id = ?").get(Number(id));
+async function get(id) {
+  const row = await getConn().get("SELECT * FROM balances WHERE id = ?", Number(id));
   return row ? full(row) : null;
 }
 
@@ -389,6 +412,28 @@ function complete(r) {
 const REUSABLE_SQL = `direction = 'down' AND status IN (${REUSABLE.map(() => "?").join(", ")})`;
 
 /**
+ * Колонки для поиска готового — без answer: ответ модели (десятки КБ) поиску
+ * не нужен, его отдаёт get(). С ним проверка готовых расчётов для графа на
+ * 200 преобразований поднимала из базы сотни мегабайт.
+ */
+const LOOKUP_COLUMNS = [
+  "id", "basis_key", "target_key", "tech_key", "basis_label", "target_label", "tech_label",
+  "direction", "status", "parsed", "refs", "known_data", "custom_prompt", "model", "created_at",
+  "kind", "inputs_key", "targets_key", "inputs_label", "targets_label", "title", "basis_amount", "local_key",
+].join(", ");
+
+/**
+ * Все расчёты, которые можно взять готовыми, свежие первыми, — один раз на
+ * запрос с многими преобразованиями (ready для графа), дальше lookup(…, { rows }).
+ */
+async function reusableRows() {
+  return getConn().all(
+    `SELECT ${LOOKUP_COLUMNS} FROM balances WHERE ${REUSABLE_SQL} ORDER BY created_at DESC, id DESC`,
+    ...REUSABLE,
+  );
+}
+
+/**
  * Готовые расчёты преобразования.
  *
  * exact — расчёт по преобразованию целиком (не прежней пары) той же
@@ -402,16 +447,12 @@ const REUSABLE_SQL = `direction = 'down' AND status IN (${REUSABLE.map(() => "?"
  * другим сырьём, со своими условиями или прежние расчёты пар. По одному на
  * вариант, свежие первыми; их только предлагаем.
  */
-function lookup({ transformation, inputs, targets, localKey = "" }) {
+async function lookup({ transformation, inputs, targets, localKey = "" }, { rows } = {}) {
   const tech = techKey(transformation);
   const ins = new Set(inputs.map((n) => productKey(n)));
   const want = [...new Set(targets.map((n) => productKey(n)))];
   const keys = setKeys(inputs, targets);
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM balances WHERE ${REUSABLE_SQL} ORDER BY created_at DESC, id DESC`,
-    )
-    .all(...REUSABLE);
+  rows = rows ?? (await reusableRows());
   const candidates = rows.filter((r) => {
     const has = new Set(list(r.targets_key));
     return want.every((k) => has.has(k)) && list(r.inputs_key).some((k) => ins.has(k));
@@ -451,16 +492,17 @@ function lookup({ transformation, inputs, targets, localKey = "" }) {
  * Пара — это и расчёт преобразования с одним продуктом и тем же опорным
  * сырьём.
  */
-function lookupPair({ basis, target, transformation }) {
+async function lookupPair({ basis, target, transformation }) {
   const keys = keysOf({ basis, target, transformation });
   const targetsKey = setKey([target]);
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM balances
-       WHERE basis_key = ? AND targets_key = ? AND ${REUSABLE_SQL}
-       ORDER BY created_at DESC, id DESC`,
-    )
-    .all(keys.basis_key, targetsKey, ...REUSABLE);
+  const rows = await getConn().all(
+    `SELECT ${LOOKUP_COLUMNS} FROM balances
+     WHERE basis_key = ? AND targets_key = ? AND ${REUSABLE_SQL}
+     ORDER BY created_at DESC, id DESC`,
+    keys.basis_key,
+    targetsKey,
+    ...REUSABLE,
+  );
   const exact = rows.find((r) => r.tech_key === keys.tech_key && plain(r) && complete(r)) ?? null;
   const kindOf = (r) => `${r.tech_key}\u0000${plain(r) ? "" : r.id}`;
   const seen = new Set(exact ? [kindOf(exact)] : []);
@@ -474,16 +516,26 @@ function lookupPair({ basis, target, transformation }) {
   return { exact: exact ? summary(exact) : null, similar };
 }
 
-function close() {
+function closeSqlite() {
   if (db) db.close();
   db = null;
+  opened = null;
+}
+
+/** Закрыть базу (скрипты и тесты). Пул PostgreSQL закрывает его владелец. */
+function close() {
+  closeSqlite();
 }
 
 module.exports = {
+  // Адаптер открытой базы (db/sql.js) — тестам и скрипту переноса.
+  connection: getConn,
+  createSqliteTables,
   save,
   get,
   lookup,
   lookupPair,
+  reusableRows,
   techKey,
   titleOf,
   saveWebDocument,

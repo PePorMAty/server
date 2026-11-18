@@ -27,6 +27,7 @@ const fs = require("fs");
 const path = require("path");
 
 const store = require("../routes/local-sources/utils/store");
+const { sourcesStoreKind, sourcesPool } = require("../db/sourcesDb");
 const decode = require("../routes/local-sources/utils/decode");
 
 const argv = process.argv.slice(2);
@@ -98,8 +99,8 @@ function printRoles(roles, indent) {
 /** Разобрать очередь моделью здесь же, показывая ход. */
 async function decodeQueue() {
   // Разделы, брошенные прерванным прошлым запуском, — снова в очередь.
-  store.resetStale();
-  const pending = store.stats().sections.pending || 0;
+  await store.resetStale();
+  const pending = (await store.stats()).sections.pending || 0;
   if (!pending) return;
   console.log(`\nРазбор моделью: разделов в очереди ${pending}. Можно прервать (Ctrl+C) — остальное разберёт сервер.\n`);
   let n = 0;
@@ -158,15 +159,15 @@ async function importFiles(paths) {
   if (!flag("--no-decode")) await decodeQueue();
 }
 
-function list() {
-  const st = store.stats();
+async function list() {
+  const st = await store.stats();
   const s = st.sections;
   console.log(
     `В базе: ${st.documents} документов; разделов разобрано ${s.done || 0}, в очереди ${(s.pending || 0) + (s.working || 0)}, с ошибкой ${s.failed || 0}` +
       (st.webSources ? `; найденного моделью (не отдаётся, --purge-web): ${st.webSources}` : "") +
-      `.\n${st.dir}\n`,
+      `.\n${st.store === "postgres" ? "PostgreSQL (SOURCES_STORE=pg), PDF — " : ""}${st.dir}\n`,
   );
-  for (const d of store.listDocuments()) {
+  for (const d of await store.listDocuments()) {
     console.log(
       `№${String(d.id).padEnd(4)} ${d.title}\n      ${d.fileName} — ${d.pages} стр., ${kb(d.bytes)}, ${d.addedAt.slice(0, 10)} (${d.addedVia === "script" ? "скрипт" : "интерфейс"})` +
         (d.textlessPages ? `, без текста: ${d.textlessPages} стр.` : "") +
@@ -176,8 +177,8 @@ function list() {
   }
 }
 
-function sections(id) {
-  const list = store.listSections(id);
+async function sections(id) {
+  const list = await store.listSections(id);
   if (!list) {
     console.log(`Документа №${id} нет.`);
     return;
@@ -189,9 +190,9 @@ function sections(id) {
   }
 }
 
-function find(product) {
+async function find(product) {
   for (const dir of ["up", "down"]) {
-    const local = store.sourcesFor(product, dir);
+    const local = await store.sourcesFor(product, dir);
     console.log(`«${product}» ${dir === "up" ? "вверх (из чего делают)" : "вниз (что делают из него)"}: разделов ${local.length}`);
     for (const s of local) {
       console.log(`  ${s.title} — ${s.access_hint}`);
@@ -202,9 +203,9 @@ function find(product) {
 }
 
 /** Продукты базы: ↑ — разделов «как получают», ↓ — «что из него делают». */
-function products(query) {
+async function products(query) {
   const q = query.trim().toLowerCase();
-  const { products: all, hidden } = store.listProducts();
+  const { products: all, hidden } = await store.listProducts();
   const shown = q
     ? all.filter((p) => [p.label, ...p.names].some((n) => n.toLowerCase().includes(q)))
     : all;
@@ -228,15 +229,15 @@ function products(query) {
           .join("\n"),
       );
     } else if (flag("--list")) {
-      list();
+      await list();
     } else if (flag("--sections")) {
-      sections(Number(option("--sections")));
+      await sections(Number(option("--sections")));
     } else if (flag("--decode")) {
       const id = Number(option("--decode"));
-      if (!store.getDocument(id)) {
+      if (!(await store.getDocument(id))) {
         console.log(`Документа №${option("--decode")} нет.`);
       } else {
-        const n = store.requeue(id, {
+        const n = await store.requeue(id, {
           only: flag("--all") ? "all" : "failed",
           provider: option("--provider"),
           model: option("--model"),
@@ -257,7 +258,7 @@ function products(query) {
         if (!flag("--no-decode")) await decodeQueue();
       }
     } else if (flag("--purge-web")) {
-      const n = store.purgeWebSources({ dryRun: !flag("--yes") });
+      const n = await store.purgeWebSources({ dryRun: !flag("--yes") });
       console.log(
         flag("--yes")
           ? `Удалено найденного моделью: ${n}.`
@@ -265,15 +266,17 @@ function products(query) {
       );
     } else if (flag("--delete")) {
       const id = Number(option("--delete"));
-      console.log(store.deleteDocument(id) ? `Документ №${id} удалён.` : `Документа №${option("--delete")} нет.`);
+      console.log((await store.deleteDocument(id)) ? `Документ №${id} удалён.` : `Документа №${option("--delete")} нет.`);
     } else if (flag("--find")) {
-      find(argv.slice(argv.indexOf("--find") + 1).join(" "));
+      await find(argv.slice(argv.indexOf("--find") + 1).join(" "));
     } else if (flag("--products")) {
-      products(argv.slice(argv.indexOf("--products") + 1).join(" "));
+      await products(argv.slice(argv.indexOf("--products") + 1).join(" "));
     } else {
       await importFiles(positional);
     }
   } finally {
     store.close();
+    // С SOURCES_STORE=pg открыт пул базы — без этого скрипт не завершится.
+    if (sourcesStoreKind() === "pg") await sourcesPool().end().catch(() => {});
   }
 })();

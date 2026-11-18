@@ -7,7 +7,7 @@
 // задан, главнее — так удобнее тестам и пробным прогонам.
 //
 // Пул один на процесс и создаётся при первом обращении: с GRAPH_STORE=files
-// (по умолчанию) к базе за графами не ходим вовсе.
+// и SOURCES_STORE=sqlite (по умолчанию) к базе не ходим вовсе.
 
 const { Pool } = require("pg");
 
@@ -28,11 +28,16 @@ const LIMITS = {
   idle_in_transaction_session_timeout: 60_000,
 };
 
+// Таблицы без схемы в запросах — из app: так база источников и расчёты
+// баланса (db/sql.js) пишут один SQL и для SQLite, и для PostgreSQL. Графы,
+// миграции и перенос пишут схему явно (app., public.) — им это не мешает.
+const SEARCH_PATH = { options: "-c search_path=app,public" };
+
 function poolConfig(env = process.env) {
   // Сервер один, людей десятки: десяти соединений хватает с запасом (на
   // сохранение клиент шлёт сразу несколько запросов), а память на сервере
   // (2 ГБ рядом с API и VPN) не тратим — соединение базы — несколько МБ.
-  if (env.DATABASE_URL) return { connectionString: env.DATABASE_URL, max: 10, ...LIMITS };
+  if (env.DATABASE_URL) return { connectionString: env.DATABASE_URL, max: 10, ...LIMITS, ...SEARCH_PATH };
   return {
     host: env.DB_HOST,
     port: env.DB_PORT ? Number(env.DB_PORT) : undefined,
@@ -41,6 +46,7 @@ function poolConfig(env = process.env) {
     database: env.DB_NAME,
     max: 10,
     ...LIMITS,
+    ...SEARCH_PATH,
   };
 }
 

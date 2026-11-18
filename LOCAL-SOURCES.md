@@ -28,6 +28,11 @@
 
 Каталог можно переопределить переменной `LOCAL_SOURCES_DIR`.
 
+С `SOURCES_STORE=pg` (этап 2 `PG-MIGRATION.md`) документы, разделы и связи
+— в PostgreSQL (схема `app`), а PDF — по-прежнему в `files/`. Перенос и
+откат — `scripts/migrate-sources-to-pg.js` и
+`scripts/export-sources-from-pg.js`.
+
 ## Как документ становится разделами
 
 Текст достаём PDF.js (пакет `unpdf`) — без внешних программ. Колонтитулы

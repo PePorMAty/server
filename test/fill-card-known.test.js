@@ -26,7 +26,7 @@ require.cache[openaiPath].exports = {
   extractOutputText: (r) => r.text,
 };
 
-const store = require("../routes/local-sources/utils/store");
+const { addDoc, addSection } = require("./helpers/sources");
 const router = require("../routes/fill-card/fill-card");
 const handle = router.stack.find((l) => l.route?.path === "/gpt/fill-card").route.stack[0].handle;
 
@@ -43,34 +43,17 @@ function fillCard(body) {
 }
 
 /** Раздел ИТС: фенол — сырьё, алкилфенол — продукт, в тексте — нормы расхода. */
-function addAlkylphenolSection() {
-  store.listDocuments();
-  store.close();
-  const db = new (require("better-sqlite3"))(path.join(store.baseDir(), "sources.sqlite"));
-  const doc = db
-    .prepare(
-      `INSERT INTO documents (sha256, file_name, title, short_title, pages, chars, bytes, added_at, added_via)
-       VALUES ('its31', 'its31.pdf', 'ИТС 31', 'ИТС 31—2021', 100, 1000, 1000, '2026-10-29T00:00:00Z', 'ui')`,
-    )
-    .run().lastInsertRowid;
+async function addAlkylphenolSection() {
+  const doc = await addDoc({ shortTitle: "ИТС 31—2021", title: "ИТС 31" });
   const text =
     "Раздел 9. Производство алкилфенолов. Алкилирование фенола тримерами пропилена на ионообменной смоле. " +
     "Таблица 9.4 — Расход сырья: фенол 439 кг/т продукции, тримеры пропилена 626 кг/т продукции. ".repeat(3);
-  const id = Number(
-    db
-      .prepare(
-        `INSERT INTO sections (doc_id, ord, title, path, page_from, page_to, text, status, summary)
-         VALUES (?, 0, 'Раздел 9 Производство алкилфенолов', '', 75, 79, ?, 'done', 'Алкилфенолы получают алкилированием фенола тримерами пропилена.')`,
-      )
-      .run(doc, text).lastInsertRowid,
+  await addSection(
+    doc,
+    "Раздел 9 Производство алкилфенолов",
+    { product: ["Алкилфенол"], raw: ["Фенол", "Тримеры пропилена"] },
+    { text, summary: "Алкилфенолы получают алкилированием фенола тримерами пропилена.", pages: [75, 79] },
   );
-  const link = db.prepare(
-    `INSERT OR IGNORE INTO section_products (section_id, key, label, direction, role, origin) VALUES (?, ?, ?, ?, ?, 'model')`,
-  );
-  for (const [name, role, dir] of [["Алкилфенол", "product", "up"], ["Фенол", "raw", "down"], ["Тримеры пропилена", "raw", "down"]]) {
-    for (const key of store.nameKeys(name)) link.run(id, key, name, dir, role);
-  }
-  db.close();
 }
 
 const graph = (inputs, output) => {
@@ -81,7 +64,7 @@ const graph = (inputs, output) => {
 };
 
 test("баланс в техописании — по ИТС: фрагмент с нормами и указание назвать источник", async () => {
-  addAlkylphenolSection();
+  await addAlkylphenolSection();
   const { node, chain } = graph(["Фенол", "Тримеры пропилена"], "Алкилфенол");
   const r = await fillCard({ nodeType: "transformation", productName: "Фенол", node, chain, selectedFields: ["material_balance"] });
   assert.equal(r.success, true);
