@@ -990,7 +990,19 @@ function sectionSource(r) {
  * пропилен получают вместе с этиленом. Этот же порядок у блоков обобщения
  * шага.
  */
-function sectionRows(keys, direction, limit = 0) {
+// Колонки раздела без текста и разбора: текст раздела ИТС — десятки страниц,
+// а счёту источников, проверке готового расчёта баланса и списку разделов он
+// не нужен. С текстом граф на 687 узлов при открытии (ready баланса,
+// подсчёт источников) поднимал из базы мегабайты и держал сервер секундами
+// (боевой сервер 18.11).
+const LIGHT_SECTION_COLUMNS =
+  "s.id, s.doc_id, s.ord, s.number, s.title, s.full_title, s.path, s.page_from, s.page_to, s.status, s.summary";
+
+/**
+ * Разделы базы по ключам продукта в направлении. withText: false — без
+ * колонок text/io/extracted (см. LIGHT_SECTION_COLUMNS); порядок и состав те же.
+ */
+function sectionRows(keys, direction, limit = 0, { withText = true } = {}) {
   if (!keys.length) return [];
   const conn = getDb();
   const dir = direction === "up" ? "up" : "down";
@@ -1018,7 +1030,7 @@ function sectionRows(keys, direction, limit = 0) {
   const notOld = old.length ? `AND s.doc_id NOT IN (${old.map(() => "?").join(",")})` : "";
   const rows = conn
     .prepare(
-      `SELECT s.*, d.title AS doc_title, d.short_title, d.page_offset,
+      `SELECT ${withText ? "s.*" : LIGHT_SECTION_COLUMNS}, d.title AS doc_title, d.short_title, d.page_offset,
               MIN(CASE sp.role WHEN 'product' THEN 0 WHEN 'byproduct' THEN 1
                                WHEN 'intermediate' THEN 2 ELSE 3 END) AS rank,
               MAX(sp.origin = 'model') AS by_model
@@ -1088,7 +1100,7 @@ function sectionIntermediates(sectionIds) {
  * @returns [{ id, docId, docTitle, title, path, pageFrom, pageTo, pages,
  *             summary, text, targets: [названия], inputs: [названия], roles }]
  */
-function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3 } = {}) {
+function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3, withText = true } = {}) {
   const found = new Map();
   const entry = (r) => {
     let e = found.get(r.id);
@@ -1099,14 +1111,14 @@ function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3 } 
     return e;
   };
   for (const name of targets) {
-    for (const r of sectionRows(productKeys(name), "up")) {
+    for (const r of sectionRows(productKeys(name), "up", 0, { withText })) {
       const e = entry(r);
       e.targets.add(name);
       e.rank = Math.min(e.rank, r.rank);
     }
   }
   for (const name of inputs) {
-    for (const r of sectionRows(productKeys(name), "down")) {
+    for (const r of sectionRows(productKeys(name), "down", 0, { withText })) {
       if (found.has(r.id)) found.get(r.id).inputs.add(name);
     }
   }
@@ -1148,8 +1160,8 @@ function sectionsForTransformation({ inputs = [], targets = [] }, { limit = 3 } 
  */
 function countsFor(productName) {
   const keys = productKeys(productName);
-  const up = sectionRows(keys, "up");
-  const down = sectionRows(keys, "down");
+  const up = sectionRows(keys, "up", 0, { withText: false });
+  const down = sectionRows(keys, "down", 0, { withText: false });
   return {
     local: new Set([...up, ...down].map((r) => r.id)).size,
     localDir: { up: up.length, down: down.length },
@@ -1392,8 +1404,8 @@ function sectionItem(r) {
  */
 function productSources(keys) {
   return {
-    up: sectionRows(keys, "up").map(sectionItem),
-    down: sectionRows(keys, "down").map(sectionItem),
+    up: sectionRows(keys, "up", 0, { withText: false }).map(sectionItem),
+    down: sectionRows(keys, "down", 0, { withText: false }).map(sectionItem),
     web: { up: [], down: [] },
   };
 }

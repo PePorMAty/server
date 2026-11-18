@@ -143,6 +143,26 @@ function findLocalSources({ inputs, targets }) {
 /** Ключ набора разделов: другой набор — расчёт из базы уже не тот. */
 const localKey = (list) => list.map((l) => l.sectionId).sort((a, b) => a - b).join(",");
 
+/**
+ * Тот же ключ, что localKey(findLocalSources(…)), но без текста разделов и
+ * выдержек: проверке «есть ли готовый расчёт» нужны только номера разделов.
+ * findLocalSources поднимал текст каждого раздела ИТС и вырезал из него
+ * выдержки — на графе в 225 преобразований это секунды, когда сервер не
+ * отвечает никому (боевой сервер 18.11).
+ */
+function localSectionKey({ inputs, targets }) {
+  try {
+    const sections = localStore.sectionsForTransformation(
+      { inputs: inputs.map((n) => n.name), targets: targets.map((n) => n.name) },
+      { limit: MAX_SECTIONS, withText: false },
+    );
+    return localKey(sections.map((s) => ({ sectionId: s.id })));
+  } catch (e) {
+    console.warn("[material-balance] база источников недоступна:", e.message);
+    return "";
+  }
+}
+
 const ROLE = {
   product: "целевой продукт",
   byproduct: "попутный продукт",
@@ -205,6 +225,7 @@ function parseLocalUrl(url) {
 
 module.exports = {
   findLocalSources,
+  localSectionKey,
   localBlock,
   localChecks,
   localKey,
