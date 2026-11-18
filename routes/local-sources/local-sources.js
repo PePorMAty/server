@@ -230,8 +230,6 @@ router.post("/local-sources/documents/:id/decode", async (req, res) => {
   }
 });
 
-const LOOKUP_PARALLEL = 5;
-
 router.post("/local-sources/lookup", async (req, res) => {
   const products = Array.isArray(req.body?.products)
     ? [...new Set(req.body.products.map((p) => String(p || "").trim()).filter(Boolean))]
@@ -240,18 +238,9 @@ router.post("/local-sources/lookup", async (req, res) => {
     return fail(res, 400, `Не больше ${MAX_PRODUCTS} продуктов за раз.`);
   }
   try {
-    const out = {};
-    // Заменённые издания — один раз на весь граф, а не на каждый продукт.
-    const old = [...(await store.supersededDocs()).keys()];
-    // С PostgreSQL каждый продукт — два запроса по сети; граф на 250
-    // продуктов по одному ждал полсекунды. По LOOKUP_PARALLEL сразу —
-    // впятеро быстрее, а соединений пула остаётся и другим запросам.
-    for (let i = 0; i < products.length; i += LOOKUP_PARALLEL) {
-      const part = products.slice(i, i + LOOKUP_PARALLEL);
-      const counts = await Promise.all(part.map((p) => store.countsFor(p, { old })));
-      part.forEach((p, k) => (out[p] = counts[k]));
-    }
-    res.json({ success: true, products: out });
+    // Весь граф — одним запросом по ключам названий (countsForMany), а не
+    // двумя на продукт: с PostgreSQL это были сотни запросов по сети.
+    res.json({ success: true, products: await store.countsForMany(products) });
   } catch (e) {
     console.error("[local-sources] проверка продуктов:", e);
     fail(res, 500, e.message);
