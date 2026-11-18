@@ -136,7 +136,14 @@ router.post("/industry/codes", (req, res) => {
   }
 });
 
-router.post("/industry/lookup", (req, res) => {
+// Справочник ГИСП — SQLite на сотни МБ, запросы синхронные. После
+// перезапуска кэш поиска пуст, и граф на 279 продуктов искался 8,6 с, пока
+// сервер не отвечал никому — ни открытию графа, ни сохранению (боевой сервер
+// 18.11, журнал «[занят]»). Передышка каждые LOOKUP_BATCH продуктов пускает
+// остальные запросы между ними.
+const LOOKUP_BATCH = 20;
+
+router.post("/industry/lookup", async (req, res) => {
   try {
     const raw = req.body?.products;
     if (!Array.isArray(raw)) {
@@ -167,7 +174,9 @@ router.post("/industry/lookup", (req, res) => {
     }
 
     const results = {};
+    let done = 0;
     for (const name of names) {
+      if (++done % LOOKUP_BATCH === 0) await new Promise((r) => setImmediate(r));
       results[name] = lookupProduct(name);
     }
 

@@ -162,3 +162,61 @@ for (const s of setups) {
     });
   });
 }
+
+// Сжатое сохранение (18.11): клиент шлёт граф gzip'ом с Content-Type
+// application/gzip — через настоящий Express, как на сервере: общий
+// express.json впереди такие запросы пропускает, распаковывает роутер.
+describe("сохранение сжатым графом", () => {
+  const express = require("express");
+  const zlib = require("zlib");
+  let server;
+  let base;
+  let dir;
+
+  before(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "graph-gzip-"));
+    setStore(createFileStore({ dataDir: dir }));
+    const app = express();
+    app.use(express.json({ limit: "10mb" }));
+    app.use("/api/graph-files", graphFiles);
+    await new Promise((r) => (server = app.listen(0, r)));
+    base = `http://127.0.0.1:${server.address().port}/api/graph-files`;
+  });
+  after(async () => {
+    await new Promise((r) => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const gz = (o) => zlib.gzipSync(Buffer.from(JSON.stringify(o)));
+  const send = (method, url, body, type = "application/gzip") =>
+    fetch(`${base}${url}`, { method, headers: { "content-type": type }, body });
+
+  test("POST и PUT сжатым — как обычным JSON, версия растёт", async () => {
+    const r = await send("POST", "/save", gz({ name: "Сжатый", nodes, edges: [] }));
+    assert.equal(r.status, 200);
+    const saved = (await r.json()).data;
+    assert.equal(saved.name, "Сжатый");
+
+    const more = [...nodes, { id: "n2", type: "product", data: { label: "Ацетон" } }];
+    const u = await send("PUT", `/${encodeURIComponent(saved.id)}`, gz({ nodes: more, edges: [], version: saved.version }));
+    assert.equal(u.status, 200);
+    assert.equal((await u.json()).data.version, saved.version + 1);
+
+    const g = await (await fetch(`${base}/${encodeURIComponent(saved.id)}`)).json();
+    assert.deepEqual(g.graph.nodes.map((n) => n.data.label), ["Фенол", "Ацетон"]);
+
+    // Конфликт версий — тот же 409 и для сжатого.
+    const c = await send("PUT", `/${encodeURIComponent(saved.id)}`, gz({ nodes, edges: [], version: saved.version }));
+    assert.equal(c.status, 409);
+  });
+
+  test("обычный JSON по-прежнему принимается (старый клиент)", async () => {
+    const r = await send("POST", "/save", JSON.stringify({ name: "Несжатый", nodes, edges: [] }), "application/json");
+    assert.equal(r.status, 200);
+  });
+
+  test("битое сжатие — 400, а не падение", async () => {
+    const r = await send("POST", "/save", Buffer.from("это не gzip"));
+    assert.equal(r.status, 400);
+  });
+});

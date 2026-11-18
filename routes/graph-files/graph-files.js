@@ -10,11 +10,33 @@
 // сохранить свою копией. Без версии (старый клиент) — сохраняет как раньше.
 
 const express = require("express");
+const zlib = require("zlib");
+const { promisify } = require("util");
 
 const { safeId } = require("./utils");
 const { getStore, metaOf, ConflictError } = require("./store");
 
 const router = express.Router();
+
+// Граф приходит сжатым: Content-Type: application/gzip, внутри — тот же
+// JSON. Сайт отдаёт граф браузеру сжатым (1,6 МБ → 116 КБ), а сохранял
+// несжатым — 1,6 МБ, большой граф 8,6 МБ; на медленном канале сохранение
+// шло десятки секунд и обрывалось (ERR_HTTP2_PROTOCOL_ERROR, 18.11).
+// Заголовок Content-Encoding для этого не подходит: CORS сайта на GitHub
+// Pages настраивает nginx, и такой заголовок он не пропускает, а
+// Content-Type — пропускает. Распакованный граф — не больше 50 МБ.
+const gunzip = promisify(zlib.gunzip);
+const MAX_UNPACKED = 50 * 1024 * 1024;
+router.use(express.raw({ type: "application/gzip", limit: "20mb" }));
+router.use(async (req, res, next) => {
+  if (!Buffer.isBuffer(req.body) || !req.is("application/gzip")) return next();
+  try {
+    req.body = JSON.parse((await gunzip(req.body, { maxOutputLength: MAX_UNPACKED })).toString("utf8"));
+    next();
+  } catch {
+    res.status(400).json({ error: "bad gzip body" });
+  }
+});
 
 /** Кто делает: появится с пользователями (этап 5 PG-MIGRATION.md). */
 const actorOf = (req) => req.actor ?? null;
