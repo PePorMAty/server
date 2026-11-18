@@ -214,3 +214,39 @@ for (const impl of implementations) {
     }
   });
 }
+
+// Запись в данные одного графа идёт по очереди: при сохранении клиент шлёт
+// сразу граф и идентификаторы продуктов, а сервер после графа чистит
+// идентификаторы — без очереди PostgreSQL ловил взаимную блокировку
+// (deadlock, боевой сервер 18.11).
+if (PG_URL) {
+  test("PostgreSQL: сохранение графа, очистка и запись идентификаторов одновременно — без взаимной блокировки", async () => {
+    const { Pool } = require("pg");
+    const { migrate } = require("../db/migrate");
+    const pool = new Pool({ connectionString: PG_URL, max: 10 });
+    const unlock = await require("./helpers/pg").lockTestDb(pool);
+    try {
+      await migrate(pool);
+      await pool.query("TRUNCATE app.graphs, app.shares, app.settings CASCADE");
+      const store = createPgStore({ pool });
+      await store.createGraph("a.json", graph("Фенол", 40));
+      const ids = Array.from({ length: 200 }, (_, i) => [`n${i}`, { productId: `id-${i}` }]);
+      for (let round = 0; round < 10; round++) {
+        await Promise.all([
+          store.updateGraph("a.json", (c) => c),
+          store.clearProductIds("a.json"),
+          store.putProductIds("a.json", ids),
+          store.putProductIds("a.json", [...ids].reverse()),
+          store.clearBalances("a.json"),
+          store.putBalance("a.json", "t1", []),
+          store.appendHistory("a.json", [{ id: `h${round}`, kind: "save", title: "Сохранён" }]),
+        ]);
+      }
+      assert.equal((await store.getGraph("a.json")).version, 11);
+    } finally {
+      await pool.query("TRUNCATE app.graphs, app.shares, app.settings CASCADE").catch(() => {});
+      await unlock();
+      await pool.end();
+    }
+  });
+}

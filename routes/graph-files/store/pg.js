@@ -24,10 +24,21 @@ const json = (v) => JSON.stringify(v);
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
 
 function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISIONS_KEEP) || 5 }) {
-  async function tx(fn) {
+  /**
+   * Транзакция. graphId — запись в данные этого графа: тогда она идёт по
+   * очереди с остальными записями того же графа (рекомендательная блокировка
+   * на время транзакции), как очередь на файл в files.js.
+   *
+   * Без очереди клиент ловил взаимную блокировку (deadlock): при сохранении
+   * он шлёт сразу граф и идентификаторы продуктов, сервер после графа
+   * чистит идентификаторы, а параллельный запрос их пишет — строки
+   * блокировались в разном порядке (боевой сервер, 18.11).
+   */
+  async function tx(fn, graphId) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      if (graphId != null) await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [String(graphId)]);
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
@@ -128,15 +139,17 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
           [id, json(next), String(next.meta.name ?? id), nodeCount(next), nextVersion, actor],
         );
         return { id, content: next, version: nextVersion };
-      });
+      }, id);
     },
 
     async deleteGraph(id) {
-      const { rowCount } = await pool.query(
-        "UPDATE app.graphs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
-        [id],
-      );
-      return rowCount > 0;
+      return tx(async (c) => {
+        const { rowCount } = await c.query(
+          "UPDATE app.graphs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+          [id],
+        );
+        return rowCount > 0;
+      }, id);
     },
 
     // ---------- закладки: свежие первыми ----------
@@ -170,15 +183,17 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
           [id, nodeId, label ?? "", kind ?? "product", note ?? "", actor],
         );
         return { item: bookmarkRow(r.rows[0]), created: true };
-      });
+      }, id);
     },
 
     async deleteBookmark(id, nodeId) {
-      const { rowCount } = await pool.query(
-        "DELETE FROM app.graph_bookmarks WHERE graph_id = $1 AND node_id = $2",
-        [id, nodeId],
-      );
-      return rowCount > 0;
+      return tx(async (c) => {
+        const { rowCount } = await c.query(
+          "DELETE FROM app.graph_bookmarks WHERE graph_id = $1 AND node_id = $2",
+          [id, nodeId],
+        );
+        return rowCount > 0;
+      }, id);
     },
 
     // ---------- история ----------
@@ -200,11 +215,11 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
           [id, HISTORY_LIMIT],
         );
         return historyList(c, id, HISTORY_LIMIT);
-      });
+      }, id);
     },
 
     async clearHistory(id) {
-      await pool.query("DELETE FROM app.graph_history WHERE graph_id = $1", [id]);
+      await tx((c) => c.query("DELETE FROM app.graph_history WHERE graph_id = $1", [id]), id);
     },
 
     // ---------- расчёты баланса узлов ----------
@@ -214,15 +229,19 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
     },
 
     async putBalance(id, nodeId, calcs) {
-      await pool.query(
-        `INSERT INTO app.graph_balances (graph_id, node_id, calcs) VALUES ($1, $2, $3::jsonb)
-         ON CONFLICT (graph_id, node_id) DO UPDATE SET calcs = EXCLUDED.calcs, updated_at = now()`,
-        [id, nodeId, json(calcs)],
+      await tx(
+        (c) =>
+          c.query(
+            `INSERT INTO app.graph_balances (graph_id, node_id, calcs) VALUES ($1, $2, $3::jsonb)
+             ON CONFLICT (graph_id, node_id) DO UPDATE SET calcs = EXCLUDED.calcs, updated_at = now()`,
+            [id, nodeId, json(calcs)],
+          ),
+        id,
       );
     },
 
     async clearBalances(id) {
-      await pool.query("DELETE FROM app.graph_balances WHERE graph_id = $1", [id]);
+      await tx((c) => c.query("DELETE FROM app.graph_balances WHERE graph_id = $1", [id]), id);
     },
 
     // ---------- идентификаторы продуктов узлов ----------
@@ -244,11 +263,11 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
             );
           }
         }
-      });
+      }, id);
     },
 
     async clearProductIds(id) {
-      await pool.query("DELETE FROM app.graph_product_ids WHERE graph_id = $1", [id]);
+      await tx((c) => c.query("DELETE FROM app.graph_product_ids WHERE graph_id = $1", [id]), id);
     },
 
     // ---------- снимки «Поделиться» ----------
