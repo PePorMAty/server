@@ -92,6 +92,8 @@ function pgConn(pool, client = null) {
   const q = (sql, params) => (client || pool).query(numbered(sql), params.map(pgParam));
   const conn = {
     dialect: "pg",
+    // Пул — ключ для того, что считается раз на базу (есть ли таблица).
+    pool,
     // У PostgreSQL нет rowid: порядок вставки — колонка seq (identity).
     rowid: "seq",
     async all(sql, ...params) {

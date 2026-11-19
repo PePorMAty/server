@@ -24,6 +24,7 @@ const industryRoutes = require("./routes/industry/industry");
 const productCodesRoutes = require("./routes/industry/codes");
 const localSourcesRoutes = require("./routes/local-sources/local-sources");
 const materialBalanceRoutes = require("./routes/material-balance/material-balance");
+const knowledgeRoutes = require("./routes/knowledge/knowledge");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -128,9 +129,15 @@ require("./routes/graph-files/store")
 // (SOURCES_STORE=pg, PG-MIGRATION.md, этап 2).
 require("./db/sourcesDb")
   .checkSourcesStore()
-  .then(({ kind, warning }) => {
+  .then(async ({ kind, warning }) => {
     console.log(`📄 Источники и расчёты баланса: ${kind === "pg" ? "PostgreSQL (схема app)" : "SQLite в data/"}`);
     if (warning) console.warn(`⚠️  Источники: ${warning}`);
+    // Поиск по тексту разделов (этап 3а): куски у разделов, где их ещё нет.
+    if (kind !== "pg") return;
+    const conn = await require("./routes/local-sources/utils/store").connection();
+    const built = await require("./routes/knowledge/chunks").ensureSectionChunks(conn);
+    if (!built) console.warn("⚠️  Поиск по разделам: таблицы нет — выполните `npm run pg:migrate`");
+    else if (built.sections) console.log(`🔎 Поиск по разделам: нарезано разделов ${built.sections}, кусков ${built.chunks}`);
   })
   .catch((e) => console.error(`❌ Источники и расчёты баланса: ${e.message}`));
 
@@ -165,6 +172,7 @@ app.use("/api", industryRoutes);
 app.use("/api", productCodesRoutes);
 // Локальная база источников: PDF заказчика и найденное моделью.
 app.use("/api", localSourcesRoutes);
+app.use("/api", knowledgeRoutes);
 
 // Health check
 app.get("/api/health", async (req, res) => {

@@ -32,6 +32,7 @@ const { productKey } = require("./query");
 const { isProspectiveSection } = require("./prospective");
 const { sqliteConn, pgConn, marks } = require("../../../db/sql");
 const { sourcesStoreKind, sourcesPool } = require("../../../db/sourcesDb");
+const { rebuildSectionChunks } = require("../../knowledge/chunks");
 
 const DEFAULT_DIR = path.resolve(__dirname, "../../../data/local-sources");
 
@@ -503,9 +504,28 @@ const DOC_SELECT = `
     (SELECT CAST(COUNT(*) AS INTEGER) FROM sections s WHERE s.doc_id = d.id AND s.status = 'working') AS s_working
   FROM documents d`;
 
-/** Разделы документа из текста: удалить прежние, записать новые (к разбору). */
+/**
+ * Куски разделов для поиска по тексту (этап 3а, routes/knowledge/chunks.js)
+ * — после того, как разделы записаны. Отдельно от записи: не вышло — раздел
+ * всё равно сохранён, а куски сервер достроит при следующем запуске. В
+ * SQLite кусков нет.
+ */
+async function refreshChunks(conn, sectionIds) {
+  if (conn.dialect !== "pg" || !sectionIds.length) return;
+  try {
+    await conn.tx((t) => rebuildSectionChunks(t, sectionIds));
+  } catch (e) {
+    console.warn(`[local-sources] куски разделов для поиска: ${e.message}`);
+  }
+}
+
+/**
+ * Разделы документа из текста: удалить прежние, записать новые (к разбору).
+ * Возвращает номера записанных разделов.
+ */
 async function writeSections(conn, docId, units) {
   await conn.run("DELETE FROM sections WHERE doc_id = ?", docId);
+  const ids = [];
   for (const u of units) {
     // Перспективные технологии — не источник (prospective.js): не записываем
     // и, значит, не разбираем.
@@ -528,7 +548,9 @@ async function writeSections(conn, docId, units) {
     // Пока модель раздел не разобрала, продукт из заголовка «Производство
     // X» уже знаем: раздел — источник для X «вверх».
     await linkSection(conn, id, u.titleProducts || [], "product", "title");
+    ids.push(id);
   }
+  return ids;
 }
 
 /** Прочитать PDF и разбить на разделы. */
@@ -584,6 +606,7 @@ async function addDocument(
 
   fs.writeFileSync(filePath(sha256), buf);
   const now = new Date().toISOString();
+  let written = [];
   const docId = await conn.tx(async (t) => {
     const id = await t.insert(
       `INSERT INTO documents (sha256, file_name, title, short_title, pages, textless, chars, bytes,
@@ -605,9 +628,10 @@ async function addDocument(
       model,
       now,
     );
-    await writeSections(t, id, units);
+    written = await writeSections(t, id, units);
     return id;
   });
+  await refreshChunks(conn, written);
 
   return {
     document: docRow(await conn.get(`${DOC_SELECT} WHERE d.id = ?`, docId)),
@@ -628,7 +652,7 @@ async function reparseLegacyDocuments() {
     try {
       const buf = fs.readFileSync(filePath(d.sha256));
       const { structure, offset, units, titles } = await parseDocument(buf, d.file_name);
-      await conn.tx(async (t) => {
+      const written = await conn.tx(async (t) => {
         await t.run(
           `UPDATE documents SET title = ?, short_title = ?, structure = ?, page_offset = ?, parsed_at = ?
            WHERE id = ?`,
@@ -639,8 +663,9 @@ async function reparseLegacyDocuments() {
           new Date().toISOString(),
           d.id,
         );
-        await writeSections(t, d.id, units);
+        return writeSections(t, d.id, units);
       });
+      await refreshChunks(conn, written);
       n++;
     } catch (e) {
       console.error(`[local-sources] разбор «${d.file_name}» заново: ${e.message}`);
@@ -675,6 +700,7 @@ async function reparseDocument(id) {
   const buf = fs.readFileSync(filePath(d.sha256));
   const { structure, offset, units, titles } = await parseDocument(buf, d.file_name);
   let kept = 0;
+  let written = [];
   await conn.tx(async (t) => {
     await t.run(
       "DELETE FROM section_products WHERE section_id IN (SELECT id FROM sections WHERE doc_id = ?)",
@@ -690,7 +716,7 @@ async function reparseDocument(id) {
       new Date().toISOString(),
       id,
     );
-    await writeSections(t, id, units);
+    written = await writeSections(t, id, units);
     for (const f of await t.all("SELECT id, title, text FROM sections WHERE doc_id = ?", id)) {
       const old = prev.find((p) => p.status === "done" && p.title === f.title && p.text === f.text);
       if (!old) continue;
@@ -710,6 +736,8 @@ async function reparseDocument(id) {
       kept++;
     }
   });
+  // После сохранённых разборов: в первом куске — краткое содержание раздела.
+  await refreshChunks(conn, written);
   const after = (await conn.get("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM sections WHERE doc_id = ?", id)).n;
   return { before: prev.length, after, kept, structure };
 }
@@ -943,6 +971,8 @@ async function finishSection(id, result, model) {
     await linkSection(t, id, roles.intermediates, "intermediate", "model");
     await linkSection(t, id, roles.raw, "raw", "model");
   });
+  // Краткое содержание от модели — первым куском для поиска.
+  await refreshChunks(conn, [id]);
 }
 
 async function failSection(id, message) {
@@ -1621,6 +1651,7 @@ module.exports = {
   sectionsForTransformation,
   countsFor,
   countsForMany,
+  pageLabel,
   listProducts,
   productSources,
   purgeWebSources,
