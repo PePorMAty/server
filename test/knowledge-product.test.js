@@ -149,5 +149,30 @@ for (const backend of backends().filter((b) => b.name === "PostgreSQL")) {
       assert.deepEqual(card.balances.map((b) => [b.title, b.role]), [["Кумольный способ → Фенол, Ацетон", "input"]]);
       assert.equal((await productCard(await store.connection(), "Ацетон", { pool })).balances[0].role, "target");
     });
+
+    test("раздел: стадии с продуктом и пометка «несколько производств»", async () => {
+      const conn = await store.connection();
+      const doc = await addDoc({ shortTitle: "ИТС 31—2021" });
+      const alk = await addSection(doc, "Раздел 9 Производство алкилфенолов", { product: ["Алкилфенолы"], raw: ["Фенол", "Тримеры пропилена"] });
+      await conn.run(
+        "UPDATE sections SET io = ? WHERE id = ?",
+        JSON.stringify([
+          "Алкилирование фенола: Фенол, Тримеры пропилена → Алкилат, Сточные воды",
+          "Ректификация: Алкилат → Алкилфенолы, Кубовый продукт",
+        ]),
+        alk,
+      );
+      await addSection(doc, "Раздел 6 Производство азотсодержащих веществ", {
+        product: ["Акрилонитрил", "Ацетонитрил", "Синильная кислота", "Меламин", "Капролактам"],
+        raw: ["Пропилен", "Аммиак", "Фенол", "Водород"],
+      });
+      const card = await productCard(conn, "Фенол", { pool });
+      const nine = card.transformations.fromSections.find((t) => t.sectionId === alk);
+      assert.equal(nine.multi, false);
+      assert.deepEqual(nine.stages, ["Алкилирование фенола: Фенол, Тримеры пропилена → Алкилат, Сточные воды"]);
+      const six = card.transformations.fromSections.find((t) => t.source.endsWith("Раздел 6 Производство азотсодержащих веществ"));
+      assert.equal(six.multi, true);
+      assert.deepEqual(six.stages, []);
+    });
   });
 }
