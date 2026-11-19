@@ -2,9 +2,14 @@
 //
 //   POST /api/knowledge/search { q, limit?, product?, direction? }
 //     → { success, results: [раздел с выдержкой] } — поиск по тексту
-//       разделов ИТС (search.js). Только с SOURCES_STORE=pg.
+//       разделов ИТС (search.js);
+//   POST /api/knowledge/product { name }
+//     → { success, product, sections, transformations, balances, graphs,
+//         counts } — карточка знаний о продукте (product.js).
 //
-// Первый потребитель — чат с ИИ (этап 4): инструмент «где об этом написано».
+// Только с SOURCES_STORE=pg; графы в карточке — с GRAPH_STORE=pg.
+// Потребитель — чат с ИИ (этап 4): инструменты «где об этом написано» и
+// «что за продукт».
 
 const express = require("express");
 
@@ -12,6 +17,7 @@ const localStore = require("../local-sources/utils/store");
 const { sourcesStoreKind } = require("../../db/sourcesDb");
 const { chunksReady } = require("./chunks");
 const { searchSections } = require("./search");
+const { productCard } = require("./product");
 
 const router = express.Router();
 
@@ -34,6 +40,24 @@ router.post("/knowledge/search", async (req, res) => {
     res.json({ success: true, results: await searchSections(conn, q, { limit, product, direction }) });
   } catch (e) {
     console.error("[knowledge] поиск:", e);
+    fail(res, 500, e.message);
+  }
+});
+
+router.post("/knowledge/product", async (req, res) => {
+  const name = String(req.body?.name ?? "").trim().slice(0, 300);
+  if (!name) return fail(res, 400, "name is required");
+  if (sourcesStoreKind() !== "pg") {
+    return fail(res, 501, "Карточка знаний работает с базой источников в PostgreSQL (SOURCES_STORE=pg).");
+  }
+  try {
+    const conn = await localStore.connection();
+    const pool = require("../graph-files/store").storeKind() === "pg" ? require("../../db/pool").getPool() : null;
+    const card = await productCard(conn, name, { pool });
+    if (!card) return fail(res, 400, "В названии нет слов, по которым искать.");
+    res.json({ success: true, ...card });
+  } catch (e) {
+    console.error("[knowledge] карточка продукта:", e);
     fail(res, 500, e.message);
   }
 });

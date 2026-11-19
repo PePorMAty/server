@@ -21,9 +21,30 @@ const { ConflictError, metaOf, versionOf, nodeCount } = require("./common");
 const { HISTORY_LIMIT } = require("./files");
 
 const json = (v) => JSON.stringify(v);
+
+/**
+ * Указатель узлов графа для слоя знаний (этап 3б, routes/knowledge/
+ * graphIndex.js) — после сохранения, вне его транзакции: не вышел — граф
+ * всё равно сохранён, а указатель сервер достроит при следующем запуске.
+ * Сохранение его не ждёт: граф на 687 узлов считается ~0,15 с.
+ */
+async function reindex(pool, id) {
+  try {
+    await require("../../knowledge/graphIndex").indexGraph(pool, id);
+  } catch (e) {
+    console.warn(`[graph-files] указатель узлов графа ${id}: ${e.message}`);
+  }
+}
 const iso = (d) => (d instanceof Date ? d.toISOString() : d);
 
 function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISIONS_KEEP) || 5 }) {
+  // Пересчёты указателя — по очереди: два сохранения одного графа подряд не
+  // пишут его указатель наперегонки.
+  let indexing = Promise.resolve();
+  const scheduleReindex = (id) => {
+    indexing = indexing.then(() => reindex(pool, id));
+  };
+
   /**
    * Транзакция. graphId — запись в данные этого графа: тогда она идёт по
    * очереди с остальными записями того же графа (рекомендательная блокировка
@@ -67,6 +88,44 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
     return rows.map((r) => r.entry);
   }
 
+  /** Сохранение графа — без указателя узлов (его пересчитывает updateGraph). */
+  async function saveGraph(id, update, { expectedVersion, bump = true, actor = null } = {}) {
+    return tx(async (c) => {
+      const { rows } = await c.query(
+        "SELECT content, version FROM app.graphs WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        [id],
+      );
+      if (!rows.length) return null;
+      const current = rows[0].content;
+      const version = Number(rows[0].version);
+      if (expectedVersion != null && Number(expectedVersion) !== version) {
+        throw new ConflictError({ id, version, meta: metaOf(id, current) });
+      }
+      const updated = await update(current);
+      const nextVersion = bump ? version + 1 : version;
+      const next = { ...updated, meta: { ...(updated.meta ?? {}), version: nextVersion } };
+      if (bump) {
+        // Прежнее сохранение — в ревизии; старше revisionsKeep — долой.
+        await c.query(
+          `INSERT INTO app.graph_revisions (graph_id, version, content, saved_by)
+           VALUES ($1, $2, $3::jsonb, $4) ON CONFLICT DO NOTHING`,
+          [id, version, json(current), actor],
+        );
+        await c.query(
+          `DELETE FROM app.graph_revisions WHERE graph_id = $1 AND version NOT IN (
+             SELECT version FROM app.graph_revisions WHERE graph_id = $1 ORDER BY version DESC LIMIT $2)`,
+          [id, revisionsKeep],
+        );
+      }
+      await c.query(
+        `UPDATE app.graphs SET content = $2::jsonb, name = $3, node_count = $4, version = $5,
+                updated_by = $6, updated_at = now() WHERE id = $1`,
+        [id, json(next), String(next.meta.name ?? id), nodeCount(next), nextVersion, actor],
+      );
+      return { id, content: next, version: nextVersion };
+    }, id);
+  }
+
   return {
     kind: "pg",
 
@@ -102,54 +161,32 @@ function createPgStore({ pool, revisionsKeep = Number(process.env.GRAPH_REVISION
          VALUES ($1, $2, $3::jsonb, $4, 1, $5, $5)`,
         [id, String(next.meta.name ?? id), json(next), nodeCount(next), actor],
       );
+      scheduleReindex(id);
       return { id, content: next, version: 1 };
     },
 
-    async updateGraph(id, update, { expectedVersion, bump = true, actor = null } = {}) {
-      return tx(async (c) => {
-        const { rows } = await c.query(
-          "SELECT content, version FROM app.graphs WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-          [id],
-        );
-        if (!rows.length) return null;
-        const current = rows[0].content;
-        const version = Number(rows[0].version);
-        if (expectedVersion != null && Number(expectedVersion) !== version) {
-          throw new ConflictError({ id, version, meta: metaOf(id, current) });
-        }
-        const updated = await update(current);
-        const nextVersion = bump ? version + 1 : version;
-        const next = { ...updated, meta: { ...(updated.meta ?? {}), version: nextVersion } };
-        if (bump) {
-          // Прежнее сохранение — в ревизии; старше revisionsKeep — долой.
-          await c.query(
-            `INSERT INTO app.graph_revisions (graph_id, version, content, saved_by)
-             VALUES ($1, $2, $3::jsonb, $4) ON CONFLICT DO NOTHING`,
-            [id, version, json(current), actor],
-          );
-          await c.query(
-            `DELETE FROM app.graph_revisions WHERE graph_id = $1 AND version NOT IN (
-               SELECT version FROM app.graph_revisions WHERE graph_id = $1 ORDER BY version DESC LIMIT $2)`,
-            [id, revisionsKeep],
-          );
-        }
-        await c.query(
-          `UPDATE app.graphs SET content = $2::jsonb, name = $3, node_count = $4, version = $5,
-                  updated_by = $6, updated_at = now() WHERE id = $1`,
-          [id, json(next), String(next.meta.name ?? id), nodeCount(next), nextVersion, actor],
-        );
-        return { id, content: next, version: nextVersion };
-      }, id);
+    async updateGraph(id, update, opts = {}) {
+      const saved = await saveGraph(id, update, opts);
+      // Имя и описание (bump: false) узлы не меняют — указатель тот же.
+      if (saved && opts.bump !== false) scheduleReindex(id);
+      return saved;
+    },
+
+    /** Когда пересчитаны указатели узлов всех сохранений до этой минуты (тесты). */
+    whenIndexed() {
+      return indexing;
     },
 
     async deleteGraph(id) {
-      return tx(async (c) => {
+      const deleted = await tx(async (c) => {
         const { rowCount } = await c.query(
           "UPDATE app.graphs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
           [id],
         );
         return rowCount > 0;
       }, id);
+      if (deleted) scheduleReindex(id);
+      return deleted;
     },
 
     // ---------- закладки: свежие первыми ----------
