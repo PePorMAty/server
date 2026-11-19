@@ -85,7 +85,12 @@ Node.js, Express 5, CommonJS.
 - `routes/knowledge/` — слой знаний (этап 3 `PG-MIGRATION.md`, только
   PostgreSQL): куски разделов ИТС (`chunks.js`; пересобираются при записи и
   разборе раздела, при запуске — у разделов без них) и поиск по их тексту
-  `POST /api/knowledge/search` (`search.js`, tsvector по-русски).
+  `POST /api/knowledge/search` (`search.js`, tsvector по-русски); указатель
+  узлов графов (`graphIndex.js`; после сохранения графа в фоне — крючок в
+  `graph-files/store/pg.js`, при запуске — у отставших) и карточка знаний о
+  продукте `POST /api/knowledge/product` (`product.js`). Проверка на
+  сервере без кавычек — `scripts/knowledge-search.js`,
+  `scripts/knowledge-product.js`.
 - `TODO.md` — отложенные договорённости с разбором; читай перед тем, как
   переделывать описанное там. Пункты «просил напоминать» (вверху файла) —
   напоминай владельцу, когда работа касается этих мест (промпты v4:

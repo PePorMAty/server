@@ -122,7 +122,14 @@ connectDB();
 // делать, а не 500 на каждом запросе к библиотеке.
 require("./routes/graph-files/store")
   .checkPgStore()
-  .then(({ kind }) => console.log(`📚 Библиотека графов: ${kind === "pg" ? "PostgreSQL (схема app)" : "файлы data/"}`))
+  .then(async ({ kind }) => {
+    console.log(`📚 Библиотека графов: ${kind === "pg" ? "PostgreSQL (схема app)" : "файлы data/"}`);
+    // Указатель узлов графов для слоя знаний (этап 3б): у графов, где он отстал.
+    if (kind !== "pg") return;
+    const built = await require("./routes/knowledge/graphIndex").ensureGraphIndex(require("./db/pool").getPool());
+    if (!built) console.warn("⚠️  Указатель узлов графов: таблицы нет — выполните `npm run pg:migrate`");
+    else if (built.graphs) console.log(`🗂  Указатель узлов графов: пересчитано графов ${built.graphs}, узлов ${built.nodes}`);
+  })
   .catch((e) => console.error(`❌ Библиотека графов: ${e.message}`));
 
 // База источников и расчёты баланса: SQLite (по умолчанию) или PostgreSQL
