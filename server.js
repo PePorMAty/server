@@ -25,6 +25,7 @@ const productCodesRoutes = require("./routes/industry/codes");
 const localSourcesRoutes = require("./routes/local-sources/local-sources");
 const materialBalanceRoutes = require("./routes/material-balance/material-balance");
 const knowledgeRoutes = require("./routes/knowledge/knowledge");
+const chatRoutes = require("./routes/chat/chat");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -173,6 +174,8 @@ app.use("/api/graphs", techDescription);
 app.use("/api/graphs", shareRoutes);
 // Материальный баланс преобразования: расчёт моделью в фоне и база готовых.
 app.use("/api/graphs", materialBalanceRoutes);
+// Чат с ИИ в открытом графе (этап 4 PG-MIGRATION.md).
+app.use("/api/graphs", chatRoutes);
 // Слой промышленных данных (ГИСП) — свой префикс: это не про графы.
 app.use("/api", industryRoutes);
 // Коды ОКПД2 и ТН ВЭД моделью по файлам классификаторов («Определение кодов»).

@@ -1131,6 +1131,37 @@ async function callOpenAIResponsesRaw({
   }
 }
 
+/**
+ * Chat Completions с инструментами — для чата в графе (routes/chat/).
+ * В отличие от callOpenAIResponsesRaw отдаёт сообщение модели целиком, с
+ * вызовами инструментов (tool_calls): обёртка Responses их теряет.
+ *
+ * DashScope — с теми же поправками, что у шагов (размышления выключены,
+ * параметры под модель, повтор при сбое). Шлюз тарифа инструменты понимает
+ * (scripts/chat-tools-probe.js, 19.11: qwen3.8-flash, deepseek-v4.1-flash).
+ *
+ * @returns { message, usage, model, ms, fixes }
+ */
+async function callChatTools({ messages, tools, toolChoice = "auto", provider, model, timeoutMs = 3 * 60 * 1000, signal, maxTokens = 4000 }) {
+  const { client, defaultModel, name } = getClient(provider);
+  const effectiveModel = model || defaultModel;
+  const base = { model: effectiveModel, messages, max_tokens: maxTokens };
+  if (tools?.length) {
+    base.tools = tools;
+    base.tool_choice = toolChoice;
+  }
+  // OpenAI enable_thinking не знает и отвергает; DashScope — выключаем.
+  const params = name === "qwen" ? withThinking(base) : base;
+  try {
+    const { resp, fixes, ms } = await createChat(client, params, { timeoutMs, name, signal });
+    return { message: resp.choices?.[0]?.message ?? { role: "assistant", content: "" }, usage: resp.usage ?? null, model: resp.model || effectiveModel, ms, fixes };
+  } catch (err) {
+    if (signal?.aborted || isAborted(err)) throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
+    console.error(`[${name}] callChatTools error:`, apiErrorText(err));
+    throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
+  }
+}
+
 function normalizeUrl(raw) {
   let url = String(raw || "").trim();
 
@@ -1208,6 +1239,7 @@ module.exports = {
   normalizeAndFilterItems,
   pickTechnologyBlocksFromSources,
   getClient,
+  callChatTools,
   // для проверок: как транспорт чинит запрос и что говорит пользователю
   paramFix,
   describeApiError,
