@@ -45,7 +45,12 @@ const arrow = (t) => `${t.inputs.join(", ") || "?"} → ${t.outputs.join(", ") |
     const n = c.counts;
     console.log(`\nРазделы ИТС: где получают — ${n.sectionsUp}, где сырьё — ${n.sectionsDown}`);
     for (const t of c.transformations.fromSections.slice(0, 8)) {
-      console.log(`  ${t.direction === "up" ? "↑" : "↓"} ${arrow(t)}  [${t.source}]`);
+      if (t.multi) {
+        console.log(`  ${t.direction === "up" ? "↑" : "↓"} [${t.source}] — раздел о нескольких производствах (продуктов ${t.outputs.length})`);
+      } else {
+        console.log(`  ${t.direction === "up" ? "↑" : "↓"} ${arrow(t)}  [${t.source}]`);
+      }
+      for (const st of t.stages.slice(0, 4)) console.log(`      стадия: ${st}`);
     }
     console.log(`\nПреобразования в графах: ${n.graphTransformations}`);
     for (const t of c.transformations.fromGraphs.slice(0, 8)) {

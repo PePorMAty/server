@@ -24,6 +24,7 @@ const { identify } = require("../industry/utils/synonyms");
 const { savedCodes } = require("../industry/utils/modelCodes");
 const { marks } = require("../../db/sql");
 const { indexReady } = require("./graphIndex");
+const { splitProductList } = require("../step/utils/productList");
 
 /** Сколько отдавать в списках: карточка — для модели, а не выгрузка базы. */
 const LIMIT = 30;
@@ -63,6 +64,36 @@ async function sectionEnds(conn, ids) {
   return out;
 }
 
+/** Продуктов у раздела больше — он описывает несколько производств сразу. */
+const MULTI_OUTPUTS = 4;
+
+/**
+ * Стадии процесса раздела (строки разбора «Стадия: сырьё → продукты»), где
+ * участвует продукт (его ключи want). Связи раздела — всё сырьё и все
+ * продукты целиком; у раздела о нескольких производствах («Раздел 6.
+ * Производство азотсодержащих органических веществ» — от акрилонитрила до
+ * капролактама) это простыня, а стадия показывает, что с продуктом делают.
+ * Разбор хранит до 10 стадий: стадий продукта среди них может не быть.
+ */
+function productStages(ioJson, want) {
+  let lines = [];
+  try {
+    lines = JSON.parse(ioJson || "[]");
+  } catch {
+    return [];
+  }
+  const has = (names) => names.some((n) => localStore.nameKeys(n).some((k) => want.has(k)));
+  return (Array.isArray(lines) ? lines : []).filter((line) => {
+    const arrow = String(line).indexOf("→");
+    if (arrow < 0) return false;
+    const head = String(line).slice(0, arrow);
+    const colon = head.indexOf(": ");
+    const inputs = splitProductList(colon >= 0 ? head.slice(colon + 2) : head);
+    const outputs = splitProductList(String(line).slice(arrow + 1));
+    return has(inputs) || has(outputs);
+  });
+}
+
 /**
  * @param conn  адаптер PostgreSQL (db/sql.js) базы источников
  * @param pool  пул PostgreSQL (библиотека графов; null — без графов)
@@ -76,6 +107,15 @@ async function productCard(conn, name, { pool = null } = {}) {
   const sources = await localStore.productSources(keys);
   const sectionIds = [...new Set([...sources.up, ...sources.down].map((s) => s.sectionId))];
   const ends = await sectionEnds(conn, sectionIds);
+  const want = new Set(keys);
+  const ioOf = new Map(
+    sectionIds.length
+      ? (await conn.all(`SELECT id, io FROM sections WHERE id IN (${marks(sectionIds)})`, ...sectionIds)).map((r) => [
+          r.id,
+          r.io,
+        ])
+      : [],
+  );
   const section = (s) => ({
     sectionId: s.sectionId,
     docTitle: s.docTitle,
@@ -96,6 +136,10 @@ async function productCard(conn, name, { pool = null } = {}) {
         source: `${s.docTitle} · ${s.title}`,
         inputs: e.inputs,
         outputs: e.outputs,
+        // Раздел о нескольких производствах: «сырьё → продукты» — всего
+        // раздела, а не маршрут продукта; что с ним делают — в stages.
+        multi: e.outputs.length > MULTI_OUTPUTS,
+        stages: productStages(ioOf.get(s.sectionId), want),
       });
     }
   }
