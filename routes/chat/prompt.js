@@ -18,7 +18,12 @@ const MAX_LISTED = 300;
 function chatSystemPrompt(slice) {
   const products = slice.products.map((p) => p.label);
   const listed = [...new Set(products)].slice(0, MAX_LISTED);
-  const selected = slice.selected ? productContextText(slice.selected, { budget: 1500 }) : "";
+  // Название выбранного узла — всегда: у одинокого узла без описания
+  // контекста нет, а «этот продукт» модель должна понять.
+  const context = slice.selected ? productContextText(slice.selected, { budget: 1500 }) : "";
+  const selected = slice.selectedLabel
+    ? `«${slice.selectedLabel}»${context ? `\n${context}` : " (описания и соседей на графе нет)"}`
+    : context;
   return [
     "Ты — помощник в приложении «Граф производства». Граф — производственные цепочки: продукты и преобразования «сырьё → продукты». Человек работает с открытым графом и спрашивает тебя о продуктах, технологиях и о том, как достроить цепочки.",
     "",
