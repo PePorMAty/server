@@ -18,6 +18,7 @@ const {
   normalizeAndFilterItems,
   pickTechnologyBlocksFromSources,
   getClient,
+  callChatTools,
 } = require("./openai");
 
 const { searchSources } = require("./search");
@@ -92,6 +93,7 @@ module.exports = {
   normalizeAndFilterItems,
   pickTechnologyBlocksFromSources,
   getClient,
+  callChatTools,
   sanitizeAllowedDomains,
   filterItemsByAllowedDomains,
   searchSources,
