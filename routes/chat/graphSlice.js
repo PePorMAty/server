@@ -53,6 +53,33 @@ function findProducts(slice, name) {
   return slice.products.filter((p) => productKeys(p.label).some((k) => keys.has(k)));
 }
 
+/**
+ * Преобразования среза с этим названием: точное совпадение, потом по
+ * вхождению («кумольный» найдёт «Кумольный способ»). product — только те,
+ * где продукт среди сырья или продуктов: одноимённых преобразований на
+ * графе бывает несколько («Гидрирование»).
+ */
+function findTransformations(slice, name, product) {
+  const want = lower(clean(name, LIMITS.label));
+  if (!want) return [];
+  let list = slice.transformations;
+  if (product) {
+    const labels = new Set(findProducts(slice, product).map((p) => lower(p.label)));
+    if (labels.size) list = list.filter((t) => [...t.inputs, ...t.outputs].some((x) => labels.has(lower(x))));
+  }
+  const exact = list.filter((t) => lower(t.label) === want);
+  if (exact.length) return exact;
+  return list.filter((t) => lower(t.label).includes(want) || want.includes(lower(t.label)));
+}
+
+/** Узел графа по названию — продукт, а нет такого — преобразование. */
+function findNode(slice, name) {
+  const [p] = findProducts(slice, name);
+  if (p) return { ...p, kind: "product" };
+  const [t] = findTransformations(slice, name);
+  return t ? { id: t.id, label: t.label, kind: "transformation" } : null;
+}
+
 /** Узел графа и его соседи: из чего его делают и что делают из него. */
 function graphNode(slice, name) {
   const found = findProducts(slice, name);
@@ -70,4 +97,4 @@ function graphNode(slice, name) {
   };
 }
 
-module.exports = { readGraphSlice, findProducts, graphNode, LIMITS };
+module.exports = { readGraphSlice, findProducts, findTransformations, findNode, graphNode, LIMITS };

@@ -3,20 +3,48 @@
 // Инструменты модели в чате (этап 4 PG-MIGRATION.md).
 //
 // Чтение — без модели и бесплатно: карточка знаний о продукте (этап 3б),
-// поиск по тексту разделов ИТС (3а), узел открытого графа (срез клиента).
+// поиск по тексту разделов ИТС (3а), узел открытого графа (срез клиента),
+// готовый расчёт материального баланса из базы.
 //
 // Предложения — ничего не делают на сервере: возвращаются клиенту карточками,
-// а меняет граф человек («Построить шаг» открывает обычный мастер шага).
-// Шаг — только от продукта, который уже есть на графе: мастер открывается у
-// узла.
+// а меняет граф человек своей кнопкой. Каждое ведёт в то, что на сайте уже
+// есть: шаг — мастер шага у узла, коды — окно «Определить коды», баланс и
+// техописание — вкладки карточки узла, переименование и объединение — те же
+// действия, что у человека (с окном «Такой продукт уже есть»). Поэтому всё
+// предлагается только для узлов, которые ЕСТЬ на открытом графе.
+//
+// Клиент присылает, какие карточки умеет показывать (proposals в запросе);
+// модель видит только эти инструменты. Клиент первой версии чата знает шаг
+// и показ — для него набор прежний, и незнакомая карточка его не уронит.
 //
 // Ответы инструментов — короткий JSON: модели нужны факты и ссылки, а не
 // выгрузка базы, и каждый лишний знак — токены тарифа.
 
 const { sourcesStoreKind } = require("../../db/sourcesDb");
-const { findProducts, graphNode } = require("./graphSlice");
+const { findProducts, findTransformations, findNode, graphNode } = require("./graphSlice");
 
 const DIRECTION = { up: "вверх — из чего его делают", down: "вниз — что из него делают" };
+
+/** Инструмент-предложение → вид карточки у клиента. */
+const PROPOSAL_TOOLS = {
+  propose_step: "step",
+  show_nodes: "show",
+  propose_codes: "codes",
+  propose_balance: "balance",
+  propose_description: "tech",
+  propose_rename: "rename",
+  propose_merge: "merge",
+};
+const PROPOSAL_KINDS = Object.values(PROPOSAL_TOOLS);
+/** Что умеет клиент, не приславший proposals (первая версия чата). */
+const DEFAULT_KINDS = ["step", "show"];
+
+/** Виды карточек из запроса клиента: знакомые серверу, без повторов. */
+function readKinds(raw) {
+  if (!Array.isArray(raw)) return DEFAULT_KINDS;
+  const kinds = PROPOSAL_KINDS.filter((k) => raw.includes(k));
+  return kinds.length ? kinds : DEFAULT_KINDS;
+}
 
 const fn = (name, description, properties, required) => ({
   type: "function",
@@ -62,7 +90,64 @@ const TOOLS = [
     { names: { type: "array", items: { type: "string" }, description: "Названия продуктов на графе" } },
     ["names"],
   ),
+  fn(
+    "balance_calc",
+    "Готовый расчёт материального баланса из базы сервера по номеру (номера — в product_card, поле balances): сырьё, продукты с массами на базис, итог «вход — выход», источники.",
+    { id: { type: "integer", description: "Номер расчёта, например 12 из «№12 …»" } },
+    ["id"],
+  ),
+  fn(
+    "propose_codes",
+    "Предложить человеку определить коды ОКПД2 и ТН ВЭД продуктов открытого графа: откроется окно «Определить коды», коды подберёт модель по классификаторам за отдельные запросы. Предлагай, когда кодов нет в product_card или человек о них спрашивает.",
+    {
+      products: { type: "array", items: { type: "string" }, description: "Продукты на графе" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["products"],
+  ),
+  fn(
+    "propose_balance",
+    "Предложить человеку открыть материальный баланс преобразования открытого графа (вкладка карточки преобразования: расчёт по ИТС, массы сырья и продуктов). Преобразования узла покажет graph_node.",
+    {
+      transformation: { type: "string", description: "Преобразование на графе" },
+      product: { type: "string", description: "Необязательно: продукт этого преобразования — если одноимённых преобразований несколько" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["transformation"],
+  ),
+  fn(
+    "propose_description",
+    "Предложить человеку открыть технологическое описание узла открытого графа — продукта или преобразования (вкладка карточки; описание собирается по источникам).",
+    {
+      node: { type: "string", description: "Продукт или преобразование на графе" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["node"],
+  ),
+  fn(
+    "propose_rename",
+    "Предложить человеку переименовать узел открытого графа: опечатка, неточное или нестандартное название. Если новое название — продукт, который уже есть на графе, человеку предложат объединить узлы.",
+    {
+      node: { type: "string", description: "Узел на графе, как он назван сейчас" },
+      new_name: { type: "string", description: "Новое название" },
+      why: { type: "string", description: "Коротко — почему" },
+    },
+    ["node", "new_name"],
+  ),
+  fn(
+    "propose_merge",
+    "Предложить человеку объединить два узла одного продукта под разными названиями (синонимы: «Кумол» и «Изопропилбензол»). Связи первого перейдут ко второму, первый исчезнет.",
+    {
+      node: { type: "string", description: "Узел, который уйдёт" },
+      into: { type: "string", description: "Узел, который останется" },
+      why: { type: "string", description: "Коротко — почему это один продукт" },
+    },
+    ["node", "into"],
+  ),
 ];
+
+/** Инструменты для клиента, который умеет карточки kinds. */
+const toolsFor = (kinds) => TOOLS.filter((t) => !PROPOSAL_TOOLS[t.function.name] || kinds.includes(PROPOSAL_TOOLS[t.function.name]));
 
 /** Карточка знаний — коротко, для модели. */
 function briefCard(c, onGraph) {
@@ -94,14 +179,44 @@ function briefCard(c, onGraph) {
   };
 }
 
+/** Расчёт баланса — коротко, для модели. */
+function briefBalance(b) {
+  return {
+    id: b.id,
+    title: b.title,
+    transformation: b.transformation,
+    inputs: b.inputs,
+    targets: b.targets,
+    basis: b.basisText || null,
+    status: b.statusLabel || b.status,
+    products: (b.products ?? []).slice(0, 12).map((p) => `${p.name || p.ref}: ${p.massText || "нет данных"}`),
+    totals: b.totals ?? null,
+    sources: (b.sources ?? []).slice(0, 5).map((s) => s.title || s.url),
+  };
+}
+
+/** Отказ предложения: модель узнаёт почему и может поправиться. */
+const refuse = (error, summary) => ({ result: { ok: false, error }, summary });
+const shown = (summary, proposal) => ({
+  result: { ok: true, note: "Предложение показано человеку карточкой; сделает он сам." },
+  summary,
+  proposal,
+});
+
 /**
  * Выполнить вызов инструмента.
- * @param ctx { slice, conn?, pool? } — срез графа и базы (conn — только с SOURCES_STORE=pg)
+ * @param ctx { slice, kinds?, conn?, pool? } — срез графа, карточки клиента
+ *   (readKinds) и базы (conn — только с SOURCES_STORE=pg)
  * @returns { result: объект для модели, summary: строка для человека, proposal? }
  */
 async function runTool(name, args, ctx) {
   const a = args && typeof args === "object" ? args : {};
   const str = (v, max = 300) => String(v ?? "").trim().slice(0, max);
+  const kind = PROPOSAL_TOOLS[name];
+  if (kind && !(ctx.kinds ?? DEFAULT_KINDS).includes(kind)) {
+    return { result: { error: `Нет инструмента ${name}` }, summary: `нет инструмента ${name}` };
+  }
+  const why = str(a.why, 500);
 
   if (name === "graph_node") {
     const product = str(a.name);
@@ -122,7 +237,7 @@ async function runTool(name, args, ctx) {
         summary: `шаг от «${product}» — на графе нет`,
       };
     }
-    const proposal = { kind: "step", nodeId: node.id, label: node.label, direction, why: str(a.why, 500) };
+    const proposal = { kind: "step", nodeId: node.id, label: node.label, direction, why };
     return {
       result: { ok: true, note: "Предложение показано человеку карточкой; шаг он построит сам в мастере." },
       summary: `предложен шаг ${direction === "up" ? "вверх" : "вниз"} от «${node.label}»`,
@@ -142,6 +257,83 @@ async function runTool(name, args, ctx) {
       summary: `показать на графе: ${nodes.length}`,
       proposal: { kind: "show", nodes },
     };
+  }
+
+  if (name === "propose_codes") {
+    const names = (Array.isArray(a.products) ? a.products : []).map((n) => str(n)).filter(Boolean).slice(0, 20);
+    const nodes = [];
+    for (const n of names) {
+      const [p] = findProducts(ctx.slice, n);
+      if (p && !nodes.some((x) => x.id === p.id)) nodes.push(p);
+    }
+    if (!nodes.length) return refuse("Этих продуктов нет на открытом графе — коды определяются у узлов графа.", "коды — продуктов на графе нет");
+    return shown(`предложено определить коды: ${nodes.length}`, { kind: "codes", nodes, why });
+  }
+
+  if (name === "propose_balance") {
+    const label = str(a.transformation);
+    const [t] = findTransformations(ctx.slice, label, str(a.product));
+    if (!t) {
+      return refuse(
+        `Преобразования «${label}» нет на открытом графе — баланс считается у преобразования графа. Какими преобразованиями связан продукт, покажет graph_node.`,
+        `баланс «${label}» — на графе нет`,
+      );
+    }
+    return shown(`предложен баланс «${t.label}»`, { kind: "balance", nodeId: t.id, label: t.label, why });
+  }
+
+  if (name === "propose_description") {
+    const label = str(a.node);
+    const node = findNode(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе.`, `описание «${label}» — на графе нет`);
+    return shown(`предложено описание «${node.label}»`, { kind: "tech", nodeId: node.id, label: node.label, nodeKind: node.kind, why });
+  }
+
+  if (name === "propose_rename") {
+    const label = str(a.node);
+    const newLabel = str(a.new_name, 200).replace(/\s+/g, " ");
+    const node = findNode(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе.`, `переименовать «${label}» — на графе нет`);
+    if (!newLabel || newLabel.toLowerCase() === node.label.toLowerCase()) {
+      return refuse("Новое название пустое или совпадает с нынешним.", `переименовать «${node.label}» — то же название`);
+    }
+    return shown(`предложено переименовать «${node.label}» → «${newLabel}»`, {
+      kind: "rename",
+      nodeId: node.id,
+      label: node.label,
+      newLabel,
+      nodeKind: node.kind,
+      why,
+    });
+  }
+
+  if (name === "propose_merge") {
+    const fromName = str(a.node);
+    const intoName = str(a.into);
+    const [from] = findProducts(ctx.slice, fromName);
+    const into = from && findProducts(ctx.slice, intoName).find((p) => p.id !== from.id);
+    if (!from || !into) {
+      return refuse(
+        "Объединяются два разных узла-продукта, которые оба есть на открытом графе; одного из них нет.",
+        `объединить «${fromName}» и «${intoName}» — узлов нет`,
+      );
+    }
+    return shown(`предложено объединить «${from.label}» → «${into.label}»`, {
+      kind: "merge",
+      fromId: from.id,
+      fromLabel: from.label,
+      intoId: into.id,
+      intoLabel: into.label,
+      why,
+    });
+  }
+
+  if (name === "balance_calc") {
+    const id = Number(a.id);
+    if (!Number.isInteger(id) || id <= 0) return { result: { error: "Нужен номер расчёта — целое число." }, summary: "расчёт баланса — без номера" };
+    const b = await require("../material-balance/utils/store").get(id);
+    if (!b) return { result: { error: `Расчёта №${id} в базе нет.` }, summary: `расчёт баланса №${id} — нет` };
+    return { result: briefBalance(b), summary: `расчёт баланса №${id}: ${b.title}` };
   }
 
   if (name === "product_card" || name === "search_sources") {
@@ -185,4 +377,4 @@ async function runTool(name, args, ctx) {
   return { result: { error: `Нет инструмента ${name}` }, summary: `нет инструмента ${name}` };
 }
 
-module.exports = { TOOLS, runTool, briefCard };
+module.exports = { TOOLS, toolsFor, runTool, briefCard, briefBalance, readKinds, PROPOSAL_KINDS, DEFAULT_KINDS };
