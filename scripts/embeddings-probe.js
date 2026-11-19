@@ -26,22 +26,26 @@ const CANDIDATES = [
   for (const { provider, model } of CANDIDATES) {
     let client;
     try {
-      client = getClient(provider);
+      // getClient отдаёт { client, defaultModel, name } — нужен сам клиент.
+      ({ client } = getClient(provider));
     } catch (e) {
       console.log(`– ${provider} ${model}: пропущено (${e.message})`);
       continue;
     }
     const t0 = Date.now();
     try {
-      const r = await client.embeddings.create({ model, input: "фенол" });
+      // Числами, а не base64 (умолчание библиотеки OpenAI): совместимый
+      // режим DashScope base64 не обещает.
+      const r = await client.embeddings.create({ model, input: "фенол", encoding_format: "float" });
       const dims = r.data?.[0]?.embedding?.length;
       console.log(
         `✔ ${provider} ${model}: работает, размер вектора ${dims}, ${Date.now() - t0} мс` +
           (r.usage?.total_tokens ? `, токенов ${r.usage.total_tokens}` : ""),
       );
     } catch (e) {
-      const status = e.status ? `${e.status} ` : "";
-      console.log(`✗ ${provider} ${model}: ${status}${String(e.message).slice(0, 200)}`);
+      const msg = String(e.message);
+      const status = e.status && !msg.startsWith(String(e.status)) ? `${e.status} ` : "";
+      console.log(`✗ ${provider} ${model}: ${status}${msg.slice(0, 200)}`);
     }
   }
 })();
