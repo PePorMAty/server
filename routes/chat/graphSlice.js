@@ -2,7 +2,8 @@
 //
 // Срез открытого графа для чата (этап 4 PG-MIGRATION.md). Граф живёт в
 // браузере вместе с несохранёнными правками, поэтому срез присылает клиент:
-//   { name, selected: контекст выбранного продукта (productContext.ts),
+//   { name, selectedLabel: название выбранного продукта, selected: его
+//     контекст (productContext.ts; у одинокого узла без описания — null),
 //     products: [{ id, label }], transformations: [{ id, label, inputs,
 //     outputs }] }
 // Здесь — проверка и обрезка (граф на сотни узлов не должен раздувать
@@ -29,6 +30,7 @@ function readGraphSlice(raw) {
     .slice(0, LIMITS.transformations);
   return {
     name: clean(g.name, LIMITS.name),
+    selectedLabel: clean(g.selectedLabel, LIMITS.label) || null,
     selected: readProductContext(g.selected),
     products,
     transformations,
