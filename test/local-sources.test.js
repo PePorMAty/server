@@ -197,5 +197,18 @@ for (const backend of backends()) {
       // Подсчёт источников продукта — без текста; издание-черновик не в счёт.
       assert.deepEqual((await store.countsFor("Фенол")).localDir, { up: 1, down: 2 });
     });
+
+    // ---------- подсчёт для всего графа разом ----------
+    test("countsForMany — те же числа, что countsFor по одному продукту", async () => {
+      const names = [
+        ...(await store.listProducts()).products.map((p) => p.label),
+        "Фенол", "Бисфенол А", "Этилен", "Алкилфенол", "Углерод", "Неизвестное вещество",
+      ];
+      const many = await store.countsForMany(names);
+      for (const n of names) assert.deepEqual(many[n], await store.countsFor(n), n);
+      // Совмещённое производство и «только производят» — как в sourcesFor.
+      assert.equal(many["Бисфенол А"].localDir.down, 2);
+      assert.equal(many["Этилен"].localDir.down, 0);
+    });
   });
 }

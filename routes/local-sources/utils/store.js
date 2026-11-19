@@ -1238,6 +1238,96 @@ async function countsFor(productName, { old } = {}) {
   };
 }
 
+/** Ключей в одном IN (…): с запасом до предела параметров SQLite. */
+const KEYS_PER_QUERY = 500;
+
+/**
+ * countsFor для многих продуктов разом — те же числа, но не два запроса на
+ * продукт, а запрос на все ключи названий графа: с PostgreSQL граф на 245
+ * продуктов считался по одному почти 500 запросами (секунда на боевом
+ * сервере 18.11).
+ *
+ * Правила — как в sectionRows: «вверх» — разделы, где у продукта любая роль
+ * в направлении up; «вниз» — где он сырьё, кроме разделов, которые его
+ * только производят (все целевые продукты раздела — он сам, notProduced).
+ * Заменённые издания не в счёт.
+ *
+ * @returns { [название]: { local, localDir: { up, down }, web } }
+ */
+async function countsForMany(productNames, { old } = {}) {
+  const names = [...new Set(productNames)];
+  const keysOf = new Map(names.map((n) => [n, new Set(productKeys(n))]));
+  const allKeys = [...new Set([...keysOf.values()].flatMap((k) => [...k]))];
+  const conn = await getConn();
+  old = old ?? [...(await supersededDocs(conn)).keys()];
+  const notOld = old.length ? `AND s.doc_id NOT IN (${marks(old)})` : "";
+
+  // Связи по ключам продуктов: ключ → [{ section, direction, role }].
+  const byKey = new Map();
+  for (let i = 0; i < allKeys.length; i += KEYS_PER_QUERY) {
+    const part = allKeys.slice(i, i + KEYS_PER_QUERY);
+    const rows = await conn.all(
+      `SELECT sp.section_id, sp.key, sp.direction, sp.role
+       FROM section_products sp JOIN sections s ON s.id = sp.section_id
+       WHERE sp.key IN (${marks(part)}) ${notOld}`,
+      ...part,
+      ...old,
+    );
+    for (const r of rows) {
+      if (!byKey.has(r.key)) byKey.set(r.key, []);
+      byKey.get(r.key).push(r);
+    }
+  }
+
+  // Все связи разделов, где кто-то из продуктов — целевой: для правила
+  // «только производят» нужны все целевые продукты раздела и их ключи.
+  const producing = [
+    ...new Set(
+      [...byKey.values()]
+        .flat()
+        .filter((r) => r.direction === "up" && r.role === "product")
+        .map((r) => r.section_id),
+    ),
+  ];
+  const linksOf = new Map();
+  for (let i = 0; i < producing.length; i += KEYS_PER_QUERY) {
+    const part = producing.slice(i, i + KEYS_PER_QUERY);
+    for (const r of await conn.all(
+      `SELECT section_id, key, label, direction, role FROM section_products
+       WHERE section_id IN (${marks(part)})`,
+      ...part,
+    )) {
+      if (!linksOf.has(r.section_id)) linksOf.set(r.section_id, []);
+      linksOf.get(r.section_id).push(r);
+    }
+  }
+  // Раздел только производит продукт (ключи want): он среди целевых, и у
+  // каждого целевого продукта раздела есть связь с ключом продукта.
+  const onlyProduces = (sectionId, want) => {
+    const links = linksOf.get(sectionId) ?? [];
+    const targets = links.filter((l) => l.direction === "up" && l.role === "product");
+    if (!targets.some((t) => want.has(t.key))) return false;
+    return targets.every((t) => links.some((l) => l.label === t.label && want.has(l.key)));
+  };
+
+  const out = {};
+  for (const name of names) {
+    const want = keysOf.get(name);
+    const up = new Set();
+    const down = new Set();
+    for (const k of want) {
+      for (const r of byKey.get(k) ?? []) (r.direction === "up" ? up : down).add(r.section_id);
+    }
+    for (const id of down) if (onlyProduces(id, want)) down.delete(id);
+    out[name] = {
+      local: new Set([...up, ...down]).size,
+      localDir: { up: up.size, down: down.size },
+      web: { up: 0, down: 0 },
+    };
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Веб-источники, найденные моделью
 // ---------------------------------------------------------------------------
@@ -1530,6 +1620,7 @@ module.exports = {
   sectionIntermediates,
   sectionsForTransformation,
   countsFor,
+  countsForMany,
   listProducts,
   productSources,
   purgeWebSources,
