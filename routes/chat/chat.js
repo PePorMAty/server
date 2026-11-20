@@ -66,12 +66,16 @@ function parseArgs(raw) {
 const CLAIMS = ["показал", "отобразил", "выделил", "добавил", "построил", "достроил", "переименовал", "объединил", "рассчитал", "посчитал", "запустил", "определил"];
 const CLAIM_RE = new RegExp(`(^|[^а-я])(${CLAIMS.join("|")})(а|и|о)?(?![а-я])`, "g");
 
-/** Первое «сделал» в ответе, кроме «не сделал»; null — утверждений нет. */
+/**
+ * Первое «сделал» в ответе; null — утверждений нет. Не считаются «не
+ * сделал» и «вы (уже) сделали» — о человеке, который добавил шаг сам.
+ */
 function claimedAction(reply) {
   const text = String(reply ?? "").toLowerCase().replace(/ё/g, "е");
   for (const m of text.matchAll(CLAIM_RE)) {
-    const before = text.slice(Math.max(0, m.index - 4), m.index + m[1].length);
-    if (!/не\s*$/.test(before)) return m[2] + (m[3] ?? "");
+    const before = text.slice(Math.max(0, m.index - 12), m.index + m[1].length);
+    if (/(^|[^а-я])(не|вы(\s+уже)?)\s*$/.test(before)) continue;
+    return m[2] + (m[3] ?? "");
   }
   return null;
 }

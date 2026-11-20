@@ -49,7 +49,13 @@ function mentions(text, label) {
 function mentionedNodes(slice, text, { max = 6 } = {}) {
   const byLength = (a, b) => stemsOf(b.label).length - stemsOf(a.label).length;
   const pick = (list) => list.filter((n) => mentions(text, n.label)).sort(byLength);
-  const products = pick(slice.products);
+  // «тримеров пропилена» — это «Тримеры пропилена», а не ещё и «Пропилен»:
+  // продукт, чьи слова — часть уже найденного длинного названия, не берём.
+  const inside = (short, long) =>
+    stemsOf(short).every((s) => stemsOf(long).some((t) => t.startsWith(s) || s.startsWith(t)));
+  const products = pick(slice.products).filter(
+    (p, i, all) => !all.slice(0, i).some((q) => stemsOf(q.label).length > stemsOf(p.label).length && inside(p.label, q.label)),
+  );
   const transformations = pick(slice.transformations);
   const alternatives = pick(slice.alternatives ?? []);
   return {

@@ -37,7 +37,7 @@ require.cache[utilsPath].exports = {
 };
 
 const router = require("../routes/chat/chat");
-const { runChat, MAX_ROUNDS } = router;
+const { runChat, MAX_ROUNDS, claimedAction } = router;
 const { readGraphSlice } = require("../routes/chat/graphSlice");
 const { readKinds, runTool, PROPOSAL_KINDS } = require("../routes/chat/tools");
 const { chatSystemPrompt } = require("../routes/chat/prompt");
@@ -151,6 +151,11 @@ test("справка до ответа: упомянутое преобразо�
     events.filter((e) => e.type === "tool").map((e) => e.summary),
     ["справка: узлы графа — «Алкилфенолы», «Олигомеры этилена», «Фенол»", "справка: преобразования — «Алкилирование фенола олигомерами этилена»"],
   );
+  // Слово длинного названия — не отдельный продукт: «тримеров пропилена» ≠ «Пропилен».
+  const { mentionedNodes } = require("../routes/chat/mentions");
+  const tri = readGraphSlice({ products: [{ id: "a", label: "Пропилен" }, { id: "b", label: "Тримеры пропилена" }] });
+  assert.deepEqual(mentionedNodes(tri, "отобрази тримеров пропилена").products.map((p) => p.label), ["Тримеры пропилена"]);
+  assert.deepEqual(mentionedNodes(tri, "пропилен и его тримеры пропилена").products.map((p) => p.label), ["Тримеры пропилена"]);
   // Ничего не упомянуто и не выбрано — справки нет.
   calls = [];
   replies = [{ content: "Привет." }];
@@ -178,6 +183,14 @@ test("«показал» без действия — модель передел
   await chat("Автопилот: шаг добавлен", { continuation: true, mode: "auto" });
   assert.equal(calls.length, 1);
   assert.match(calls[0].messages[0].content, /РЕЖИМ АВТОПИЛОТА/);
+});
+
+test("что считается «сделал»", () => {
+  assert.equal(claimedAction("Показал «Тримеры пропилена» на графе."), "показал");
+  assert.equal(claimedAction("Готово: построила шаг"), "построила");
+  assert.equal(claimedAction("Я не добавил шаг: бензола на графе нет."), null);
+  assert.equal(claimedAction("Вы уже добавили шаг — дальше бисфенол А."), null);
+  assert.equal(claimedAction("Предлагаю шаг вниз; строю его в мастере."), null);
 });
 
 test("оборванный ответ — с пометкой", async () => {
