@@ -39,6 +39,7 @@ require.cache[utilsPath].exports = {
 const router = require("../routes/chat/chat");
 const { runChat, MAX_ROUNDS } = router;
 const { readGraphSlice } = require("../routes/chat/graphSlice");
+const { readKinds, runTool, PROPOSAL_KINDS } = require("../routes/chat/tools");
 const { chatSystemPrompt } = require("../routes/chat/prompt");
 const { addDoc, addSection, backends } = require("./helpers/sources");
 
@@ -129,6 +130,117 @@ test("история разговора — в запросе перед нов�
   assert.equal(calls[0].provider, "qwen");
 });
 
+// ---------- карточки предложений (этап 4.3) ----------
+const graph2 = readGraphSlice({
+  products: [
+    { id: "n1", label: "Фенол" },
+    { id: "n2", label: "Изопропилбензол (кумол)" },
+    { id: "n4", label: "Кумол" },
+    { id: "n5", label: "Водород" },
+    { id: "n6", label: "Циклогексанол" },
+  ],
+  transformations: [
+    { id: "t1", label: "Кумольный способ", inputs: ["Изопропилбензол (кумол)"], outputs: ["Фенол"] },
+    { id: "t2", label: "Гидрирование", inputs: ["Фенол", "Водород"], outputs: ["Циклогексанол"] },
+    { id: "t3", label: "Гидрирование", inputs: ["Кумол", "Водород"], outputs: ["Изопропилциклогексан"] },
+  ],
+});
+const tool = (name, args, kinds = PROPOSAL_KINDS) => runTool(name, args, { slice: graph2, kinds });
+const toolNames = (call) => call.tools.map((t) => t.function.name);
+
+test("карточки — по списку клиента: без него шаг и показ, как в первой версии", async () => {
+  assert.deepEqual(readKinds(undefined), ["step", "show"]);
+  assert.deepEqual(readKinds(["merge", "чужое", "step"]), ["step", "merge"]);
+  assert.deepEqual(readKinds([]), ["step", "show"]);
+
+  calls = [];
+  replies = [{ content: "Да." }, { content: "Да." }];
+  await chat("Привет");
+  assert.ok(toolNames(calls[0]).includes("balance_calc"), "чтение — всегда");
+  assert.ok(!toolNames(calls[0]).includes("propose_merge"));
+  assert.doesNotMatch(calls[0].messages[0].content, /propose_merge/);
+  await chat("Привет", { kinds: PROPOSAL_KINDS });
+  assert.ok(toolNames(calls[1]).includes("propose_merge"));
+  assert.match(calls[1].messages[0].content, /propose_merge — объединить/);
+
+  // Модель вызвала то, чего клиент не умеет, — карточки нет.
+  const old = await tool("propose_merge", { node: "Кумол", into: "Изопропилбензол (кумол)" }, ["step", "show"]);
+  assert.equal(old.proposal, undefined);
+  assert.match(old.result.error, /Нет инструмента/);
+});
+
+test("предложения кодов, баланса и описания — у узлов открытого графа", async () => {
+  const codes = await tool("propose_codes", { products: ["Фенол", "кумол", "Уран", "Фенол"], why: "кодов нет" });
+  assert.deepEqual(codes.proposal, { kind: "codes", nodes: [{ id: "n1", label: "Фенол" }, { id: "n4", label: "Кумол" }], why: "кодов нет" });
+  assert.equal((await tool("propose_codes", { products: ["Уран"] })).proposal, undefined);
+
+  // Одноимённые преобразования различает продукт.
+  assert.equal((await tool("propose_balance", { transformation: "Гидрирование" })).proposal.nodeId, "t2");
+  assert.equal((await tool("propose_balance", { transformation: "Гидрирование", product: "Кумол" })).proposal.nodeId, "t3");
+  assert.deepEqual((await tool("propose_balance", { transformation: "кумольный" })).proposal, { kind: "balance", nodeId: "t1", label: "Кумольный способ", why: "" });
+  const none = await tool("propose_balance", { transformation: "Пиролиз" });
+  assert.equal(none.proposal, undefined);
+  assert.match(none.result.error, /graph_node/);
+
+  assert.deepEqual((await tool("propose_description", { node: "Фенол" })).proposal, { kind: "tech", nodeId: "n1", label: "Фенол", nodeKind: "product", why: "" });
+  assert.equal((await tool("propose_description", { node: "Кумольный способ" })).proposal.nodeKind, "transformation");
+});
+
+test("переименование и объединение: два разных узла, новое название — не прежнее", async () => {
+  const rename = await tool("propose_rename", { node: "Кумол", new_name: "  Изопропилбензол ", why: "по ИТС" });
+  assert.deepEqual(rename.proposal, { kind: "rename", nodeId: "n4", label: "Кумол", newLabel: "Изопропилбензол", nodeKind: "product", why: "по ИТС" });
+  assert.equal((await tool("propose_rename", { node: "Фенол", new_name: "фенол" })).proposal, undefined);
+
+  const merge = await tool("propose_merge", { node: "Кумол", into: "Изопропилбензол (кумол)" });
+  assert.deepEqual(merge.proposal, { kind: "merge", fromId: "n4", fromLabel: "Кумол", intoId: "n2", intoLabel: "Изопропилбензол (кумол)", why: "" });
+  assert.equal(merge.summary, "предложено объединить «Кумол» → «Изопропилбензол (кумол)»");
+  // Узел сам с собой не объединяется.
+  assert.equal((await tool("propose_merge", { node: "Кумол", into: "кумол" })).proposal, undefined);
+  assert.equal((await tool("propose_merge", { node: "Уран", into: "Фенол" })).proposal, undefined);
+});
+
+for (const backend of backends().filter((b) => b.name === "SQLite")) {
+  describe("готовый расчёт баланса — чтение моделью", () => {
+    let close;
+    before(async () => {
+      close = await backend.open();
+    });
+    after(() => close());
+
+    test("balance_calc: сырьё, продукты с массами, итог; нет расчёта — ошибка модели", async () => {
+      const id = await require("../routes/material-balance/utils/store").save({
+        transformation: "Кумольный способ",
+        inputs: ["Кумол", "Кислород"],
+        targets: ["Фенол", "Ацетон"],
+        basisAmount: { amount: 1, unit: "т", kg: 1000 },
+        answer: "# Материальный баланс\n…",
+        parsed: {
+          status: "calculated",
+          statusLabel: "Рассчитан",
+          basisText: "1 т кумола",
+          products: [
+            { ref: "P1", name: "Фенол", massKg: 610, massText: "610 кг" },
+            { ref: "P2", name: "Ацетон", massKg: 380 },
+          ],
+          totals: { input: "1 260 кг", output: "1 250 кг", residual: "0,8 %" },
+          sources: [{ title: "ИТС 18—2023 · 3.6", url: "local://documents/1/sections/2" }],
+        },
+        refs: [],
+      });
+      const r = await tool("balance_calc", { id });
+      assert.equal(r.summary, `расчёт баланса №${id}: ${r.result.title}`);
+      assert.deepEqual(r.result.inputs, ["Кумол", "Кислород"]);
+      assert.deepEqual(r.result.products, ["Фенол: 610 кг", "Ацетон: нет данных"]);
+      assert.equal(r.result.basis, "1 т кумола");
+      assert.equal(r.result.status, "Рассчитан");
+      assert.equal(r.result.totals.residual, "0,8 %");
+      assert.deepEqual(r.result.sources, ["ИТС 18—2023 · 3.6"]);
+      assert.match((await tool("balance_calc", { id: id + 100 })).result.error, /нет/);
+      assert.match((await tool("balance_calc", { id: "двенадцать" })).result.error, /номер/);
+    });
+  });
+}
+
 /** Обработчик роутера как Express: тело ответа — строки NDJSON. */
 function post(body) {
   const layer = router.stack.find((l) => l.route?.path === "/gpt/chat");
@@ -168,6 +280,12 @@ test("роут: поток NDJSON без буфера nginx; пустое соо
   assert.equal(ok.headers["x-accel-buffering"], "no");
   assert.match(ok.headers["content-type"], /ndjson/);
   assert.equal(ok.events.at(-1).type, "done");
+  // Карточки клиента — из поля proposals запроса.
+  calls = [];
+  replies = [{ content: "Да." }];
+  await post({ message: "Привет", proposals: ["step", "show", "rename"] });
+  assert.ok(toolNames(calls[0]).includes("propose_rename"));
+  assert.ok(!toolNames(calls[0]).includes("propose_merge"));
   replies = [{ fail: "шлюз не ответил" }];
   const bad = await post({ message: "Привет" });
   assert.deepEqual(bad.events, [{ type: "error", error: "шлюз не ответил" }]);

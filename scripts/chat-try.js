@@ -16,6 +16,7 @@ require("dotenv").config({ path: path.resolve(__dirname, "../.env"), quiet: true
 
 const { runChat } = require("../routes/chat/chat");
 const { readGraphSlice } = require("../routes/chat/graphSlice");
+const { PROPOSAL_KINDS } = require("../routes/chat/tools");
 const { indexRows } = require("../routes/knowledge/graphIndex");
 const { sourcesStoreKind, sourcesPool } = require("../db/sourcesDb");
 
@@ -59,12 +60,13 @@ const { sourcesStoreKind, sourcesPool } = require("../db/sourcesDb");
     console.log(`Модель ${model}${graph.name ? `, граф «${graph.name}»` : ", без графа"}\n«${question}»\n`);
     const t0 = Date.now();
     const done = await runChat(
-      { message: question, history: [], slice: readGraphSlice(graph), provider: "qwen", model },
+      // Все карточки, как у клиента последней версии.
+      { message: question, history: [], slice: readGraphSlice(graph), provider: "qwen", model, kinds: PROPOSAL_KINDS },
       (e) => {
         if (e.type === "tool") console.log(`  … ${e.summary}`);
         if (e.type === "proposal") {
           const p = e.proposal;
-          console.log(p.kind === "step" ? `  ➜ предложение: шаг ${p.direction === "up" ? "вверх" : "вниз"} от «${p.label}» — ${p.why}` : `  ➜ показать: ${p.nodes.map((n) => n.label).join(", ")}`);
+          console.log(`  ➜ предложение (${p.kind}): ${JSON.stringify({ ...p, kind: undefined })}`);
         }
       },
       bases,

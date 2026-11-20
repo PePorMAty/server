@@ -2,7 +2,9 @@
 //
 //   POST /api/graphs/gpt/chat
 //     { message, history: [{ role: "user"|"assistant", content }],
-//       graph: срез открытого графа (graphSlice.js), provider?, model? }
+//       graph: срез открытого графа (graphSlice.js), provider?, model?,
+//       proposals?: ["step", "show", "codes", …] — какие карточки предложений
+//       умеет клиент (tools.js); без поля — шаг и показ, как в первой версии }
 //   → поток строк JSON (NDJSON), по событию на строку:
 //     { type: "tool", name, args, summary }      — модель смотрит базу/граф
 //     { type: "proposal", proposal }             — предложение человеку
@@ -23,7 +25,7 @@ const { callChatTools } = require("../sources/utils");
 const { sourcesStoreKind } = require("../../db/sourcesDb");
 const { readGraphSlice } = require("./graphSlice");
 const { chatSystemPrompt } = require("./prompt");
-const { TOOLS, runTool } = require("./tools");
+const { toolsFor, runTool, readKinds, DEFAULT_KINDS } = require("./tools");
 
 const router = express.Router();
 
@@ -61,9 +63,9 @@ async function knowledgeBases() {
  * Разговор на одно сообщение. emit(event) — события потока.
  * Возвращает итог (то же, что событие done).
  */
-async function runChat({ message, history, slice, provider, model, signal }, emit = () => {}, bases = {}) {
+async function runChat({ message, history, slice, provider, model, signal, kinds = DEFAULT_KINDS }, emit = () => {}, bases = {}) {
   const messages = [
-    { role: "system", content: chatSystemPrompt(slice) },
+    { role: "system", content: chatSystemPrompt(slice, kinds) },
     ...history,
     { role: "user", content: message },
   ];
@@ -71,13 +73,14 @@ async function runChat({ message, history, slice, provider, model, signal }, emi
   const tools = [];
   const usage = { requests: 0, tokens: 0 };
   let usedModel = model || null;
-  const ctx = { slice, ...bases };
+  const ctx = { slice, kinds, ...bases };
+  const toolDefs = toolsFor(kinds);
 
   for (let round = 0; ; round++) {
     const last = round >= MAX_ROUNDS;
     const r = await callChatTools({
       messages,
-      tools: TOOLS,
+      tools: toolDefs,
       toolChoice: last ? "none" : "auto",
       provider,
       model,
@@ -131,6 +134,7 @@ router.post("/gpt/chat", async (req, res) => {
   const slice = readGraphSlice(req.body?.graph);
   const provider = req.body?.provider ? String(req.body.provider).trim() : undefined;
   const model = req.body?.model ? String(req.body.model).trim() : undefined;
+  const kinds = readKinds(req.body?.proposals);
 
   res.status(200);
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -149,7 +153,7 @@ router.post("/gpt/chat", async (req, res) => {
       console.warn("[chat] база знаний недоступна:", e.message);
       return {};
     });
-    await runChat({ message, history, slice, provider, model, signal: controller.signal }, emit, bases);
+    await runChat({ message, history, slice, provider, model, kinds, signal: controller.signal }, emit, bases);
   } catch (e) {
     if (!controller.signal.aborted) {
       console.error("[chat] ошибка:", e.message);
