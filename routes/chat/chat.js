@@ -35,7 +35,7 @@ const { callChatTools } = require("../sources/utils");
 const { sourcesStoreKind } = require("../../db/sourcesDb");
 const { readGraphSlice } = require("./graphSlice");
 const { chatSystemPrompt } = require("./prompt");
-const { toolsFor, runTool, readKinds, DEFAULT_KINDS } = require("./tools");
+const { toolsFor, runTool, readKinds, DEFAULT_KINDS, PROPOSAL_TOOLS } = require("./tools");
 const { prefetchContext } = require("./context");
 
 const router = express.Router();
@@ -78,6 +78,10 @@ const CLAIMS = [
 // «Предложение показано в карточке» без карточки (20.11): модель описывала
 // действие, которого не вызывала. Только о карточке и предложении: «на
 // графе показаны альтернативы» — о графе, а не о действии.
+// «Альтернативы ищутся. Сайт выполнит действие автоматически, итог придёт
+// сообщением…» — без вызова (20.11): модель повторяла прошлые ответы из
+// истории, где действие было, а вызова не делала.
+const PENDING_RE = /(^|[^а-я])(сайт выполнит|итог прид[её]т|ищутся|ищется|строится|перекладывается|раскладывается|заполняется|рассчитывается|запущен[аоы]?|действия этого ответа)(?![а-я])/;
 const SHOWN_RE = /(^|[^а-я])(предложени[ея]|предложен[аоы]?)[^.!?\n]{0,60}показан|показан[аоы]?\s+(тебе\s+|вам\s+)?в\s+карточк/;
 const CLAIM_RE = new RegExp(`(^|[^а-я])(${CLAIMS.join("|")})(а|и|о|ы)?(?![а-я])`, "g");
 
@@ -91,6 +95,10 @@ function claimedAction(reply) {
     const before = text.slice(Math.max(0, m.index - 12), m.index + m[1].length);
     if (/(^|[^а-я])(не|вы(\s+уже)?)\s*$/.test(before)) continue;
     return m[2] + (m[3] ?? "");
+  }
+  const pending = text.match(PENDING_RE);
+  if (pending && !/(^|[^а-я])не\s*$/.test(text.slice(Math.max(0, pending.index - 6), pending.index + pending[1].length))) {
+    return pending[2];
   }
   const shown = text.match(SHOWN_RE);
   if (shown && !/(^|[^а-я])не\s*$/.test(text.slice(Math.max(0, shown.index - 6), shown.index + shown[0].indexOf("показан")))) {
@@ -113,7 +121,7 @@ const CLAIMED_TOOL = [
   [/карточк[^.]*заполн|заполн[^.]*карточк/, "fill_card"],
   [/источник/, "find_sources"],
   [/верн[^.]*расклад|расклад[^.]*(верн|прежн)/, "undo_layout"],
-  [/расклад|разлож/, "relayout"],
+  [/расклад|разлож|переклад/, "relayout"],
   [/баланс/, "propose_balance"],
   [/переимен/, "propose_rename"],
   [/объедин/, "propose_merge"],
@@ -172,13 +180,21 @@ async function runChat(
   let forceTool = null;
   let forced = null;
   const available = new Set(toolDefs.map((t) => t.function.name));
+  // Круг «только действия» после кругов чтения: модель четыре раза искала
+  // по ИТС, а в последнем круге инструментов уже не было — и вызов баланса
+  // она написала в ответ текстом (20.11). Теперь после чтения у неё есть
+  // круг, где можно только действовать, и лишь потом — ответ словами.
+  const actionDefs = toolDefs.filter((t) => PROPOSAL_TOOLS[t.function.name]);
+  let actLeft = 1;
 
   for (let round = 0; ; round++) {
-    const last = round >= MAX_ROUNDS;
+    let phase = "all";
+    if (forceTool) phase = "force";
+    else if (round >= MAX_ROUNDS) phase = actLeft-- > 0 && actionDefs.length ? "act" : "none";
     const r = await callChatTools({
       messages,
-      tools: toolDefs,
-      toolChoice: last ? "none" : forceTool ? { type: "function", function: { name: forceTool } } : "auto",
+      tools: phase === "act" ? actionDefs : toolDefs,
+      toolChoice: phase === "none" ? "none" : phase === "force" ? { type: "function", function: { name: forceTool } } : "auto",
       provider,
       model,
       signal,
@@ -187,13 +203,13 @@ async function runChat(
     forceTool = null;
     usage.tokens += r.usage?.total_tokens ?? 0;
     usedModel = r.model || usedModel;
-    const calls = last ? [] : r.message?.tool_calls ?? [];
+    const calls = phase === "none" ? [] : r.message?.tool_calls ?? [];
     if (!calls.length) {
       let reply = String(r.message?.content ?? "").trim();
       // «Показал» без действия: на графе ничего не произошло. Один раз
       // возвращаем ответ — модель вызовет инструмент или ответит честно.
       // Итог автопилота — не тот случай: «добавил» там правда.
-      const claimed = !continuation && !proposals.length && !corrected && !last ? claimedAction(reply) : null;
+      const claimed = !continuation && !proposals.length && !corrected ? claimedAction(reply) : null;
       if (claimed) {
         corrected = claimed;
         forceTool = claimedTool(reply, available);
@@ -240,9 +256,9 @@ async function runChat(
       const step = { name, args, summary: out.summary };
       tools.push(step);
       emit({ type: "tool", ...step });
-      if (out.proposal) {
-        proposals.push(out.proposal);
-        emit({ type: "proposal", proposal: out.proposal });
+      for (const proposal of out.proposals ?? (out.proposal ? [out.proposal] : [])) {
+        proposals.push(proposal);
+        emit({ type: "proposal", proposal });
       }
       messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(out.result) });
     }

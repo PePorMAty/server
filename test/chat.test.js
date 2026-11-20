@@ -70,7 +70,7 @@ async function chat(message, extra = {}) {
 
 test("промпт: правила, продукты открытого графа и выбранный узел", () => {
   const p = chatSystemPrompt(slice);
-  assert.match(p, /никогда не пиши, что показал/);
+  assert.match(p, /никогда не пиши, что показал/i);
   assert.match(p, /РЕЖИМ С ПОДТВЕРЖДЕНИЕМ/);
   assert.match(chatSystemPrompt(slice, ["step", "show"], { mode: "auto" }), /РЕЖИМ АВТОПИЛОТА/);
   assert.match(p, /Продукты на графе: Фенол; Изопропилбензол \(кумол\); Ацетон\./);
@@ -120,15 +120,43 @@ test("показать на графе — узлы по названиям; н�
   assert.deepEqual(done.proposals, [{ kind: "show", nodes: [{ id: "n3", label: "Ацетон" }, { id: "n1", label: "Фенол" }] }]);
 });
 
-test(`не больше ${MAX_ROUNDS} кругов: на последнем инструменты выключены`, async () => {
+test(`${MAX_ROUNDS} круга чтения, потом круг только с действиями, потом ответ словами (20.11)`, async () => {
   calls = [];
   replies = Array.from({ length: 10 }, () => ({ calls: [["graph_node", { name: "Фенол" }]] }));
-  replies.splice(MAX_ROUNDS, 0, { content: "Хватит." }); // ответ на круге без инструментов
-  const { done } = await chat("Расскажи всё");
-  assert.equal(done.usage.requests, MAX_ROUNDS + 1);
+  // После чтения модель ещё может действовать: вызов баланса она писала
+  // текстом, когда инструментов в последнем круге не было.
+  replies.splice(MAX_ROUNDS, 0, { calls: [["propose_step", { product: "Фенол", direction: "up" }]] }, { content: "Строю шаг вверх от фенола." });
+  const { done } = await chat("Почитай всё и построй шаг вверх от фенола");
+  assert.equal(done.usage.requests, MAX_ROUNDS + 2);
+  assert.ok(calls.slice(0, MAX_ROUNDS).every((c) => c.toolChoice === "auto" && c.tools.some((t) => t.function.name === "graph_node")));
+  assert.deepEqual(toolNames(calls[MAX_ROUNDS]), ["propose_step", "show_nodes"]);
+  assert.equal(calls[MAX_ROUNDS].toolChoice, "auto");
   assert.equal(calls.at(-1).toolChoice, "none");
-  assert.ok(calls.slice(0, -1).every((c) => c.toolChoice === "auto"));
-  assert.equal(done.reply, "Хватит.");
+  assert.deepEqual(done.proposals.map((p) => p.kind), ["step"]);
+  assert.equal(done.reply, "Строю шаг вверх от фенола.");
+
+  // Действовать нечего — ответ на круге действий, лишнего запроса нет.
+  calls = [];
+  replies = Array.from({ length: MAX_ROUNDS }, () => ({ calls: [["graph_node", { name: "Фенол" }]] }));
+  replies.push({ content: "Хватит." });
+  const two = await chat("Расскажи всё");
+  assert.equal(two.done.usage.requests, MAX_ROUNDS + 1);
+  assert.equal(two.done.reply, "Хватит.");
+});
+
+test("«Альтернативы ищутся. Сайт выполнит…» без вызова — поправка с обязательным действием (20.11)", async () => {
+  calls = [];
+  replies = [
+    { content: "Альтернативные способы получения ищутся. Сайт выполнит действие автоматически, итог придёт сообщением «Автопилот: …»." },
+    { calls: [["find_alternatives", { product: "Кумол", direction: "up" }]] },
+    { content: "Ищу альтернативы кумола." },
+  ];
+  const done = await runChat({ message: "а для кумола найди альтернативы", history: [], slice: graph2, kinds: PROPOSAL_KINDS, mode: "auto" }, () => {});
+  assert.equal(calls[1].toolChoice.function.name, "find_alternatives");
+  assert.deepEqual(done.proposals.map((p) => p.kind), ["alternatives"]);
+  for (const t of ["Граф перекладывается заново.", "Шаг от фенола вверх запущен.", "Расчёт баланса рассчитывается."]) assert.ok(claimedAction(t), t);
+  assert.equal(claimedAction("Расчёт не запущен: у преобразования нет сырья."), null);
+  assert.equal(claimedTool("Граф перекладывается заново.", new Set(["relayout", "undo_layout"])), "relayout");
 });
 
 test("история разговора — в запросе перед новым сообщением; модель и провайдер — из запроса", async () => {
@@ -331,12 +359,14 @@ test("источники, удаление, раскладка — действ�
 
 test("итог действия для модели — по режиму: в автопилоте сайт делает сам, а не человек (20.11)", async () => {
   const confirm = await runTool("propose_step", { product: "Фенол", direction: "up" }, { slice: graph2, kinds: PROPOSAL_KINDS });
-  assert.match(confirm.result.note, /карточкой с кнопкой — он сделает это сам/);
+  assert.match(confirm.result.note, /карточку с кнопкой и сделает это сам/);
   const auto = await runTool("propose_step", { product: "Фенол", direction: "up" }, { slice: graph2, kinds: PROPOSAL_KINDS, mode: "auto" });
-  assert.match(auto.result.note, /Сайт выполнит это сам/);
+  assert.match(auto.result.note, /выполнится само/);
+  // Записку не пересказывать человеку: модель повторяла её дословно.
+  assert.match(auto.result.note, /без слов о сайте/);
   assert.doesNotMatch(auto.result.note, /человек[^.]*сам\b(?! или)/);
   const bm = await runTool("bookmark_nodes", { names: ["Фенол"] }, { slice: graph2, kinds: PROPOSAL_KINDS, mode: "auto" });
-  assert.match(bm.result.note, /Сайт выполнит/);
+  assert.match(bm.result.note, /выполнится само/);
   // Промпт автопилота прямо запрещает «ты построишь сам».
   assert.match(chatSystemPrompt(graph2, PROPOSAL_KINDS, { mode: "auto" }), /никогда не пиши «ты построишь сам»/);
   // Вопрос «из чего делают» — ответ словами, а не шаг.
@@ -394,6 +424,22 @@ test("graph_node: преобразование с последним расчё�
   assert.match((await runTool("undo_layout", {}, { slice: g, kinds: ["step", "show", "layout"] })).result.error, /Нет инструмента/);
 });
 
+test("«Свои данные» таблицей — строками; выделенные узлы — в промпте", async () => {
+  const b = await tool("propose_balance", {
+    transformation: "Кумольный способ",
+    known_data: { inputs: { "Изопропилбензол (кумол)": 912 }, outputs: { Фенол: 600 }, note: "по общим сведениям" },
+  });
+  assert.equal(b.proposal.knownData, "inputs:\n  Изопропилбензол (кумол): 912\noutputs:\n  Фенол: 600\nnote: по общим сведениям");
+  const g = readGraphSlice({
+    products: [{ id: "a", label: "Чай" }, { id: "b", label: "Йогурт" }],
+    selection: [{ id: "a", label: "Чай" }, { id: "b", label: "Йогурт" }, { id: "", label: "без id" }],
+  });
+  assert.equal(g.selection.length, 2);
+  assert.match(chatSystemPrompt(g, PROPOSAL_KINDS), /ВЫДЕЛЕНО НА ГРАФЕ \(2\): «Чай»; «Йогурт»\./);
+  // Один выделенный — это «выбранный узел», отдельного списка нет.
+  assert.doesNotMatch(chatSystemPrompt(readGraphSlice({ selection: [{ id: "a", label: "Чай" }] }), PROPOSAL_KINDS), /ВЫДЕЛЕНО НА ГРАФЕ \(/);
+});
+
 test("источники в срезе — не больше чем у 80 продуктов", () => {
   const many = readGraphSlice({
     products: Array.from({ length: 100 }, (_, i) => ({ id: `p${i}`, label: `П${i}`, sources: { down: { count: 1, titles: ["x"] } } })),
@@ -420,7 +466,12 @@ test("альтернативы без шага, описание, карточк
   const d = await tool("set_description", { node: "водород", description: "Газ, восстановитель.", industry: "Химия", main_purpose: "Гидрирование" });
   assert.deepEqual(d.proposal, { kind: "describe", nodeId: "n5", label: "Водород", description: "Газ, восстановитель.", industry: "Химия", mainPurpose: "Гидрирование" });
   assert.equal((await tool("set_description", { node: "Водород", description: " " })).proposal, undefined);
-  assert.deepEqual((await tool("fill_card", { node: "Кумольный способ" })).proposal, { kind: "fillcard", nodeId: "t1", label: "Кумольный способ", nodeKind: "transformation", why: "" });
+  assert.deepEqual((await tool("fill_card", { node: "Кумольный способ" })).proposals, [{ kind: "fillcard", nodeId: "t1", label: "Кумольный способ", nodeKind: "transformation", why: "" }]);
+  // Выделенные — одним вызовом, по карточке на узел; чего нет — модели.
+  const many = await tool("fill_card", { nodes: ["Фенол", "Водород", "Фенол", "Уран"] });
+  assert.deepEqual(many.proposals.map((p) => p.label), ["Фенол", "Водород"]);
+  assert.deepEqual(many.result.missing, ["Уран"]);
+  assert.equal(many.summary, "предложено заполнить карточки: 2");
   assert.deepEqual((await tool("bookmark_nodes", { names: ["Фенол", "Фенол", "Уран"], remove: true })).proposal, {
     kind: "bookmark",
     nodes: [{ id: "n1", label: "Фенол" }],

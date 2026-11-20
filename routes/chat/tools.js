@@ -51,6 +51,9 @@ const PROPOSAL_TOOLS = {
   undo_layout: "unlayout",
 };
 
+/** Узлов в одном действии над многими (выделенными) узлами. */
+const MAX_MANY = 60;
+
 /** Шагов в одной проверке check_steps: каждый — запрос к модели. */
 const MAX_CHECKS = 5;
 const PROPOSAL_KINDS = Object.values(PROPOSAL_TOOLS);
@@ -133,7 +136,7 @@ const TOOLS = [
       transformation: { type: "string", description: "Преобразование на графе" },
       product: { type: "string", description: "Необязательно: продукт этого преобразования — если одноимённых преобразований несколько" },
       basis: { type: "string", description: "Необязательно: сырьё преобразования, на 1 т которого считать («на тонну циклогексанона»)" },
-      known_data: { type: "string", description: "Необязательно: известные данные для расчёта — цифры с источником, по пунктам" },
+      known_data: { type: "string", description: "Необязательно: известные данные для расчёта — цифры с источником, по пунктам, одной строкой текста" },
       recalc: { type: "boolean", description: "Посчитать заново, не брать готовый расчёт из базы" },
       why: { type: "string", description: "Коротко — зачем" },
     },
@@ -223,9 +226,13 @@ const TOOLS = [
   ),
   fn(
     "fill_card",
-    "Заполнить карточку узла графа (вкладка «Технологическое описание»: у продукта — чистота, производители, применения, объёмы; у преобразования — оборудование, условия, энергетика). Заполняет модель отдельным запросом.",
-    { node: { type: "string", description: "Узел на графе" }, why: { type: "string", description: "Коротко — зачем" } },
-    ["node"],
+    "Заполнить карточку узла графа (вкладка «Технологическое описание»: у продукта — чистота, производители, применения, объёмы; у преобразования — оборудование, условия, энергетика). Заполняет модель отдельным запросом на каждый узел. Несколько узлов (выделенные) — списком nodes одним вызовом.",
+    {
+      node: { type: "string", description: "Узел на графе" },
+      nodes: { type: "array", items: { type: "string" }, description: "Несколько узлов сразу — вместо node" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    [],
   ),
   fn(
     "bookmark_nodes",
@@ -303,6 +310,21 @@ function briefBalance(b) {
   };
 }
 
+/**
+ * «Свои данные» расчёта — текстом. Модель присылала их таблицей
+ * ({inputs: {ПТБФ: 912, …}, outputs: {…}}, 20.11) — переводим в строки, а не
+ * в «[object Object]».
+ */
+function knownText(v, depth = 0) {
+  if (v == null) return "";
+  if (typeof v !== "object") return String(v).trim().slice(0, 3000);
+  const pad = "  ".repeat(depth);
+  const lines = Array.isArray(v)
+    ? v.map((x) => (typeof x === "object" && x ? knownText(x, depth + 1) : `${pad}- ${x}`))
+    : Object.entries(v).map(([k, x]) => (typeof x === "object" && x ? `${pad}${k}:\n${knownText(x, depth + 1)}` : `${pad}${k}: ${x}`));
+  return lines.join("\n").slice(0, 3000);
+}
+
 /** Отказ предложения: модель узнаёт почему и может поправиться. */
 const refuse = (error, summary) => ({ result: { ok: false, error }, summary });
 
@@ -311,9 +333,12 @@ const refuse = (error, summary) => ({ result: { ok: false, error }, summary });
  * читала «сделает он сам» и писала человеку «ты построишь сам в мастере
  * шага», «я не могу построить шаг» (20.11), хотя сайт строил его сам.
  */
+// Слова для человека — свои: модель повторяла эту записку дословно («Сайт
+// выполнит действие автоматически, итог придёт сообщением…»), а потом писала
+// так же без вызова (20.11).
 const NOTE = {
-  confirm: "Показано человеку карточкой с кнопкой — он сделает это сам.",
-  auto: "Сайт выполнит это сам сразу после твоего ответа, без человека и без окон; итог придёт сообщением «Автопилот: …». Не пиши, что человек сделает сам или что ты не можешь.",
+  confirm: "Принято: человек увидит карточку с кнопкой и сделает это сам.",
+  auto: "Принято: после твоего ответа это выполнится само, без человека и без окон, а итог ты получишь следующим сообщением. Человеку напиши коротко, что делаешь («Ищу альтернативы тримеров пропилена»), — без слов о сайте, итоге и сообщениях. Не пиши, что человек сделает сам или что ты не можешь.",
 };
 const noteFor = (ctx) => NOTE[ctx.mode === "auto" ? "auto" : "confirm"];
 const shown = (summary, proposal, ctx) => ({ result: { ok: true, note: noteFor(ctx) }, summary, proposal });
@@ -411,7 +436,7 @@ async function runTool(name, args, ctx) {
     const basis = basisName
       ? findProducts(ctx.slice, basisName).find((p) => t.inputs.some((x) => x.toLowerCase() === p.label.toLowerCase()))
       : null;
-    const knownData = str(a.known_data, 3000);
+    const knownData = knownText(a.known_data);
     const proposal = {
       kind: "balance",
       nodeId: t.id,
@@ -488,10 +513,26 @@ async function runTool(name, args, ctx) {
   }
 
   if (name === "fill_card") {
-    const label = str(a.node);
-    const node = findNode(ctx.slice, label);
-    if (!node) return refuse(`«${label}» нет на открытом графе.`, `карточка «${label}» — на графе нет`);
-    return shown(`предложено заполнить карточку «${node.label}»`, { kind: "fillcard", nodeId: node.id, label: node.label, nodeKind: node.kind, why }, ctx);
+    // Одним вызовом — и для выделенных рамкой узлов (20.11: «заполни для
+    // всех выделенных»): карточка на каждый узел.
+    const names = [...(Array.isArray(a.nodes) ? a.nodes : []), a.node].map((x) => str(x)).filter(Boolean).slice(0, MAX_MANY);
+    const nodes = [];
+    const missing = [];
+    for (const n of names) {
+      const node = findNode(ctx.slice, n);
+      if (!node) missing.push(n);
+      else if (!nodes.some((x) => x.id === node.id)) nodes.push(node);
+    }
+    if (!nodes.length) return refuse(`${names.map((x) => `«${x}»`).join(", ") || "Узлов"} нет на открытом графе.`, "заполнить карточку — узлов нет");
+    const out = shown(
+      nodes.length === 1 ? `предложено заполнить карточку «${nodes[0].label}»` : `предложено заполнить карточки: ${nodes.length}`,
+      undefined,
+      ctx,
+    );
+    delete out.proposal;
+    out.proposals = nodes.map((node) => ({ kind: "fillcard", nodeId: node.id, label: node.label, nodeKind: node.kind, why }));
+    if (missing.length) out.result.missing = missing;
+    return out;
   }
 
   if (name === "bookmark_nodes") {
@@ -668,4 +709,4 @@ async function runTool(name, args, ctx) {
   return { result: { error: `Нет инструмента ${name}` }, summary: `нет инструмента ${name}` };
 }
 
-module.exports = { TOOLS, toolsFor, runTool, briefCard, briefBalance, readKinds, PROPOSAL_KINDS, DEFAULT_KINDS };
+module.exports = { TOOLS, toolsFor, runTool, briefCard, briefBalance, readKinds, PROPOSAL_KINDS, PROPOSAL_TOOLS, DEFAULT_KINDS };
