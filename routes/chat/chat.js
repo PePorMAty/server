@@ -91,6 +91,35 @@ function claimedAction(reply) {
   return null;
 }
 
+/**
+ * Какое действие модель описала словами — по её ответу. На поправку её
+ * заставляют вызвать именно его (tool_choice): быстрая модель после
+ * простой поправки снова писала «Прошу прощения — теперь по-настоящему:
+ * готово», ничего не вызвав (20.11). Порядок — от частного к общему:
+ * «добавил в закладки» — закладки, а не новый продукт.
+ */
+const CLAIMED_TOOL = [
+  [/заклад/, "bookmark_nodes"],
+  [/альтернатив/, "find_alternatives"],
+  [/описани[ея][^.]*(запис|заполн)|(запис|заполн)[^.]*описани/, "set_description"],
+  [/карточк[^.]*заполн|заполн[^.]*карточк/, "fill_card"],
+  [/источник/, "find_sources"],
+  [/расклад/, "relayout"],
+  [/баланс/, "propose_balance"],
+  [/переимен/, "propose_rename"],
+  [/объедин/, "propose_merge"],
+  [/удал/, "delete_nodes"],
+  [/добав[^.]*продукт|продукт[^.]*добав|добавил[^.]*на граф|добавлен[^.]*на граф/, "add_product"],
+  [/шаг/, "propose_step"],
+  [/показ|отобраз|выдел/, "show_nodes"],
+];
+
+function claimedTool(reply, available) {
+  const text = String(reply ?? "").toLowerCase().replace(/ё/g, "е");
+  const found = CLAIMED_TOOL.find(([re, name]) => available.has(name) && re.test(text));
+  return found ? found[1] : null;
+}
+
 /** Базы для инструментов: источники и библиотека графов в PostgreSQL. */
 async function knowledgeBases() {
   if (sourcesStoreKind() !== "pg") return {};
@@ -130,18 +159,23 @@ async function runChat(
     { role: "user", content: message },
   ];
   let corrected = null;
+  // Следующий круг — с обязательным вызовом этого действия (после поправки).
+  let forceTool = null;
+  let forced = null;
+  const available = new Set(toolDefs.map((t) => t.function.name));
 
   for (let round = 0; ; round++) {
     const last = round >= MAX_ROUNDS;
     const r = await callChatTools({
       messages,
       tools: toolDefs,
-      toolChoice: last ? "none" : "auto",
+      toolChoice: last ? "none" : forceTool ? { type: "function", function: { name: forceTool } } : "auto",
       provider,
       model,
       signal,
     });
     usage.requests++;
+    forceTool = null;
     usage.tokens += r.usage?.total_tokens ?? 0;
     usedModel = r.model || usedModel;
     const calls = last ? [] : r.message?.tool_calls ?? [];
@@ -153,6 +187,8 @@ async function runChat(
       const claimed = !continuation && !proposals.length && !corrected && !last ? claimedAction(reply) : null;
       if (claimed) {
         corrected = claimed;
+        forceTool = claimedTool(reply, available);
+        forced = forceTool;
         messages.push({ role: "assistant", content: reply });
         messages.push({
           role: "user",
@@ -172,7 +208,7 @@ async function runChat(
       // Строка в лог pm2: по ней видно, смотрела ли модель базу и граф.
       const called = tools.filter((t) => !t.summary?.startsWith("справка")).map((t) => t.name);
       console.log(
-        `[chat] ${usedModel} · ${mode}${continuation ? " · итог автопилота" : ""}: запросов ${usage.requests}, справка ${pre.steps.length}, инструменты: ${called.join(", ") || "—"}, действий ${proposals.length}${corrected ? `, поправка «${corrected}» без действия` : ""}${r.finishReason && r.finishReason !== "stop" ? `, конец: ${r.finishReason}` : ""}, ${Date.now() - t0} мс`,
+        `[chat] ${usedModel} · ${mode}${continuation ? " · итог автопилота" : ""}: запросов ${usage.requests}, справка ${pre.steps.length}, инструменты: ${called.join(", ") || "—"}, действий ${proposals.length}${corrected ? `, поправка «${corrected}» без действия${forced ? ` (обязательный ${forced})` : ""}` : ""}${r.finishReason && r.finishReason !== "stop" ? `, конец: ${r.finishReason}` : ""}, ${Date.now() - t0} мс`,
       );
       emit(done);
       return done;
@@ -247,3 +283,4 @@ module.exports = router;
 module.exports.runChat = runChat;
 module.exports.MAX_ROUNDS = MAX_ROUNDS;
 module.exports.claimedAction = claimedAction;
+module.exports.claimedTool = claimedTool;

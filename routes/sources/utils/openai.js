@@ -141,6 +141,12 @@ function paramFix(err, params, { searchRequired = false } = {}) {
   if (err?.status !== 400) return null;
   const msg = apiErrorText(err);
 
+  // Принудительный вызов инструмента (чат: страховка от «сделал» без
+  // действия) шлюз или модель может не уметь — тогда модель выбирает сама.
+  if (params.tool_choice && params.tool_choice !== "auto" && params.tool_choice !== "none" && /tool_choice|tool choice/i.test(msg)) {
+    return { params: { ...params, tool_choice: "auto" }, note: "принудительный вызов инструмента не поддерживается" };
+  }
+
   if ("thinking_budget" in params && /thinking_budget/i.test(msg)) {
     return {
       params: without(params, "thinking_budget"),

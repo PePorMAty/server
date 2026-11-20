@@ -45,7 +45,7 @@ require.cache[utilsPath].exports = {
 };
 
 const router = require("../routes/chat/chat");
-const { runChat, MAX_ROUNDS, claimedAction } = router;
+const { runChat, MAX_ROUNDS, claimedAction, claimedTool } = router;
 const { readGraphSlice } = require("../routes/chat/graphSlice");
 const { readKinds, runTool, PROPOSAL_KINDS } = require("../routes/chat/tools");
 const { chatSystemPrompt } = require("../routes/chat/prompt");
@@ -177,6 +177,9 @@ test("«показал» без действия — модель передел
   const { done } = await chat("отобрази фенол");
   assert.equal(done.usage.requests, 3);
   assert.match(calls[1].messages.at(-1).content, /Проверка сервера: в ответе «показал»/);
+  // Поправка — с обязательным вызовом того действия, что модель описала.
+  assert.deepEqual(calls[1].toolChoice, { type: "function", function: { name: "show_nodes" } });
+  assert.equal(calls[2].toolChoice, "auto");
   assert.equal(done.proposals[0].kind, "show");
 
   // Второй раз подряд — не крутим: ответ как есть.
@@ -205,6 +208,18 @@ test("что считается «сделал»", () => {
   assert.equal(claimedAction("Раскладываю граф заново — узлы встанут по уровням."), "раскладываю");
   assert.equal(claimedAction("Готово — перераскладка выполнена."), "готово");
   assert.equal(claimedAction("Скажи «строй» — запущу."), null);
+});
+
+test("какое действие модель описала словами", () => {
+  const all = new Set(["show_nodes", "add_product", "propose_step", "bookmark_nodes", "set_description", "relayout", "find_alternatives"]);
+  assert.equal(claimedTool("Готово: описание фенола записано, и «фенол» добавлен в закладки.", all), "bookmark_nodes");
+  assert.equal(claimedTool("Готово: описание фенола записано по ИТС.", all), "set_description");
+  assert.equal(claimedTool("Добавил «Автомобиль» на граф и запустил шаг вверх от него.", all), "add_product");
+  assert.equal(claimedTool("Делаю перераскладку графа.", all), "relayout");
+  assert.equal(claimedTool("Строю шаг вверх от фенола.", all), "propose_step");
+  assert.equal(claimedTool("Показал «Фенол».", all), "show_nodes");
+  // Действия нет у клиента — не заставляем.
+  assert.equal(claimedTool("Добавил в закладки.", new Set(["show_nodes"])), null);
 });
 
 test("оборванный ответ — с пометкой", async () => {
