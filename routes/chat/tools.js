@@ -48,6 +48,7 @@ const PROPOSAL_TOOLS = {
   set_description: "describe",
   fill_card: "fillcard",
   bookmark_nodes: "bookmark",
+  undo_layout: "unlayout",
 };
 
 /** Шагов в одной проверке check_steps: каждый — запрос к модели. */
@@ -87,13 +88,13 @@ const TOOLS = [
   ),
   fn(
     "graph_node",
-    "Узел открытого графа: есть ли продукт на графе, какими преобразованиями его получают и во что он идёт.",
-    { name: { type: "string", description: "Название продукта" } },
+    "Узел открытого графа — продукт или преобразование. У продукта: какими преобразованиями его получают и во что он идёт, альтернативы, источники, которые мастер шага уже нашёл (база ИТС и интернет — их видно на графе). У преобразования: сырьё, продукты и последний расчёт материального баланса (статус, на что, причина «частично»).",
+    { name: { type: "string", description: "Название продукта или преобразования" } },
     ["name"],
   ),
   fn(
     "propose_step",
-    "Предложить человеку построить шаг от продукта, который ЕСТЬ на открытом графе: up — из чего его делают, down — что из него делают. Шаг строит человек в мастере шага (поиск источников, обобщение, превью).",
+    "Построить шаг от продукта, который ЕСТЬ на открытом графе: up — из чего его делают, down — что из него делают. Только когда просят построить / достроить, а не на вопрос «из чего делают X?» — на вопрос отвечают словами. Мастер шага сам ищет источники, обобщает и строит; с подтверждением шаг добавляет человек кнопкой, в автопилоте — сайт сам.",
     {
       product: { type: "string", description: "Продукт на графе" },
       direction: { type: "string", enum: ["up", "down"] },
@@ -127,10 +128,13 @@ const TOOLS = [
   ),
   fn(
     "propose_balance",
-    "Рассчитать материальный баланс преобразования открытого графа: сайт откроет вкладку баланса и запустит расчёт по ИТС (готовый из базы придёт сразу, новый — минуты, это запросы к модели). Преобразования узла покажет graph_node.",
+    "Рассчитать материальный баланс преобразования открытого графа по ИТС (готовый из базы придёт сразу, новый — минуты, это запросы к модели). Расчёт — на 1 т сырья basis. known_data — «Известные данные» расчёта: нормы расхода, выходы, конверсии, соотношения сырья с источником — из search_sources или справки; с ними расчёт точнее, а без них при нехватке данных выходит «частично». recalc: true — посчитать заново, а не брать готовый из базы (иначе тот же расчёт придёт снова). Преобразования и прошлый расчёт покажет graph_node.",
     {
       transformation: { type: "string", description: "Преобразование на графе" },
       product: { type: "string", description: "Необязательно: продукт этого преобразования — если одноимённых преобразований несколько" },
+      basis: { type: "string", description: "Необязательно: сырьё преобразования, на 1 т которого считать («на тонну циклогексанона»)" },
+      known_data: { type: "string", description: "Необязательно: известные данные для расчёта — цифры с источником, по пунктам" },
+      recalc: { type: "boolean", description: "Посчитать заново, не брать готовый расчёт из базы" },
       why: { type: "string", description: "Коротко — зачем" },
     },
     ["transformation"],
@@ -188,6 +192,12 @@ const TOOLS = [
     "relayout",
     "Разложить граф заново — как кнопка «Разложить»: узлы встают по уровням цепочек, одинаковые преобразования сливаются в один узел.",
     { why: { type: "string", description: "Коротко — зачем" } },
+    [],
+  ),
+  fn(
+    "undo_layout",
+    "Вернуть расположение узлов, какое было до последней раскладки («верни как было», «раскладка не нравится»).",
+    {},
     [],
   ),
   fn(
@@ -295,11 +305,18 @@ function briefBalance(b) {
 
 /** Отказ предложения: модель узнаёт почему и может поправиться. */
 const refuse = (error, summary) => ({ result: { ok: false, error }, summary });
-const shown = (summary, proposal) => ({
-  result: { ok: true, note: "Предложение показано человеку карточкой; сделает он сам." },
-  summary,
-  proposal,
-});
+
+/**
+ * Что будет с вызванным действием — по режиму чата. В автопилоте модель
+ * читала «сделает он сам» и писала человеку «ты построишь сам в мастере
+ * шага», «я не могу построить шаг» (20.11), хотя сайт строил его сам.
+ */
+const NOTE = {
+  confirm: "Показано человеку карточкой с кнопкой — он сделает это сам.",
+  auto: "Сайт выполнит это сам сразу после твоего ответа, без человека и без окон; итог придёт сообщением «Автопилот: …». Не пиши, что человек сделает сам или что ты не можешь.",
+};
+const noteFor = (ctx) => NOTE[ctx.mode === "auto" ? "auto" : "confirm"];
+const shown = (summary, proposal, ctx) => ({ result: { ok: true, note: noteFor(ctx) }, summary, proposal });
 
 /**
  * Выполнить вызов инструмента.
@@ -337,7 +354,7 @@ async function runTool(name, args, ctx) {
     }
     const proposal = { kind: "step", nodeId: node.id, label: node.label, direction, why };
     return {
-      result: { ok: true, note: "Предложение показано человеку карточкой; шаг он построит сам в мастере." },
+      result: { ok: true, note: noteFor(ctx) },
       summary: `предложен шаг ${direction === "up" ? "вверх" : "вниз"} от «${node.label}»`,
       proposal,
     };
@@ -376,7 +393,7 @@ async function runTool(name, args, ctx) {
       if (p && !nodes.some((x) => x.id === p.id)) nodes.push(p);
     }
     if (!nodes.length) return refuse("Этих продуктов нет на открытом графе — коды определяются у узлов графа.", "коды — продуктов на графе нет");
-    return shown(`предложено определить коды: ${nodes.length}`, { kind: "codes", nodes, why });
+    return shown(`предложено определить коды: ${nodes.length}`, { kind: "codes", nodes, why }, ctx);
   }
 
   if (name === "propose_balance") {
@@ -388,14 +405,38 @@ async function runTool(name, args, ctx) {
         `баланс «${label}» — на графе нет`,
       );
     }
-    return shown(`предложен баланс «${t.label}»`, { kind: "balance", nodeId: t.id, label: t.label, why });
+    // На тонну какого сырья: только сырьё этого преобразования. Не нашлось —
+    // расчёт на сырьё по умолчанию (первое), и модель узнаёт об этом.
+    const basisName = str(a.basis);
+    const basis = basisName
+      ? findProducts(ctx.slice, basisName).find((p) => t.inputs.some((x) => x.toLowerCase() === p.label.toLowerCase()))
+      : null;
+    const knownData = str(a.known_data, 3000);
+    const proposal = {
+      kind: "balance",
+      nodeId: t.id,
+      label: t.label,
+      why,
+      ...(basis ? { basisId: basis.id, basisLabel: basis.label } : {}),
+      ...(knownData ? { knownData } : {}),
+      ...(a.recalc === true ? { force: true } : {}),
+    };
+    const out = shown(
+      `предложен баланс «${t.label}»${basis ? ` на 1 т «${basis.label}»` : ""}${knownData ? ", со своими данными" : ""}${a.recalc === true ? ", заново" : ""}`,
+      proposal,
+      ctx,
+    );
+    if (basisName && !basis) {
+      out.result.basis = `«${basisName}» не сырьё «${t.label}» (сырьё: ${t.inputs.map((x) => `«${x}»`).join(", ") || "нет"}) — расчёт на сырьё по умолчанию`;
+    }
+    return out;
   }
 
   if (name === "propose_description") {
     const label = str(a.node);
     const node = findNode(ctx.slice, label);
     if (!node) return refuse(`«${label}» нет на открытом графе.`, `описание «${label}» — на графе нет`);
-    return shown(`предложено описание «${node.label}»`, { kind: "tech", nodeId: node.id, label: node.label, nodeKind: node.kind, why });
+    return shown(`предложено описание «${node.label}»`, { kind: "tech", nodeId: node.id, label: node.label, nodeKind: node.kind, why }, ctx);
   }
 
   if (name === "propose_rename") {
@@ -413,7 +454,7 @@ async function runTool(name, args, ctx) {
       newLabel,
       nodeKind: node.kind,
       why,
-    });
+    }, ctx);
   }
 
   if (name === "find_alternatives") {
@@ -427,7 +468,7 @@ async function runTool(name, args, ctx) {
       label: node.label,
       direction,
       why,
-    });
+    }, ctx);
   }
 
   if (name === "set_description") {
@@ -443,14 +484,14 @@ async function runTool(name, args, ctx) {
       description,
       ...(str(a.industry, 120) ? { industry: str(a.industry, 120) } : {}),
       ...(str(a.main_purpose, 400) ? { mainPurpose: str(a.main_purpose, 400) } : {}),
-    });
+    }, ctx);
   }
 
   if (name === "fill_card") {
     const label = str(a.node);
     const node = findNode(ctx.slice, label);
     if (!node) return refuse(`«${label}» нет на открытом графе.`, `карточка «${label}» — на графе нет`);
-    return shown(`предложено заполнить карточку «${node.label}»`, { kind: "fillcard", nodeId: node.id, label: node.label, nodeKind: node.kind, why });
+    return shown(`предложено заполнить карточку «${node.label}»`, { kind: "fillcard", nodeId: node.id, label: node.label, nodeKind: node.kind, why }, ctx);
   }
 
   if (name === "bookmark_nodes") {
@@ -461,7 +502,7 @@ async function runTool(name, args, ctx) {
     }
     if (!nodes.length) return refuse("Таких узлов на открытом графе нет.", "закладки — узлов нет");
     const remove = a.remove === true;
-    return shown(`${remove ? "убрать из закладок" : "в закладки"}: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "bookmark", nodes, remove });
+    return shown(`${remove ? "убрать из закладок" : "в закладки"}: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "bookmark", nodes, remove }, ctx);
   }
 
   if (name === "find_sources") {
@@ -476,7 +517,7 @@ async function runTool(name, args, ctx) {
       direction,
       web: a.web === true,
       why,
-    });
+    }, ctx);
   }
 
   if (name === "delete_nodes") {
@@ -487,11 +528,15 @@ async function runTool(name, args, ctx) {
       if (node && !nodes.some((x) => x.id === node.id)) nodes.push({ id: node.id, label: node.label });
     }
     if (!nodes.length) return refuse("Таких узлов на открытом графе нет.", "удалить — узлов нет");
-    return shown(`предложено удалить: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "delete", nodes, why });
+    return shown(`предложено удалить: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "delete", nodes, why }, ctx);
+  }
+
+  if (name === "undo_layout") {
+    return shown("предложено вернуть прежнюю раскладку", { kind: "unlayout" }, ctx);
   }
 
   if (name === "relayout") {
-    return shown("предложено разложить граф заново", { kind: "layout", why });
+    return shown("предложено разложить граф заново", { kind: "layout", why }, ctx);
   }
 
   if (name === "check_steps") {
@@ -550,7 +595,7 @@ async function runTool(name, args, ctx) {
       label,
       ...(near ? { nearId: near.id, nearLabel: near.label } : {}),
       why,
-    });
+    }, ctx);
   }
 
   if (name === "propose_merge") {
@@ -571,7 +616,7 @@ async function runTool(name, args, ctx) {
       intoId: into.id,
       intoLabel: into.label,
       why,
-    });
+    }, ctx);
   }
 
   if (name === "balance_calc") {
