@@ -6,6 +6,9 @@
 //     контекст (productContext.ts; у одинокого узла без описания — null),
 //     products: [{ id, label }], transformations: [{ id, label, inputs,
 //     outputs }], alternatives?: [{ id, label, of: [продукты], direction }] }
+// recent?: [{ title, details }] — последние изменения графа из его истории,
+// новые сверху: по ним «построй дальше» продолжает от последнего шага, а не
+// от первого попавшегося продукта.
 // Альтернативы — фиолетовые варианты шага, которые человек ещё не принял:
 // не шаги графа, но их можно показать и о них спрашивают («отобрази
 // альтернативы»). Старый клиент их не шлёт.
@@ -17,7 +20,7 @@ const { readProductContext } = require("../shared/productContext");
 const { mentions } = require("./mentions");
 const { productKeys } = require("../local-sources/utils/store");
 
-const LIMITS = { products: 600, transformations: 400, alternatives: 200, label: 200, ends: 20, name: 200 };
+const LIMITS = { products: 600, transformations: 400, alternatives: 200, recent: 10, label: 200, ends: 20, name: 200 };
 
 const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -41,6 +44,10 @@ function readGraphSlice(raw) {
     }))
     .filter((a) => a.id && a.label)
     .slice(0, LIMITS.alternatives);
+  const recent = (Array.isArray(g.recent) ? g.recent : [])
+    .map((r) => ({ title: clean(r?.title, 120), details: clean(r?.details, 400) }))
+    .filter((r) => r.title)
+    .slice(0, LIMITS.recent);
   return {
     name: clean(g.name, LIMITS.name),
     selectedLabel: clean(g.selectedLabel, LIMITS.label) || null,
@@ -48,6 +55,27 @@ function readGraphSlice(raw) {
     products,
     transformations,
     alternatives,
+    recent,
+  };
+}
+
+/**
+ * Концы цепочек: продукты, из которых на графе ещё ничего не делают (дальше
+ * вниз), и те, что ещё ни из чего не получают (дальше вверх). «Продолжи
+ * цепочку» — от них.
+ */
+function chainEnds(slice) {
+  const used = new Set();
+  const made = new Set();
+  for (const t of slice.transformations) {
+    for (const x of t.inputs) used.add(lower(x));
+    for (const x of t.outputs) made.add(lower(x));
+  }
+  const linked = (p) => used.has(lower(p.label)) || made.has(lower(p.label));
+  return {
+    down: slice.products.filter((p) => made.has(lower(p.label)) && !used.has(lower(p.label))).map((p) => p.label),
+    up: slice.products.filter((p) => used.has(lower(p.label)) && !made.has(lower(p.label))).map((p) => p.label),
+    alone: slice.products.filter((p) => !linked(p)).map((p) => p.label),
   };
 }
 
@@ -128,4 +156,4 @@ function graphNode(slice, name) {
   };
 }
 
-module.exports = { readGraphSlice, findProducts, findTransformations, findAlternatives, findNode, graphNode, LIMITS };
+module.exports = { readGraphSlice, findProducts, findTransformations, findAlternatives, findNode, graphNode, chainEnds, LIMITS };

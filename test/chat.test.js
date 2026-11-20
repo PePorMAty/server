@@ -195,10 +195,16 @@ test("«показал» без действия — модель передел
 
 test("что считается «сделал»", () => {
   assert.equal(claimedAction("Показал «Тримеры пропилена» на графе."), "показал");
-  assert.equal(claimedAction("Готово: построила шаг"), "построила");
+  assert.equal(claimedAction("Шаг построила, всё на графе"), "построила");
   assert.equal(claimedAction("Я не добавил шаг: бензола на графе нет."), null);
   assert.equal(claimedAction("Вы уже добавили шаг — дальше бисфенол А."), null);
-  assert.equal(claimedAction("Предлагаю шаг вниз; строю его в мастере."), null);
+  assert.equal(claimedAction("Предлагаю шаг вниз — построю его, когда скажете."), null);
+  // Настоящее время — тоже утверждение (автопилот на flash: «Делаю
+  // перераскладку графа» без вызова).
+  assert.equal(claimedAction("Делаю перераскладку графа."), "делаю");
+  assert.equal(claimedAction("Раскладываю граф заново — узлы встанут по уровням."), "раскладываю");
+  assert.equal(claimedAction("Готово — перераскладка выполнена."), "готово");
+  assert.equal(claimedAction("Скажи «строй» — запущу."), null);
 });
 
 test("оборванный ответ — с пометкой", async () => {
@@ -267,8 +273,15 @@ test("предложения кодов, баланса и описания — 
 });
 
 test("новый продукт и показ альтернатив", async () => {
-  const add = await tool("add_product", { name: " Автомобиль ", near: "фенол", why: "просили" });
-  assert.deepEqual(add.proposal, { kind: "add", label: "Автомобиль", nearId: "n1", nearLabel: "Фенол", why: "просили" });
+  const sl = readGraphSlice({ products: [{ id: "n1", label: "Фенол" }] });
+  const add = await runTool("add_product", { name: " Автомобиль ", near: "фенол", why: "просили" }, { slice: sl, kinds: PROPOSAL_KINDS });
+  const { id, ...rest } = add.proposal;
+  assert.deepEqual(rest, { kind: "add", label: "Автомобиль", nearId: "n1", nearLabel: "Фенол", why: "просили" });
+  assert.match(id, /^chat-[0-9a-f-]{36}$/);
+  // «Добавь автомобиль и построй от него шаг» — в том же ответе: новый узел
+  // уже в срезе, шаг строится от его id.
+  const step = await runTool("propose_step", { product: "Автомобиль", direction: "up" }, { slice: sl, kinds: PROPOSAL_KINDS });
+  assert.equal(step.proposal.nodeId, id);
   const dup = await tool("add_product", { name: "Фенол" });
   assert.equal(dup.proposal, undefined);
   assert.match(dup.result.error, /уже есть/);
@@ -299,6 +312,43 @@ test("источники, удаление, раскладка — действ�
   assert.deepEqual((await tool("relayout", {})).proposal, { kind: "layout", why: "" });
   // Старый клиент действий 4.5 не знает — модель их не получит.
   assert.match((await tool("delete_nodes", { names: ["Фенол"] }, ["step", "show"])).result.error, /Нет инструмента/);
+});
+
+test("альтернативы без шага, описание, карточка, закладки", async () => {
+  assert.deepEqual((await tool("find_alternatives", { product: "кумол", direction: "up" })).proposal, {
+    kind: "alternatives",
+    nodeId: "n4",
+    label: "Кумол",
+    direction: "up",
+    why: "",
+  });
+  const d = await tool("set_description", { node: "водород", description: "Газ, восстановитель.", industry: "Химия", main_purpose: "Гидрирование" });
+  assert.deepEqual(d.proposal, { kind: "describe", nodeId: "n5", label: "Водород", description: "Газ, восстановитель.", industry: "Химия", mainPurpose: "Гидрирование" });
+  assert.equal((await tool("set_description", { node: "Водород", description: " " })).proposal, undefined);
+  assert.deepEqual((await tool("fill_card", { node: "Кумольный способ" })).proposal, { kind: "fillcard", nodeId: "t1", label: "Кумольный способ", nodeKind: "transformation", why: "" });
+  assert.deepEqual((await tool("bookmark_nodes", { names: ["Фенол", "Фенол", "Уран"], remove: true })).proposal, {
+    kind: "bookmark",
+    nodes: [{ id: "n1", label: "Фенол" }],
+    remove: true,
+  });
+});
+
+test("промпт: последние изменения графа и концы цепочек — для «дальше»", () => {
+  const sl = readGraphSlice({
+    products: [{ id: "a", label: "Кумол" }, { id: "b", label: "Фенол" }, { id: "c", label: "Смолы" }, { id: "d", label: "Автомобиль" }],
+    transformations: [
+      { id: "t1", label: "Кумольный способ", inputs: ["Кумол"], outputs: ["Фенол"] },
+      { id: "t2", label: "Синтез смол", inputs: ["Фенол"], outputs: ["Смолы"] },
+    ],
+    recent: [{ title: "Шаг принят", details: "«Синтез смол» вниз от «Фенол»: новые продукты «Смолы»" }],
+  });
+  const p = chatSystemPrompt(sl, PROPOSAL_KINDS, { mode: "auto" });
+  assert.match(p, /ПОСЛЕДНИЕ ИЗМЕНЕНИЯ ГРАФА[^\n]*\n- Шаг принят: «Синтез смол» вниз от «Фенол»/);
+  assert.match(p, /дальше вниз[^\n]*: Смолы\n/);
+  assert.match(p, /дальше вверх[^\n]*: Кумол\n/);
+  assert.match(p, /без связей: Автомобиль/);
+  assert.match(p, /не спрашивай «запустить\?»/);
+  assert.match(p, /find_alternatives/);
 });
 
 test("check_steps: проверка шага моделью по сырью и продуктам графа, запросы — в счётчик", async () => {
