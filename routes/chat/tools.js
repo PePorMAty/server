@@ -40,7 +40,13 @@ const PROPOSAL_TOOLS = {
   propose_rename: "rename",
   propose_merge: "merge",
   add_product: "add",
+  find_sources: "sources",
+  delete_nodes: "delete",
+  relayout: "layout",
 };
+
+/** Шагов в одной проверке check_steps: каждый — запрос к модели. */
+const MAX_CHECKS = 5;
 const PROPOSAL_KINDS = Object.values(PROPOSAL_TOOLS);
 /** Что умеет клиент, не приславший proposals (первая версия чата). */
 const DEFAULT_KINDS = ["step", "show"];
@@ -152,6 +158,38 @@ const TOOLS = [
       why: { type: "string", description: "Коротко — зачем" },
     },
     ["name"],
+  ),
+  fn(
+    "find_sources",
+    "Найти источники для шага от продукта графа — первый этап мастера шага: сначала разделы базы ИТС, а нет их — поиск моделью в интернете. web: true — искать в интернете, даже если в базе есть. Шаг после этого не строится: дальше propose_step с тем же направлением возьмёт найденное.",
+    {
+      product: { type: "string", description: "Продукт на графе" },
+      direction: { type: "string", enum: ["up", "down"], description: "up — из чего его делают, down — что из него делают" },
+      web: { type: "boolean", description: "Искать в интернете (поиск моделью — минуты и запросы)" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["product", "direction"],
+  ),
+  fn(
+    "delete_nodes",
+    "Удалить узлы с графа — продукты, преобразования или альтернативы — вместе с их связями. Назад не вернуть: только по прямой просьбе человека или для явно ошибочного шага, о котором ты сказал.",
+    {
+      names: { type: "array", items: { type: "string" }, description: "Названия узлов на графе" },
+      why: { type: "string", description: "Коротко — почему" },
+    },
+    ["names"],
+  ),
+  fn(
+    "relayout",
+    "Разложить граф заново — как кнопка «Разложить»: узлы встают по уровням цепочек, одинаковые преобразования сливаются в один узел.",
+    { why: { type: "string", description: "Коротко — зачем" } },
+    [],
+  ),
+  fn(
+    "check_steps",
+    `Проверить преобразования открытого графа: верно ли химически и технологически «сырьё → продукты» (та же проверка, что на превью шага). Каждое — отдельный запрос к модели; не больше ${MAX_CHECKS} за вызов. Ответ: verdict ok — верно, fix — верно после переименований (renames), wrong — шаг ошибочен.`,
+    { transformations: { type: "array", items: { type: "string" }, description: "Преобразования на графе" } },
+    ["transformations"],
   ),
   fn(
     "propose_merge",
@@ -335,6 +373,72 @@ async function runTool(name, args, ctx) {
       nodeKind: node.kind,
       why,
     });
+  }
+
+  if (name === "find_sources") {
+    const label = str(a.product);
+    const direction = a.direction === "up" ? "up" : "down";
+    const [node] = findProducts(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе — источники ищутся для шага от узла графа.`, `источники для «${label}» — на графе нет`);
+    return shown(`предложен поиск источников для «${node.label}» ${direction === "up" ? "вверх" : "вниз"}${a.web ? " в интернете" : ""}`, {
+      kind: "sources",
+      nodeId: node.id,
+      label: node.label,
+      direction,
+      web: a.web === true,
+      why,
+    });
+  }
+
+  if (name === "delete_nodes") {
+    const names = (Array.isArray(a.names) ? a.names : []).map((n) => str(n)).filter(Boolean).slice(0, 10);
+    const nodes = [];
+    for (const n of names) {
+      const node = findNode(ctx.slice, n) ?? findAlternatives(ctx.slice, n).find((x) => x.label.toLowerCase() === n.toLowerCase());
+      if (node && !nodes.some((x) => x.id === node.id)) nodes.push({ id: node.id, label: node.label });
+    }
+    if (!nodes.length) return refuse("Таких узлов на открытом графе нет.", "удалить — узлов нет");
+    return shown(`предложено удалить: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "delete", nodes, why });
+  }
+
+  if (name === "relayout") {
+    return shown("предложено разложить граф заново", { kind: "layout", why });
+  }
+
+  if (name === "check_steps") {
+    const wanted = (Array.isArray(a.transformations) ? a.transformations : []).map((n) => str(n)).filter(Boolean);
+    const steps = [];
+    for (const n of wanted) {
+      const [t] = findTransformations(ctx.slice, n);
+      if (t && !steps.some((x) => x.id === t.id)) steps.push(t);
+    }
+    if (!steps.length) return { result: { error: "Таких преобразований на графе нет — названия есть в справке и graph_node." }, summary: "проверка шагов — не нашлось" };
+    const { readCheckBody } = require("../step/utils/stepCheck");
+    const { checkStep } = require("../step/check");
+    const batch = steps.slice(0, MAX_CHECKS);
+    // Параллельно: проверка — запрос на десятки секунд, по очереди пять
+    // таких — минуты ожидания в чате.
+    const results = await Promise.all(
+      batch.map(async (t) => {
+        const c = readCheckBody({ transformation: { name: t.label }, inputs: t.inputs, outputs: t.outputs });
+        if (c.error) return { transformation: t.label, verdict: "skip", summary: "у преобразования нет сырья или продуктов на графе" };
+        try {
+          const { result } = await checkStep(c, { provider: ctx.provider, model: ctx.model, signal: ctx.signal });
+          return result
+            ? { transformation: t.label, verdict: result.verdict, summary: result.summary, renames: result.renames, rename_transformation: result.transformation?.name }
+            : { transformation: t.label, verdict: "error", summary: "модель ответила не по схеме" };
+        } catch (e) {
+          return { transformation: t.label, verdict: "error", summary: e.message };
+        }
+      }),
+    );
+    const count = (v) => results.filter((r) => r.verdict === v).length;
+    return {
+      result: { checked: results, notChecked: steps.length - batch.length },
+      summary: `проверка шагов: ${results.length} — верно ${count("ok")}, исправить ${count("fix")}, ошибочно ${count("wrong")}${count("error") ? `, не проверено ${count("error")}` : ""}`,
+      // Каждая проверка — запрос к модели: человек видит их в счётчике.
+      requests: results.filter((r) => r.verdict !== "skip").length,
+    };
   }
 
   if (name === "add_product") {

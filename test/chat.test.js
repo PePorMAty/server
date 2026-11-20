@@ -15,8 +15,16 @@ const utilsPath = require.resolve(path.join(__dirname, "../routes/sources/utils"
 const real = require(utilsPath);
 let replies = []; // ответы модели по очереди: { content } или { calls: [[name, args], …] }
 let calls = []; // что ушло в модель
+let checks = []; // проверки шага (check_steps): что спросили и что ответить
+let checkReplies = {};
 require.cache[utilsPath].exports = {
   ...real,
+  callOpenAIResponsesRaw: async ({ payload }) => {
+    checks.push(payload.input);
+    const name = /Преобразование: «([^»]+)»/.exec(payload.input)?.[1];
+    return { text: JSON.stringify(checkReplies[name] ?? { verdict: "ok", summary: "верно", renames: [], transformation_name: "", transformation_description: "" }) };
+  },
+  extractOutputText: (r) => r.text,
   callChatTools: async (params) => {
     calls.push(JSON.parse(JSON.stringify(params)));
     const r = replies.shift() ?? { content: "…" };
@@ -274,6 +282,51 @@ test("новый продукт и показ альтернатив", async () 
   ]);
   const node = (await tool("graph_node", { name: "Кумол" })).result;
   assert.deepEqual(node.alternatives, [{ alternative: "Олигомеризация пропилена на цеолитах", direction: "up" }]);
+});
+
+test("источники, удаление, раскладка — действия у узлов графа", async () => {
+  const src = await tool("find_sources", { product: "кумол", direction: "up", web: true, why: "в интернете" });
+  assert.deepEqual(src.proposal, { kind: "sources", nodeId: "n4", label: "Кумол", direction: "up", web: true, why: "в интернете" });
+  assert.equal((await tool("find_sources", { product: "Мультиварка", direction: "up" })).proposal, undefined);
+
+  const del = await tool("delete_nodes", { names: ["Ацетон", "Гидрирование", "Бисфенол А", "Уран", "Гидрирование"] });
+  assert.deepEqual(del.proposal.nodes, [
+    { id: "t2", label: "Гидрирование" },
+    { id: "a2", label: "Бисфенол А" },
+  ]);
+  assert.equal((await tool("delete_nodes", { names: ["Уран"] })).proposal, undefined);
+
+  assert.deepEqual((await tool("relayout", {})).proposal, { kind: "layout", why: "" });
+  // Старый клиент действий 4.5 не знает — модель их не получит.
+  assert.match((await tool("delete_nodes", { names: ["Фенол"] }, ["step", "show"])).result.error, /Нет инструмента/);
+});
+
+test("check_steps: проверка шага моделью по сырью и продуктам графа, запросы — в счётчик", async () => {
+  checks = [];
+  checkReplies = {
+    "Кумольный способ": {
+      verdict: "wrong",
+      summary: "из кумола так фенол не получают",
+      renames: [],
+      transformation_name: "",
+      transformation_description: "",
+    },
+  };
+  const out = await tool("check_steps", { transformations: ["кумольный", "Гидрирование", "Пиролиз"] });
+  assert.equal(checks.length, 2);
+  assert.match(checks[0], /Сырьё:\n- «Изопропилбензол \(кумол\)»/);
+  assert.deepEqual(
+    out.result.checked.map((r) => [r.transformation, r.verdict]),
+    [["Кумольный способ", "wrong"], ["Гидрирование", "ok"]],
+  );
+  assert.equal(out.summary, "проверка шагов: 2 — верно 1, исправить 0, ошибочно 1");
+  assert.equal(out.requests, 2);
+
+  // Через цикл чата — запросы проверки видны в итоге.
+  calls = [];
+  replies = [{ calls: [["check_steps", { transformations: ["Кумольный способ"] }]] }, { content: "Кумольный способ ошибочен." }];
+  const { done } = await chat("проверь кумольный способ");
+  assert.equal(done.usage.requests, 3);
 });
 
 test("переименование и объединение: два разных узла, новое название — не прежнее", async () => {

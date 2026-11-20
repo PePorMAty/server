@@ -101,7 +101,7 @@ async function runChat(
   const tools = [];
   const usage = { requests: 0, tokens: 0 };
   let usedModel = model || null;
-  const ctx = { slice, kinds, ...bases };
+  const ctx = { slice, kinds, provider, model, signal, ...bases };
   const toolDefs = toolsFor(kinds);
   const t0 = Date.now();
 
@@ -179,6 +179,8 @@ async function runChat(
         console.error(`[chat] инструмент ${name}:`, e.message);
         out = { result: { error: `Инструмент не сработал: ${e.message}` }, summary: `${name} — ошибка` };
       }
+      // Инструменты, которые сами спрашивают модель (check_steps), — в счётчик.
+      usage.requests += out.requests ?? 0;
       const step = { name, args, summary: out.summary };
       tools.push(step);
       emit({ type: "tool", ...step });
