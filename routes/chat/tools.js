@@ -25,6 +25,7 @@
 // Ответы инструментов — короткий JSON: модели нужны факты и ссылки, а не
 // выгрузка базы, и каждый лишний знак — токены тарифа.
 
+const crypto = require("crypto");
 const { sourcesStoreKind } = require("../../db/sourcesDb");
 const { findProducts, findTransformations, findAlternatives, findNode, graphNode } = require("./graphSlice");
 
@@ -43,6 +44,10 @@ const PROPOSAL_TOOLS = {
   find_sources: "sources",
   delete_nodes: "delete",
   relayout: "layout",
+  find_alternatives: "alternatives",
+  set_description: "describe",
+  fill_card: "fillcard",
+  bookmark_nodes: "bookmark",
 };
 
 /** Шагов в одной проверке check_steps: каждый — запрос к модели. */
@@ -184,6 +189,42 @@ const TOOLS = [
     "Разложить граф заново — как кнопка «Разложить»: узлы встают по уровням цепочек, одинаковые преобразования сливаются в один узел.",
     { why: { type: "string", description: "Коротко — зачем" } },
     [],
+  ),
+  fn(
+    "find_alternatives",
+    "Показать альтернативы продукта графа — фиолетовые варианты шага, БЕЗ построения самого шага: мастер найдёт источники и обобщит их, альтернативные маршруты встанут на граф. up — другие способы получить продукт, down — другие пути его переработки.",
+    {
+      product: { type: "string", description: "Продукт на графе" },
+      direction: { type: "string", enum: ["up", "down"] },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["product", "direction"],
+  ),
+  fn(
+    "set_description",
+    "Записать узлу графа описание (поле «Описание») и, если знаешь, отрасль и назначение («Ключевая информация»). Текст пишешь ты — по справке, product_card и search_sources; по общим сведениям — с пометкой. Для продукта, добавленного вручную, это снимает пометку «не заполнен».",
+    {
+      node: { type: "string", description: "Узел на графе" },
+      description: { type: "string", description: "Описание: 1–3 предложения — что это и зачем" },
+      industry: { type: "string", description: "Необязательно: отрасль, 1–3 слова" },
+      main_purpose: { type: "string", description: "Необязательно: главное назначение, одним предложением" },
+    },
+    ["node", "description"],
+  ),
+  fn(
+    "fill_card",
+    "Заполнить карточку узла графа (вкладка «Технологическое описание»: у продукта — чистота, производители, применения, объёмы; у преобразования — оборудование, условия, энергетика). Заполняет модель отдельным запросом.",
+    { node: { type: "string", description: "Узел на графе" }, why: { type: "string", description: "Коротко — зачем" } },
+    ["node"],
+  ),
+  fn(
+    "bookmark_nodes",
+    "Добавить узлы графа в закладки (remove: true — убрать из закладок).",
+    {
+      names: { type: "array", items: { type: "string" }, description: "Узлы на графе" },
+      remove: { type: "boolean", description: "Убрать из закладок" },
+    },
+    ["names"],
   ),
   fn(
     "check_steps",
@@ -375,6 +416,54 @@ async function runTool(name, args, ctx) {
     });
   }
 
+  if (name === "find_alternatives") {
+    const label = str(a.product);
+    const direction = a.direction === "up" ? "up" : "down";
+    const [node] = findProducts(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе — альтернативы ищутся у продукта графа.`, `альтернативы «${label}» — на графе нет`);
+    return shown(`предложено найти альтернативы «${node.label}» ${direction === "up" ? "вверх" : "вниз"}`, {
+      kind: "alternatives",
+      nodeId: node.id,
+      label: node.label,
+      direction,
+      why,
+    });
+  }
+
+  if (name === "set_description") {
+    const label = str(a.node);
+    const node = findNode(ctx.slice, label);
+    const description = str(a.description, 1500);
+    if (!node) return refuse(`«${label}» нет на открытом графе.`, `описание «${label}» — на графе нет`);
+    if (!description) return refuse("Пустое описание — напиши текст.", `описание «${node.label}» — пусто`);
+    return shown(`предложено описание «${node.label}»`, {
+      kind: "describe",
+      nodeId: node.id,
+      label: node.label,
+      description,
+      ...(str(a.industry, 120) ? { industry: str(a.industry, 120) } : {}),
+      ...(str(a.main_purpose, 400) ? { mainPurpose: str(a.main_purpose, 400) } : {}),
+    });
+  }
+
+  if (name === "fill_card") {
+    const label = str(a.node);
+    const node = findNode(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе.`, `карточка «${label}» — на графе нет`);
+    return shown(`предложено заполнить карточку «${node.label}»`, { kind: "fillcard", nodeId: node.id, label: node.label, nodeKind: node.kind, why });
+  }
+
+  if (name === "bookmark_nodes") {
+    const nodes = [];
+    for (const n of (Array.isArray(a.names) ? a.names : []).map((x) => str(x)).filter(Boolean).slice(0, 20)) {
+      const node = findNode(ctx.slice, n);
+      if (node && !nodes.some((x) => x.id === node.id)) nodes.push({ id: node.id, label: node.label });
+    }
+    if (!nodes.length) return refuse("Таких узлов на открытом графе нет.", "закладки — узлов нет");
+    const remove = a.remove === true;
+    return shown(`${remove ? "убрать из закладок" : "в закладки"}: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "bookmark", nodes, remove });
+  }
+
   if (name === "find_sources") {
     const label = str(a.product);
     const direction = a.direction === "up" ? "up" : "down";
@@ -449,8 +538,15 @@ async function runTool(name, args, ctx) {
       return refuse(`«${same.label}» уже есть на графе — покажи его (show_nodes).`, `добавить «${label}» — уже на графе`);
     }
     const [near] = a.near ? findProducts(ctx.slice, str(a.near)) : [];
+    // id нового узла — отсюда: «добавь автомобиль и построй от него шаг»
+    // в том же ответе — шаг от узла, которого на графе ещё нет. Узел сразу
+    // встаёт в срез, и propose_step его находит; клиент создаёт узел с
+    // этим id.
+    const id = `chat-${crypto.randomUUID()}`;
+    ctx.slice.products.push({ id, label });
     return shown(`предложено добавить продукт «${label}»`, {
       kind: "add",
+      id,
       label,
       ...(near ? { nearId: near.id, nearLabel: near.label } : {}),
       why,
