@@ -1154,7 +1154,16 @@ async function callChatTools({ messages, tools, toolChoice = "auto", provider, m
   const params = name === "qwen" ? withThinking(base) : base;
   try {
     const { resp, fixes, ms } = await createChat(client, params, { timeoutMs, name, signal });
-    return { message: resp.choices?.[0]?.message ?? { role: "assistant", content: "" }, usage: resp.usage ?? null, model: resp.model || effectiveModel, ms, fixes };
+    const choice = resp.choices?.[0];
+    return {
+      message: choice?.message ?? { role: "assistant", content: "" },
+      // «length» — ответ упёрся в max_tokens и оборван.
+      finishReason: choice?.finish_reason ?? null,
+      usage: resp.usage ?? null,
+      model: resp.model || effectiveModel,
+      ms,
+      fixes,
+    };
   } catch (err) {
     if (signal?.aborted || isAborted(err)) throw new Error(describeApiError(err, effectiveModel, { timeoutMs }));
     console.error(`[${name}] callChatTools error:`, apiErrorText(err));

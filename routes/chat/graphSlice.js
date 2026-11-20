@@ -5,15 +5,19 @@
 //   { name, selectedLabel: название выбранного продукта, selected: его
 //     контекст (productContext.ts; у одинокого узла без описания — null),
 //     products: [{ id, label }], transformations: [{ id, label, inputs,
-//     outputs }] }
+//     outputs }], alternatives?: [{ id, label, of: [продукты], direction }] }
+// Альтернативы — фиолетовые варианты шага, которые человек ещё не принял:
+// не шаги графа, но их можно показать и о них спрашивают («отобрази
+// альтернативы»). Старый клиент их не шлёт.
 // Здесь — проверка и обрезка (граф на сотни узлов не должен раздувать
 // запрос к модели) и поиск узла по названию — с теми же ключами, что у
 // источников продукта: «Кумол» найдёт узел «Изопропилбензол (кумол)».
 
 const { readProductContext } = require("../shared/productContext");
+const { mentions } = require("./mentions");
 const { productKeys } = require("../local-sources/utils/store");
 
-const LIMITS = { products: 600, transformations: 400, label: 200, ends: 20, name: 200 };
+const LIMITS = { products: 600, transformations: 400, alternatives: 200, label: 200, ends: 20, name: 200 };
 
 const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -28,12 +32,22 @@ function readGraphSlice(raw) {
     .map((t) => ({ id: clean(t?.id, 300), label: clean(t?.label, LIMITS.label), inputs: list(t?.inputs), outputs: list(t?.outputs) }))
     .filter((t) => t.id && t.label)
     .slice(0, LIMITS.transformations);
+  const alternatives = (Array.isArray(g.alternatives) ? g.alternatives : [])
+    .map((a) => ({
+      id: clean(a?.id, 300),
+      label: clean(a?.label, LIMITS.label),
+      of: list(a?.of),
+      direction: a?.direction === "up" ? "up" : "down",
+    }))
+    .filter((a) => a.id && a.label)
+    .slice(0, LIMITS.alternatives);
   return {
     name: clean(g.name, LIMITS.name),
     selectedLabel: clean(g.selectedLabel, LIMITS.label) || null,
     selected: readProductContext(g.selected),
     products,
     transformations,
+    alternatives,
   };
 }
 
@@ -69,7 +83,20 @@ function findTransformations(slice, name, product) {
   }
   const exact = list.filter((t) => lower(t.label) === want);
   if (exact.length) return exact;
-  return list.filter((t) => lower(t.label).includes(want) || want.includes(lower(t.label)));
+  const part = list.filter((t) => lower(t.label).includes(want) || want.includes(lower(t.label)));
+  if (part.length) return part;
+  // Другим падежом: «алкилированием фенола олигомерами этилена».
+  return list.filter((t) => mentions(name, t.label));
+}
+
+/** Альтернативы по названию варианта или продукта, у которого они стоят. */
+function findAlternatives(slice, name) {
+  const want = lower(clean(name, LIMITS.label));
+  if (!want) return [];
+  const own = slice.alternatives.filter((a) => lower(a.label) === want || mentions(name, a.label));
+  if (own.length) return own;
+  const labels = new Set(findProducts(slice, name).map((p) => lower(p.label)));
+  return slice.alternatives.filter((a) => a.of.some((x) => labels.has(lower(x))));
 }
 
 /** Узел графа по названию — продукт, а нет такого — преобразование. */
@@ -89,12 +116,16 @@ function graphNode(slice, name) {
   const made = slice.transformations.filter((t) => has(t.outputs));
   const used = slice.transformations.filter((t) => has(t.inputs));
   const brief = (t) => ({ transformation: t.label, inputs: t.inputs, outputs: t.outputs });
+  const alts = slice.alternatives.filter((a) => a.of.some((x) => labels.has(lower(x))));
   return {
     found: true,
     nodes: found.map((p) => p.label),
     madeBy: made.slice(0, 10).map(brief),
     usedIn: used.slice(0, 10).map(brief),
+    // Варианты шага, ещё не принятые человеком: вверх — другие способы
+    // получить продукт, вниз — другие пути его переработки.
+    alternatives: alts.slice(0, 10).map((a) => ({ alternative: a.label, direction: a.direction })),
   };
 }
 
-module.exports = { readGraphSlice, findProducts, findTransformations, findNode, graphNode, LIMITS };
+module.exports = { readGraphSlice, findProducts, findTransformations, findAlternatives, findNode, graphNode, LIMITS };

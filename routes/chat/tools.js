@@ -8,10 +8,15 @@
 //
 // Предложения — ничего не делают на сервере: возвращаются клиенту карточками,
 // а меняет граф человек своей кнопкой. Каждое ведёт в то, что на сайте уже
-// есть: шаг — мастер шага у узла, коды — окно «Определить коды», баланс и
-// техописание — вкладки карточки узла, переименование и объединение — те же
-// действия, что у человека (с окном «Такой продукт уже есть»). Поэтому всё
-// предлагается только для узлов, которые ЕСТЬ на открытом графе.
+// есть: шаг — мастер шага у узла, коды — окно «Определить коды», баланс —
+// расчёт во вкладке карточки преобразования, техописание — вкладка карточки,
+// переименование и объединение — те же действия, что у человека (с окном
+// «Такой продукт уже есть»), новый продукт — узел на полотне. Поэтому всё,
+// кроме нового продукта, — только для узлов, которые ЕСТЬ на открытом графе.
+//
+// Режим чата (4.4): «с подтверждением» — карточки с кнопкой; «автопилот» —
+// сайт выполняет вызванное сам и присылает итог следующим сообщением.
+// Инструменты те же: режим знает промпт и клиент.
 //
 // Клиент присылает, какие карточки умеет показывать (proposals в запросе);
 // модель видит только эти инструменты. Клиент первой версии чата знает шаг
@@ -21,7 +26,7 @@
 // выгрузка базы, и каждый лишний знак — токены тарифа.
 
 const { sourcesStoreKind } = require("../../db/sourcesDb");
-const { findProducts, findTransformations, findNode, graphNode } = require("./graphSlice");
+const { findProducts, findTransformations, findAlternatives, findNode, graphNode } = require("./graphSlice");
 
 const DIRECTION = { up: "вверх — из чего его делают", down: "вниз — что из него делают" };
 
@@ -34,7 +39,14 @@ const PROPOSAL_TOOLS = {
   propose_description: "tech",
   propose_rename: "rename",
   propose_merge: "merge",
+  add_product: "add",
+  find_sources: "sources",
+  delete_nodes: "delete",
+  relayout: "layout",
 };
+
+/** Шагов в одной проверке check_steps: каждый — запрос к модели. */
+const MAX_CHECKS = 5;
 const PROPOSAL_KINDS = Object.values(PROPOSAL_TOOLS);
 /** Что умеет клиент, не приславший proposals (первая версия чата). */
 const DEFAULT_KINDS = ["step", "show"];
@@ -86,8 +98,11 @@ const TOOLS = [
   ),
   fn(
     "show_nodes",
-    "Показать человеку узлы на открытом графе (выделить и подвести камеру).",
-    { names: { type: "array", items: { type: "string" }, description: "Названия продуктов на графе" } },
+    "Показать человеку узлы на открытом графе (выделить и подвести камеру): продукты, преобразования, альтернативы. Название продукта с alternatives: true — показать его альтернативы (фиолетовые варианты шага).",
+    {
+      names: { type: "array", items: { type: "string" }, description: "Названия узлов на графе" },
+      alternatives: { type: "boolean", description: "Показать альтернативы этих продуктов, а не сами продукты" },
+    },
     ["names"],
   ),
   fn(
@@ -107,7 +122,7 @@ const TOOLS = [
   ),
   fn(
     "propose_balance",
-    "Предложить человеку открыть материальный баланс преобразования открытого графа (вкладка карточки преобразования: расчёт по ИТС, массы сырья и продуктов). Преобразования узла покажет graph_node.",
+    "Рассчитать материальный баланс преобразования открытого графа: сайт откроет вкладку баланса и запустит расчёт по ИТС (готовый из базы придёт сразу, новый — минуты, это запросы к модели). Преобразования узла покажет graph_node.",
     {
       transformation: { type: "string", description: "Преобразование на графе" },
       product: { type: "string", description: "Необязательно: продукт этого преобразования — если одноимённых преобразований несколько" },
@@ -133,6 +148,48 @@ const TOOLS = [
       why: { type: "string", description: "Коротко — почему" },
     },
     ["node", "new_name"],
+  ),
+  fn(
+    "add_product",
+    "Добавить на граф новый продукт-узел (без связей). near — продукт графа, рядом с которым поставить. Связать его с цепочкой можно потом шагом от него или от соседа.",
+    {
+      name: { type: "string", description: "Название продукта" },
+      near: { type: "string", description: "Необязательно: продукт на графе, рядом с которым поставить" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["name"],
+  ),
+  fn(
+    "find_sources",
+    "Найти источники для шага от продукта графа — первый этап мастера шага: сначала разделы базы ИТС, а нет их — поиск моделью в интернете. web: true — искать в интернете, даже если в базе есть. Шаг после этого не строится: дальше propose_step с тем же направлением возьмёт найденное.",
+    {
+      product: { type: "string", description: "Продукт на графе" },
+      direction: { type: "string", enum: ["up", "down"], description: "up — из чего его делают, down — что из него делают" },
+      web: { type: "boolean", description: "Искать в интернете (поиск моделью — минуты и запросы)" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["product", "direction"],
+  ),
+  fn(
+    "delete_nodes",
+    "Удалить узлы с графа — продукты, преобразования или альтернативы — вместе с их связями. Назад не вернуть: только по прямой просьбе человека или для явно ошибочного шага, о котором ты сказал.",
+    {
+      names: { type: "array", items: { type: "string" }, description: "Названия узлов на графе" },
+      why: { type: "string", description: "Коротко — почему" },
+    },
+    ["names"],
+  ),
+  fn(
+    "relayout",
+    "Разложить граф заново — как кнопка «Разложить»: узлы встают по уровням цепочек, одинаковые преобразования сливаются в один узел.",
+    { why: { type: "string", description: "Коротко — зачем" } },
+    [],
+  ),
+  fn(
+    "check_steps",
+    `Проверить преобразования открытого графа: верно ли химически и технологически «сырьё → продукты» (та же проверка, что на превью шага). Каждое — отдельный запрос к модели; не больше ${MAX_CHECKS} за вызов. Ответ: verdict ok — верно, fix — верно после переименований (renames), wrong — шаг ошибочен.`,
+    { transformations: { type: "array", items: { type: "string" }, description: "Преобразования на графе" } },
+    ["transformations"],
   ),
   fn(
     "propose_merge",
@@ -248,7 +305,18 @@ async function runTool(name, args, ctx) {
   if (name === "show_nodes") {
     const names = (Array.isArray(a.names) ? a.names : []).map((n) => str(n)).filter(Boolean).slice(0, 20);
     const nodes = [];
-    for (const n of names) for (const p of findProducts(ctx.slice, n)) if (!nodes.some((x) => x.id === p.id)) nodes.push(p);
+    const add = (n) => {
+      if (n && !nodes.some((x) => x.id === n.id)) nodes.push({ id: n.id, label: n.label });
+    };
+    for (const n of names) {
+      if (a.alternatives) {
+        findAlternatives(ctx.slice, n).forEach(add);
+        continue;
+      }
+      const products = findProducts(ctx.slice, n);
+      if (products.length) products.forEach(add);
+      else add(findNode(ctx.slice, n) ?? findAlternatives(ctx.slice, n)[0]);
+    }
     if (!nodes.length) {
       return { result: { ok: false, error: "Таких узлов на открытом графе нет." }, summary: "показать на графе — узлов нет" };
     }
@@ -303,6 +371,88 @@ async function runTool(name, args, ctx) {
       label: node.label,
       newLabel,
       nodeKind: node.kind,
+      why,
+    });
+  }
+
+  if (name === "find_sources") {
+    const label = str(a.product);
+    const direction = a.direction === "up" ? "up" : "down";
+    const [node] = findProducts(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе — источники ищутся для шага от узла графа.`, `источники для «${label}» — на графе нет`);
+    return shown(`предложен поиск источников для «${node.label}» ${direction === "up" ? "вверх" : "вниз"}${a.web ? " в интернете" : ""}`, {
+      kind: "sources",
+      nodeId: node.id,
+      label: node.label,
+      direction,
+      web: a.web === true,
+      why,
+    });
+  }
+
+  if (name === "delete_nodes") {
+    const names = (Array.isArray(a.names) ? a.names : []).map((n) => str(n)).filter(Boolean).slice(0, 10);
+    const nodes = [];
+    for (const n of names) {
+      const node = findNode(ctx.slice, n) ?? findAlternatives(ctx.slice, n).find((x) => x.label.toLowerCase() === n.toLowerCase());
+      if (node && !nodes.some((x) => x.id === node.id)) nodes.push({ id: node.id, label: node.label });
+    }
+    if (!nodes.length) return refuse("Таких узлов на открытом графе нет.", "удалить — узлов нет");
+    return shown(`предложено удалить: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "delete", nodes, why });
+  }
+
+  if (name === "relayout") {
+    return shown("предложено разложить граф заново", { kind: "layout", why });
+  }
+
+  if (name === "check_steps") {
+    const wanted = (Array.isArray(a.transformations) ? a.transformations : []).map((n) => str(n)).filter(Boolean);
+    const steps = [];
+    for (const n of wanted) {
+      const [t] = findTransformations(ctx.slice, n);
+      if (t && !steps.some((x) => x.id === t.id)) steps.push(t);
+    }
+    if (!steps.length) return { result: { error: "Таких преобразований на графе нет — названия есть в справке и graph_node." }, summary: "проверка шагов — не нашлось" };
+    const { readCheckBody } = require("../step/utils/stepCheck");
+    const { checkStep } = require("../step/check");
+    const batch = steps.slice(0, MAX_CHECKS);
+    // Параллельно: проверка — запрос на десятки секунд, по очереди пять
+    // таких — минуты ожидания в чате.
+    const results = await Promise.all(
+      batch.map(async (t) => {
+        const c = readCheckBody({ transformation: { name: t.label }, inputs: t.inputs, outputs: t.outputs });
+        if (c.error) return { transformation: t.label, verdict: "skip", summary: "у преобразования нет сырья или продуктов на графе" };
+        try {
+          const { result } = await checkStep(c, { provider: ctx.provider, model: ctx.model, signal: ctx.signal });
+          return result
+            ? { transformation: t.label, verdict: result.verdict, summary: result.summary, renames: result.renames, rename_transformation: result.transformation?.name }
+            : { transformation: t.label, verdict: "error", summary: "модель ответила не по схеме" };
+        } catch (e) {
+          return { transformation: t.label, verdict: "error", summary: e.message };
+        }
+      }),
+    );
+    const count = (v) => results.filter((r) => r.verdict === v).length;
+    return {
+      result: { checked: results, notChecked: steps.length - batch.length },
+      summary: `проверка шагов: ${results.length} — верно ${count("ok")}, исправить ${count("fix")}, ошибочно ${count("wrong")}${count("error") ? `, не проверено ${count("error")}` : ""}`,
+      // Каждая проверка — запрос к модели: человек видит их в счётчике.
+      requests: results.filter((r) => r.verdict !== "skip").length,
+    };
+  }
+
+  if (name === "add_product") {
+    const label = str(a.name, 200).replace(/\s+/g, " ");
+    if (!label) return refuse("Нужно название продукта.", "добавить продукт — без названия");
+    const [same] = findProducts(ctx.slice, label);
+    if (same && same.label.toLowerCase() === label.toLowerCase()) {
+      return refuse(`«${same.label}» уже есть на графе — покажи его (show_nodes).`, `добавить «${label}» — уже на графе`);
+    }
+    const [near] = a.near ? findProducts(ctx.slice, str(a.near)) : [];
+    return shown(`предложено добавить продукт «${label}»`, {
+      kind: "add",
+      label,
+      ...(near ? { nearId: near.id, nearLabel: near.label } : {}),
       why,
     });
   }

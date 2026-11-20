@@ -15,8 +15,16 @@ const utilsPath = require.resolve(path.join(__dirname, "../routes/sources/utils"
 const real = require(utilsPath);
 let replies = []; // ответы модели по очереди: { content } или { calls: [[name, args], …] }
 let calls = []; // что ушло в модель
+let checks = []; // проверки шага (check_steps): что спросили и что ответить
+let checkReplies = {};
 require.cache[utilsPath].exports = {
   ...real,
+  callOpenAIResponsesRaw: async ({ payload }) => {
+    checks.push(payload.input);
+    const name = /Преобразование: «([^»]+)»/.exec(payload.input)?.[1];
+    return { text: JSON.stringify(checkReplies[name] ?? { verdict: "ok", summary: "верно", renames: [], transformation_name: "", transformation_description: "" }) };
+  },
+  extractOutputText: (r) => r.text,
   callChatTools: async (params) => {
     calls.push(JSON.parse(JSON.stringify(params)));
     const r = replies.shift() ?? { content: "…" };
@@ -32,12 +40,12 @@ require.cache[utilsPath].exports = {
         }
       : { role: "assistant", content: r.content };
     if (r.fail) throw new Error(r.fail);
-    return { message, usage: { total_tokens: 100 }, model: "test-model" };
+    return { message, finishReason: r.finish ?? (r.calls ? "tool_calls" : "stop"), usage: { total_tokens: 100 }, model: "test-model" };
   },
 };
 
 const router = require("../routes/chat/chat");
-const { runChat, MAX_ROUNDS } = router;
+const { runChat, MAX_ROUNDS, claimedAction } = router;
 const { readGraphSlice } = require("../routes/chat/graphSlice");
 const { readKinds, runTool, PROPOSAL_KINDS } = require("../routes/chat/tools");
 const { chatSystemPrompt } = require("../routes/chat/prompt");
@@ -62,7 +70,9 @@ async function chat(message, extra = {}) {
 
 test("промпт: правила, продукты открытого графа и выбранный узел", () => {
   const p = chatSystemPrompt(slice);
-  assert.match(p, /Граф меняет только человек/);
+  assert.match(p, /никогда не пиши, что показал/);
+  assert.match(p, /РЕЖИМ С ПОДТВЕРЖДЕНИЕМ/);
+  assert.match(chatSystemPrompt(slice, ["step", "show"], { mode: "auto" }), /РЕЖИМ АВТОПИЛОТА/);
   assert.match(p, /Продукты на графе: Фенол; Изопропилбензол \(кумол\); Ацетон\./);
   assert.match(p, /ВЫБРАННЫЙ УЗЕЛ[\s\S]*ароматический спирт/);
   // Одинокий узел без описания: контекста нет, но название модель знает.
@@ -82,7 +92,10 @@ test("инструменты графа и предложение шага: уз
   assert.equal(done.reply, "Кумол есть на графе — предлагаю шаг вверх.");
   assert.deepEqual(done.usage, { requests: 2, tokens: 200 });
   assert.deepEqual(done.proposals, [{ kind: "step", nodeId: "n2", label: "Изопропилбензол (кумол)", direction: "up", why: "из чего его делают" }]);
-  assert.deepEqual(events.map((e) => e.type), ["tool", "tool", "proposal", "done"]);
+  // Справка: «кумол» — синоним в скобках узла графа.
+  assert.equal(events[0].summary, "справка: узлы графа — «Изопропилбензол (кумол)»");
+  assert.match(calls[0].messages[0].content, /СПРАВКА[^\n]*\n.*"madeBy"/);
+  assert.deepEqual(events.slice(1).map((e) => e.type), ["tool", "tool", "proposal", "done"]);
   // Второй круг видит ответы инструментов по их id.
   const toolMsgs = calls[1].messages.filter((m) => m.role === "tool");
   assert.equal(toolMsgs.length, 2);
@@ -130,8 +143,75 @@ test("история разговора — в запросе перед нов�
   assert.equal(calls[0].provider, "qwen");
 });
 
+test("справка до ответа: упомянутое преобразование — другим падежом, выбранный узел", async () => {
+  const sl = readGraphSlice({
+    products: [{ id: "p1", label: "Фенол" }, { id: "p2", label: "Олигомеры этилена" }, { id: "p3", label: "Алкилфенолы" }],
+    transformations: [{ id: "t9", label: "Алкилирование фенола олигомерами этилена", inputs: ["Фенол", "Олигомеры этилена"], outputs: ["Алкилфенолы"] }],
+    selectedLabel: "Алкилфенолы",
+  });
+  calls = [];
+  replies = [{ content: "Сейчас." }];
+  const events = [];
+  await runChat({ message: "рассчитай материальный баланс для фенола - алкилированием фенола олигомерами этилена", history: [], slice: sl }, (e) => events.push(e));
+  const system = calls[0].messages[0].content;
+  assert.match(system, /"transformation":"Алкилирование фенола олигомерами этилена"/);
+  assert.deepEqual(
+    events.filter((e) => e.type === "tool").map((e) => e.summary),
+    ["справка: узлы графа — «Алкилфенолы», «Олигомеры этилена», «Фенол»", "справка: преобразования — «Алкилирование фенола олигомерами этилена»"],
+  );
+  // Слово длинного названия — не отдельный продукт: «тримеров пропилена» ≠ «Пропилен».
+  const { mentionedNodes } = require("../routes/chat/mentions");
+  const tri = readGraphSlice({ products: [{ id: "a", label: "Пропилен" }, { id: "b", label: "Тримеры пропилена" }] });
+  assert.deepEqual(mentionedNodes(tri, "отобрази тримеров пропилена").products.map((p) => p.label), ["Тримеры пропилена"]);
+  assert.deepEqual(mentionedNodes(tri, "пропилен и его тримеры пропилена").products.map((p) => p.label), ["Тримеры пропилена"]);
+  // Ничего не упомянуто и не выбрано — справки нет.
+  calls = [];
+  replies = [{ content: "Привет." }];
+  await runChat({ message: "привет", history: [], slice: readGraphSlice({ products: [{ id: "p1", label: "Фенол" }] }) });
+  assert.doesNotMatch(calls[0].messages[0].content, /СПРАВКА/);
+});
+
+test("«показал» без действия — модель переделывает ответ один раз; итог автопилота не трогаем", async () => {
+  calls = [];
+  replies = [{ content: "Показал «Фенол» на графе." }, { calls: [["show_nodes", { names: ["Фенол"] }]] }, { content: "Показал." }];
+  const { done } = await chat("отобрази фенол");
+  assert.equal(done.usage.requests, 3);
+  assert.match(calls[1].messages.at(-1).content, /Проверка сервера: в ответе «показал»/);
+  assert.equal(done.proposals[0].kind, "show");
+
+  // Второй раз подряд — не крутим: ответ как есть.
+  calls = [];
+  replies = [{ content: "Добавил." }, { content: "Добавила." }];
+  assert.equal((await chat("добавь бензол")).done.reply, "Добавила.");
+  assert.equal(calls.length, 2);
+
+  // Итог автопилота: «построил» там правда — без поправки.
+  calls = [];
+  replies = [{ content: "Построил шаг вниз от фенола — задача выполнена." }];
+  await chat("Автопилот: шаг добавлен", { continuation: true, mode: "auto" });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].messages[0].content, /РЕЖИМ АВТОПИЛОТА/);
+});
+
+test("что считается «сделал»", () => {
+  assert.equal(claimedAction("Показал «Тримеры пропилена» на графе."), "показал");
+  assert.equal(claimedAction("Готово: построила шаг"), "построила");
+  assert.equal(claimedAction("Я не добавил шаг: бензола на графе нет."), null);
+  assert.equal(claimedAction("Вы уже добавили шаг — дальше бисфенол А."), null);
+  assert.equal(claimedAction("Предлагаю шаг вниз; строю его в мастере."), null);
+});
+
+test("оборванный ответ — с пометкой", async () => {
+  replies = [{ content: "Тримеры пропилена получают только одним преобразованием:", finish: "length" }];
+  assert.match((await chat("Расскажи")).done.reply, /ответ оборван/);
+});
+
 // ---------- карточки предложений (этап 4.3) ----------
 const graph2 = readGraphSlice({
+  alternatives: [
+    { id: "a1", label: "Олигомеризация пропилена на цеолитах", of: ["Кумол"], direction: "up" },
+    { id: "a2", label: "Бисфенол А", of: ["Фенол"], direction: "down" },
+  ],
   products: [
     { id: "n1", label: "Фенол" },
     { id: "n2", label: "Изопропилбензол (кумол)" },
@@ -184,6 +264,69 @@ test("предложения кодов, баланса и описания — 
 
   assert.deepEqual((await tool("propose_description", { node: "Фенол" })).proposal, { kind: "tech", nodeId: "n1", label: "Фенол", nodeKind: "product", why: "" });
   assert.equal((await tool("propose_description", { node: "Кумольный способ" })).proposal.nodeKind, "transformation");
+});
+
+test("новый продукт и показ альтернатив", async () => {
+  const add = await tool("add_product", { name: " Автомобиль ", near: "фенол", why: "просили" });
+  assert.deepEqual(add.proposal, { kind: "add", label: "Автомобиль", nearId: "n1", nearLabel: "Фенол", why: "просили" });
+  const dup = await tool("add_product", { name: "Фенол" });
+  assert.equal(dup.proposal, undefined);
+  assert.match(dup.result.error, /уже есть/);
+
+  const alts = await tool("show_nodes", { names: ["Фенол"], alternatives: true });
+  assert.deepEqual(alts.proposal.nodes, [{ id: "a2", label: "Бисфенол А" }]);
+  // Альтернативу показывают и по её названию, преобразование — по своему.
+  assert.deepEqual((await tool("show_nodes", { names: ["Бисфенол А", "Кумольный способ"] })).proposal.nodes, [
+    { id: "a2", label: "Бисфенол А" },
+    { id: "t1", label: "Кумольный способ" },
+  ]);
+  const node = (await tool("graph_node", { name: "Кумол" })).result;
+  assert.deepEqual(node.alternatives, [{ alternative: "Олигомеризация пропилена на цеолитах", direction: "up" }]);
+});
+
+test("источники, удаление, раскладка — действия у узлов графа", async () => {
+  const src = await tool("find_sources", { product: "кумол", direction: "up", web: true, why: "в интернете" });
+  assert.deepEqual(src.proposal, { kind: "sources", nodeId: "n4", label: "Кумол", direction: "up", web: true, why: "в интернете" });
+  assert.equal((await tool("find_sources", { product: "Мультиварка", direction: "up" })).proposal, undefined);
+
+  const del = await tool("delete_nodes", { names: ["Ацетон", "Гидрирование", "Бисфенол А", "Уран", "Гидрирование"] });
+  assert.deepEqual(del.proposal.nodes, [
+    { id: "t2", label: "Гидрирование" },
+    { id: "a2", label: "Бисфенол А" },
+  ]);
+  assert.equal((await tool("delete_nodes", { names: ["Уран"] })).proposal, undefined);
+
+  assert.deepEqual((await tool("relayout", {})).proposal, { kind: "layout", why: "" });
+  // Старый клиент действий 4.5 не знает — модель их не получит.
+  assert.match((await tool("delete_nodes", { names: ["Фенол"] }, ["step", "show"])).result.error, /Нет инструмента/);
+});
+
+test("check_steps: проверка шага моделью по сырью и продуктам графа, запросы — в счётчик", async () => {
+  checks = [];
+  checkReplies = {
+    "Кумольный способ": {
+      verdict: "wrong",
+      summary: "из кумола так фенол не получают",
+      renames: [],
+      transformation_name: "",
+      transformation_description: "",
+    },
+  };
+  const out = await tool("check_steps", { transformations: ["кумольный", "Гидрирование", "Пиролиз"] });
+  assert.equal(checks.length, 2);
+  assert.match(checks[0], /Сырьё:\n- «Изопропилбензол \(кумол\)»/);
+  assert.deepEqual(
+    out.result.checked.map((r) => [r.transformation, r.verdict]),
+    [["Кумольный способ", "wrong"], ["Гидрирование", "ok"]],
+  );
+  assert.equal(out.summary, "проверка шагов: 2 — верно 1, исправить 0, ошибочно 1");
+  assert.equal(out.requests, 2);
+
+  // Через цикл чата — запросы проверки видны в итоге.
+  calls = [];
+  replies = [{ calls: [["check_steps", { transformations: ["Кумольный способ"] }]] }, { content: "Кумольный способ ошибочен." }];
+  const { done } = await chat("проверь кумольный способ");
+  assert.equal(done.usage.requests, 3);
 });
 
 test("переименование и объединение: два разных узла, новое название — не прежнее", async () => {
@@ -283,9 +426,10 @@ test("роут: поток NDJSON без буфера nginx; пустое соо
   // Карточки клиента — из поля proposals запроса.
   calls = [];
   replies = [{ content: "Да." }];
-  await post({ message: "Привет", proposals: ["step", "show", "rename"] });
+  await post({ message: "Привет", proposals: ["step", "show", "rename"], mode: "auto" });
   assert.ok(toolNames(calls[0]).includes("propose_rename"));
   assert.ok(!toolNames(calls[0]).includes("propose_merge"));
+  assert.match(calls[0].messages[0].content, /РЕЖИМ АВТОПИЛОТА/);
   replies = [{ fail: "шлюз не ответил" }];
   const bad = await post({ message: "Привет" });
   assert.deepEqual(bad.events, [{ type: "error", error: "шлюз не ответил" }]);
