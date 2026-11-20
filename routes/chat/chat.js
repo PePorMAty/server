@@ -4,7 +4,10 @@
 //     { message, history: [{ role: "user"|"assistant", content }],
 //       graph: срез открытого графа (graphSlice.js), provider?, model?,
 //       proposals?: ["step", "show", "codes", …] — какие карточки предложений
-//       умеет клиент (tools.js); без поля — шаг и показ, как в первой версии }
+//       умеет клиент (tools.js); без поля — шаг и показ, как в первой версии;
+//       mode?: "confirm" | "auto" — с подтверждением (по умолчанию) или
+//       автопилот: сайт выполняет действия сам и присылает итог;
+//       continuation?: true — это итог автопилота, а не слова человека }
 //   → поток строк JSON (NDJSON), по событию на строку:
 //     { type: "tool", name, args, summary }      — модель смотрит базу/граф
 //     { type: "proposal", proposal }             — предложение человеку
@@ -17,7 +20,14 @@
 // кругами идёт десятки секунд. X-Accel-Buffering: no — nginx отдаёт строки
 // сразу, а не копит до конца.
 //
-// Граф чат не меняет: предложения (tools.js) уходят клиенту карточками.
+// Граф чат не меняет: действия (tools.js) уходят клиенту — карточками или,
+// в автопилоте, на выполнение.
+//
+// До первого запроса к модели сервер собирает справку (context.js): узлы,
+// упомянутые в сообщении, и выбранный узел — быстрая модель часто не
+// вызывает инструменты и отвечает по памяти. После ответа — страховка: модель
+// пишет «показал», «добавил», не вызвав действия (20.11, qwen3.8-flash), —
+// ей один раз возвращают ответ переделать.
 
 const express = require("express");
 
@@ -26,6 +36,7 @@ const { sourcesStoreKind } = require("../../db/sourcesDb");
 const { readGraphSlice } = require("./graphSlice");
 const { chatSystemPrompt } = require("./prompt");
 const { toolsFor, runTool, readKinds, DEFAULT_KINDS } = require("./tools");
+const { prefetchContext } = require("./context");
 
 const router = express.Router();
 
@@ -51,6 +62,20 @@ function parseArgs(raw) {
   }
 }
 
+/** Глаголы «сделал» — модель утверждает, что действие уже выполнено. */
+const CLAIMS = ["показал", "отобразил", "выделил", "добавил", "построил", "достроил", "переименовал", "объединил", "рассчитал", "посчитал", "запустил", "определил"];
+const CLAIM_RE = new RegExp(`(^|[^а-я])(${CLAIMS.join("|")})(а|и|о)?(?![а-я])`, "g");
+
+/** Первое «сделал» в ответе, кроме «не сделал»; null — утверждений нет. */
+function claimedAction(reply) {
+  const text = String(reply ?? "").toLowerCase().replace(/ё/g, "е");
+  for (const m of text.matchAll(CLAIM_RE)) {
+    const before = text.slice(Math.max(0, m.index - 4), m.index + m[1].length);
+    if (!/не\s*$/.test(before)) return m[2] + (m[3] ?? "");
+  }
+  return null;
+}
+
 /** Базы для инструментов: источники и библиотека графов в PostgreSQL. */
 async function knowledgeBases() {
   if (sourcesStoreKind() !== "pg") return {};
@@ -63,18 +88,33 @@ async function knowledgeBases() {
  * Разговор на одно сообщение. emit(event) — события потока.
  * Возвращает итог (то же, что событие done).
  */
-async function runChat({ message, history, slice, provider, model, signal, kinds = DEFAULT_KINDS }, emit = () => {}, bases = {}) {
-  const messages = [
-    { role: "system", content: chatSystemPrompt(slice, kinds) },
-    ...history,
-    { role: "user", content: message },
-  ];
+async function runChat(
+  { message, history, slice, provider, model, signal, kinds = DEFAULT_KINDS, mode = "confirm", continuation = false },
+  emit = () => {},
+  bases = {},
+) {
   const proposals = [];
   const tools = [];
   const usage = { requests: 0, tokens: 0 };
   let usedModel = model || null;
   const ctx = { slice, kinds, ...bases };
   const toolDefs = toolsFor(kinds);
+  const t0 = Date.now();
+
+  // Справка — в системный промпт: второе системное сообщение посреди
+  // разговора не все модели шлюза понимают.
+  const pre = await prefetchContext(slice, message, { runTool, ctx });
+  for (const step of pre.steps) {
+    tools.push(step);
+    emit({ type: "tool", ...step });
+  }
+  const system = chatSystemPrompt(slice, kinds, { mode });
+  const messages = [
+    { role: "system", content: pre.text ? `${system}\n\n${pre.text}` : system },
+    ...history,
+    { role: "user", content: message },
+  ];
+  let corrected = null;
 
   for (let round = 0; ; round++) {
     const last = round >= MAX_ROUNDS;
@@ -91,14 +131,34 @@ async function runChat({ message, history, slice, provider, model, signal, kinds
     usedModel = r.model || usedModel;
     const calls = last ? [] : r.message?.tool_calls ?? [];
     if (!calls.length) {
+      let reply = String(r.message?.content ?? "").trim();
+      // «Показал» без действия: на графе ничего не произошло. Один раз
+      // возвращаем ответ — модель вызовет инструмент или ответит честно.
+      // Итог автопилота — не тот случай: «добавил» там правда.
+      const claimed = !continuation && !proposals.length && !corrected && !last ? claimedAction(reply) : null;
+      if (claimed) {
+        corrected = claimed;
+        messages.push({ role: "assistant", content: reply });
+        messages.push({
+          role: "user",
+          content: `Проверка сервера: в ответе «${claimed}», но ты не вызвал ни одного действия — на графе ничего не произошло. Нужно действие — вызови инструмент. Нельзя — ответь заново и не пиши, что сделал.`,
+        });
+        continue;
+      }
+      if (r.finishReason === "length") reply += "\n\n…(ответ оборван: модель упёрлась в предел длины — спросите короче)";
       const done = {
         type: "done",
-        reply: String(r.message?.content ?? "").trim(),
+        reply,
         proposals,
         tools,
         usage,
         model: usedModel,
       };
+      // Строка в лог pm2: по ней видно, смотрела ли модель базу и граф.
+      const called = tools.filter((t) => !t.summary?.startsWith("справка")).map((t) => t.name);
+      console.log(
+        `[chat] ${usedModel} · ${mode}${continuation ? " · итог автопилота" : ""}: запросов ${usage.requests}, справка ${pre.steps.length}, инструменты: ${called.join(", ") || "—"}, действий ${proposals.length}${corrected ? `, поправка «${corrected}» без действия` : ""}${r.finishReason && r.finishReason !== "stop" ? `, конец: ${r.finishReason}` : ""}, ${Date.now() - t0} мс`,
+      );
       emit(done);
       return done;
     }
@@ -135,6 +195,8 @@ router.post("/gpt/chat", async (req, res) => {
   const provider = req.body?.provider ? String(req.body.provider).trim() : undefined;
   const model = req.body?.model ? String(req.body.model).trim() : undefined;
   const kinds = readKinds(req.body?.proposals);
+  const mode = req.body?.mode === "auto" ? "auto" : "confirm";
+  const continuation = req.body?.continuation === true;
 
   res.status(200);
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -153,7 +215,7 @@ router.post("/gpt/chat", async (req, res) => {
       console.warn("[chat] база знаний недоступна:", e.message);
       return {};
     });
-    await runChat({ message, history, slice, provider, model, kinds, signal: controller.signal }, emit, bases);
+    await runChat({ message, history, slice, provider, model, kinds, mode, continuation, signal: controller.signal }, emit, bases);
   } catch (e) {
     if (!controller.signal.aborted) {
       console.error("[chat] ошибка:", e.message);
@@ -167,3 +229,4 @@ router.post("/gpt/chat", async (req, res) => {
 module.exports = router;
 module.exports.runChat = runChat;
 module.exports.MAX_ROUNDS = MAX_ROUNDS;
+module.exports.claimedAction = claimedAction;

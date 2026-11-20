@@ -8,10 +8,15 @@
 //
 // Предложения — ничего не делают на сервере: возвращаются клиенту карточками,
 // а меняет граф человек своей кнопкой. Каждое ведёт в то, что на сайте уже
-// есть: шаг — мастер шага у узла, коды — окно «Определить коды», баланс и
-// техописание — вкладки карточки узла, переименование и объединение — те же
-// действия, что у человека (с окном «Такой продукт уже есть»). Поэтому всё
-// предлагается только для узлов, которые ЕСТЬ на открытом графе.
+// есть: шаг — мастер шага у узла, коды — окно «Определить коды», баланс —
+// расчёт во вкладке карточки преобразования, техописание — вкладка карточки,
+// переименование и объединение — те же действия, что у человека (с окном
+// «Такой продукт уже есть»), новый продукт — узел на полотне. Поэтому всё,
+// кроме нового продукта, — только для узлов, которые ЕСТЬ на открытом графе.
+//
+// Режим чата (4.4): «с подтверждением» — карточки с кнопкой; «автопилот» —
+// сайт выполняет вызванное сам и присылает итог следующим сообщением.
+// Инструменты те же: режим знает промпт и клиент.
 //
 // Клиент присылает, какие карточки умеет показывать (proposals в запросе);
 // модель видит только эти инструменты. Клиент первой версии чата знает шаг
@@ -21,7 +26,7 @@
 // выгрузка базы, и каждый лишний знак — токены тарифа.
 
 const { sourcesStoreKind } = require("../../db/sourcesDb");
-const { findProducts, findTransformations, findNode, graphNode } = require("./graphSlice");
+const { findProducts, findTransformations, findAlternatives, findNode, graphNode } = require("./graphSlice");
 
 const DIRECTION = { up: "вверх — из чего его делают", down: "вниз — что из него делают" };
 
@@ -34,6 +39,7 @@ const PROPOSAL_TOOLS = {
   propose_description: "tech",
   propose_rename: "rename",
   propose_merge: "merge",
+  add_product: "add",
 };
 const PROPOSAL_KINDS = Object.values(PROPOSAL_TOOLS);
 /** Что умеет клиент, не приславший proposals (первая версия чата). */
@@ -86,8 +92,11 @@ const TOOLS = [
   ),
   fn(
     "show_nodes",
-    "Показать человеку узлы на открытом графе (выделить и подвести камеру).",
-    { names: { type: "array", items: { type: "string" }, description: "Названия продуктов на графе" } },
+    "Показать человеку узлы на открытом графе (выделить и подвести камеру): продукты, преобразования, альтернативы. Название продукта с alternatives: true — показать его альтернативы (фиолетовые варианты шага).",
+    {
+      names: { type: "array", items: { type: "string" }, description: "Названия узлов на графе" },
+      alternatives: { type: "boolean", description: "Показать альтернативы этих продуктов, а не сами продукты" },
+    },
     ["names"],
   ),
   fn(
@@ -107,7 +116,7 @@ const TOOLS = [
   ),
   fn(
     "propose_balance",
-    "Предложить человеку открыть материальный баланс преобразования открытого графа (вкладка карточки преобразования: расчёт по ИТС, массы сырья и продуктов). Преобразования узла покажет graph_node.",
+    "Рассчитать материальный баланс преобразования открытого графа: сайт откроет вкладку баланса и запустит расчёт по ИТС (готовый из базы придёт сразу, новый — минуты, это запросы к модели). Преобразования узла покажет graph_node.",
     {
       transformation: { type: "string", description: "Преобразование на графе" },
       product: { type: "string", description: "Необязательно: продукт этого преобразования — если одноимённых преобразований несколько" },
@@ -133,6 +142,16 @@ const TOOLS = [
       why: { type: "string", description: "Коротко — почему" },
     },
     ["node", "new_name"],
+  ),
+  fn(
+    "add_product",
+    "Добавить на граф новый продукт-узел (без связей). near — продукт графа, рядом с которым поставить. Связать его с цепочкой можно потом шагом от него или от соседа.",
+    {
+      name: { type: "string", description: "Название продукта" },
+      near: { type: "string", description: "Необязательно: продукт на графе, рядом с которым поставить" },
+      why: { type: "string", description: "Коротко — зачем" },
+    },
+    ["name"],
   ),
   fn(
     "propose_merge",
@@ -248,7 +267,18 @@ async function runTool(name, args, ctx) {
   if (name === "show_nodes") {
     const names = (Array.isArray(a.names) ? a.names : []).map((n) => str(n)).filter(Boolean).slice(0, 20);
     const nodes = [];
-    for (const n of names) for (const p of findProducts(ctx.slice, n)) if (!nodes.some((x) => x.id === p.id)) nodes.push(p);
+    const add = (n) => {
+      if (n && !nodes.some((x) => x.id === n.id)) nodes.push({ id: n.id, label: n.label });
+    };
+    for (const n of names) {
+      if (a.alternatives) {
+        findAlternatives(ctx.slice, n).forEach(add);
+        continue;
+      }
+      const products = findProducts(ctx.slice, n);
+      if (products.length) products.forEach(add);
+      else add(findNode(ctx.slice, n) ?? findAlternatives(ctx.slice, n)[0]);
+    }
     if (!nodes.length) {
       return { result: { ok: false, error: "Таких узлов на открытом графе нет." }, summary: "показать на графе — узлов нет" };
     }
@@ -303,6 +333,22 @@ async function runTool(name, args, ctx) {
       label: node.label,
       newLabel,
       nodeKind: node.kind,
+      why,
+    });
+  }
+
+  if (name === "add_product") {
+    const label = str(a.name, 200).replace(/\s+/g, " ");
+    if (!label) return refuse("Нужно название продукта.", "добавить продукт — без названия");
+    const [same] = findProducts(ctx.slice, label);
+    if (same && same.label.toLowerCase() === label.toLowerCase()) {
+      return refuse(`«${same.label}» уже есть на графе — покажи его (show_nodes).`, `добавить «${label}» — уже на графе`);
+    }
+    const [near] = a.near ? findProducts(ctx.slice, str(a.near)) : [];
+    return shown(`предложено добавить продукт «${label}»`, {
+      kind: "add",
+      label,
+      ...(near ? { nearId: near.id, nearLabel: near.label } : {}),
       why,
     });
   }
