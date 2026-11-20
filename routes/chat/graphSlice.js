@@ -17,6 +17,8 @@
 // спрашивают («что за источники нашлись у автомобиля»), а product_card знает
 // только базу. transformations[].balance?: { status, basis, note } —
 // последний расчёт баланса: «частично» и почему, чтобы досчитать (20.11).
+// selection?: [{ id, label, kind }] — узлы, выделенные на полотне рамкой или
+// с Shift: «заполни карточки для всех выделенных» (20.11).
 // Здесь — проверка и обрезка (граф на сотни узлов не должен раздувать
 // запрос к модели) и поиск узла по названию — с теми же ключами, что у
 // источников продукта: «Кумол» найдёт узел «Изопропилбензол (кумол)».
@@ -25,7 +27,7 @@ const { readProductContext } = require("../shared/productContext");
 const { mentions } = require("./mentions");
 const { productKeys } = require("../local-sources/utils/store");
 
-const LIMITS = { products: 600, transformations: 400, alternatives: 200, recent: 10, label: 200, ends: 20, name: 200, titles: 5, note: 600, withSources: 80 };
+const LIMITS = { products: 600, transformations: 400, alternatives: 200, recent: 10, label: 200, ends: 20, name: 200, titles: 5, note: 600, withSources: 80, selection: 60 };
 
 const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -93,8 +95,17 @@ function readGraphSlice(raw) {
     .map((r) => ({ title: clean(r?.title, 120), details: clean(r?.details, 400) }))
     .filter((r) => r.title)
     .slice(0, LIMITS.recent);
+  const selection = (Array.isArray(g.selection) ? g.selection : [])
+    .map((x) => ({
+      id: clean(x?.id, 300),
+      label: clean(x?.label, LIMITS.label),
+      kind: x?.kind === "transformation" ? "transformation" : "product",
+    }))
+    .filter((x) => x.id && x.label)
+    .slice(0, LIMITS.selection);
   return {
     name: clean(g.name, LIMITS.name),
+    selection,
     selectedLabel: clean(g.selectedLabel, LIMITS.label) || null,
     selected: readProductContext(g.selected),
     products,
