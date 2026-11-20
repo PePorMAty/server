@@ -49,6 +49,10 @@ const PROPOSAL_TOOLS = {
   fill_card: "fillcard",
   bookmark_nodes: "bookmark",
   undo_layout: "unlayout",
+  undo_actions: "undo",
+  propose_plan: "plan",
+  import_chain: "import",
+  make_report: "report",
 };
 
 /** Узлов в одном действии над многими (выделенными) узлами. */
@@ -73,6 +77,46 @@ const fn = (name, description, properties, required) => ({
 });
 
 const TOOLS = [
+  fn(
+    "audit_graph",
+    "Проверить открытый граф целиком (без модели, бесплатно): продукты без описания и без кодов, преобразования без баланса или с «частичным», шаги без сырья или продуктов, дубли продуктов под разными названиями, концы цепочек, непринятые альтернативы.",
+    {},
+    [],
+  ),
+  fn(
+    "chain_balance",
+    "Сквозной материальный баланс по цепочке открытого графа (без модели): сколько сырья нужно на 1 т продукта — по последним расчётам баланса шагов цепочки. Где расчёта нет — скажет, какой баланс посчитать.",
+    {
+      product: { type: "string", description: "Продукт на графе — на 1 т его" },
+      raw: { type: "string", description: "Необязательно: сырьё, о котором спросили" },
+    },
+    ["product"],
+  ),
+  fn(
+    "compare_routes",
+    "Способы получения (up) или переработки (down) продукта для сравнения: преобразования графа с балансом, альтернативы (фиолетовые) с описанием, разделы ИТС и графы библиотеки.",
+    {
+      product: { type: "string", description: "Продукт" },
+      direction: { type: "string", enum: ["up", "down"] },
+    },
+    ["product", "direction"],
+  ),
+  fn(
+    "gisp_check",
+    "Проверить продукты по реестру российской промышленной продукции (ГИСП, без модели): что производится в России, сколько производителей и регионов, чего в реестре нет. Без списка — выделенные на графе, а нет их — все продукты графа.",
+    { products: { type: "array", items: { type: "string" }, description: "Необязательно: названия продуктов" } },
+    [],
+  ),
+  fn(
+    "find_route",
+    "Как получить продукт to (из сырья from): поиск вверх по шагам — открытый граф, графы библиотеки, разделы ИТС. Возвращает найденные пути и уровни. Для «построй цепочку от X до Y».",
+    {
+      to: { type: "string", description: "Что получить" },
+      from: { type: "string", description: "Необязательно: из какого сырья" },
+      depth: { type: "integer", description: "Необязательно: сколько шагов вверх искать (1–6, обычно 4)" },
+    },
+    ["to"],
+  ),
   fn(
     "product_card",
     "Что база сервера знает о продукте: названия и синонимы, CAS, коды ОКПД2/ТН ВЭД, разделы ИТС (где получают и где он сырьё) со стадиями процессов, преобразования из разделов и графов библиотеки, готовые расчёты материального баланса, графы, где он есть.",
@@ -196,6 +240,39 @@ const TOOLS = [
     "Разложить граф заново — как кнопка «Разложить»: узлы встают по уровням цепочек, одинаковые преобразования сливаются в один узел.",
     { why: { type: "string", description: "Коротко — зачем" } },
     [],
+  ),
+  fn(
+    "undo_actions",
+    "Отменить действия своих прошлых ответов: граф вернётся, каким был до них («отмени», «верни как было», «отмени, что ты сделал»). Раскладку возвращает undo_layout.",
+    { why: { type: "string", description: "Коротко — что отменяем" } },
+    [],
+  ),
+  fn(
+    "propose_plan",
+    "План большой задачи — до её выполнения: цепочка на несколько шагов, «от X до Y», массовые действия дороже ~20 запросов. Человек увидит пункты и цену и нажмёт «Выполнить план»; тогда придёт сообщение «Выполняй план…». В ответе с планом других действий не вызывай.",
+    {
+      title: { type: "string", description: "Название задачи" },
+      steps: { type: "array", items: { type: "string" }, description: "Пункты плана по порядку — каждый одно действие" },
+      requests: { type: "integer", description: "Примерно запросов к модели на весь план" },
+    },
+    ["title", "steps"],
+  ),
+  fn(
+    "import_chain",
+    "Взять готовый кусок цепочки из графа библиотеки и вставить на открытый граф у продукта: шаги вверх (up — как его получают) или вниз (down), на depth уровней. Без запросов к модели. Граф — по названию или лучший, где у продукта больше шагов в эту сторону.",
+    {
+      product: { type: "string", description: "Продукт на открытом графе" },
+      direction: { type: "string", enum: ["up", "down"] },
+      graph: { type: "string", description: "Необязательно: граф библиотеки (название)" },
+      depth: { type: "integer", description: "Уровней шагов (1–4, обычно 1–2)" },
+    },
+    ["product", "direction"],
+  ),
+  fn(
+    "make_report",
+    "Отчёт: твой ответ — отчёт в markdown (цепочка, балансы, источники, коды, ГИСП), человек скачает его файлом. Сначала собери данные инструментами, напиши отчёт в этом ответе и вызови make_report с названием.",
+    { title: { type: "string", description: "Название отчёта" } },
+    ["title"],
   ),
   fn(
     "undo_layout",
@@ -325,6 +402,21 @@ function knownText(v, depth = 0) {
   return lines.join("\n").slice(0, 3000);
 }
 
+/**
+ * Есть ли у продукта коды: сохранённые моделью или ОКПД2 из ГИСП. null —
+ * не проверить (нет ни того, ни другого источника).
+ */
+function codesOf() {
+  try {
+    const { savedCodes } = require("../industry/utils/modelCodes");
+    const { lookupProduct, status } = require("../industry/utils/store");
+    const gisp = status().ready;
+    return (name) => !!savedCodes(name) || (gisp && !!lookupProduct(name).okpd2);
+  } catch {
+    return null;
+  }
+}
+
 /** Отказ предложения: модель узнаёт почему и может поправиться. */
 const refuse = (error, summary) => ({ result: { ok: false, error }, summary });
 
@@ -341,6 +433,10 @@ const NOTE = {
   auto: "Принято: после твоего ответа это выполнится само, без человека и без окон, а итог ты получишь следующим сообщением. Человеку напиши коротко, что делаешь («Ищу альтернативы тримеров пропилена»), — без слов о сайте, итоге и сообщениях. Не пиши, что человек сделает сам или что ты не можешь.",
 };
 const noteFor = (ctx) => NOTE[ctx.mode === "auto" ? "auto" : "confirm"];
+// План и отчёт сами не выполняются ни в каком режиме: план ждёт кнопки
+// человека, отчёт — это сам ответ.
+const PLAN_NOTE = "Показано человеку: он посмотрит план и нажмёт «Выполнить план» — тогда придёт сообщение «Выполняй план…». Сейчас ничего больше не вызывай; коротко скажи, что предлагаешь.";
+const REPORT_NOTE = "Человек сможет скачать этот ответ отчётом. Напиши сам отчёт в этом ответе: заголовки, списки, таблицы markdown, источники.";
 const shown = (summary, proposal, ctx) => ({ result: { ok: true, note: noteFor(ctx) }, summary, proposal });
 
 /**
@@ -570,6 +666,124 @@ async function runTool(name, args, ctx) {
     }
     if (!nodes.length) return refuse("Таких узлов на открытом графе нет.", "удалить — узлов нет");
     return shown(`предложено удалить: ${nodes.map((x) => `«${x.label}»`).join(", ")}`, { kind: "delete", nodes, why }, ctx);
+  }
+
+  if (name === "audit_graph") {
+    const { auditGraph } = require("./analysis");
+    const r = auditGraph(ctx.slice, { codesOf: codesOf() });
+    const c = r.counts;
+    return {
+      result: r,
+      summary: `проверка графа: без описания ${c.withoutDescription}, без баланса ${c.withoutBalance}, дублей ${c.duplicateGroups}`,
+    };
+  }
+
+  if (name === "chain_balance") {
+    const { chainBalance } = require("./analysis");
+    const r = chainBalance(ctx.slice, str(a.product), str(a.raw));
+    return {
+      result: r,
+      summary: r.error ? `сквозной баланс — ${r.error}` : `сквозной баланс «${r.product}»: сырья ${r.rawMaterials.length}, не разложено ${r.unresolved.length}`,
+    };
+  }
+
+  if (name === "compare_routes") {
+    const { compareRoutes } = require("./analysis");
+    const product = str(a.product);
+    const direction = a.direction === "down" ? "down" : "up";
+    let card = null;
+    if (sourcesStoreKind() === "pg" && ctx.conn) {
+      card = await require("../knowledge/product").productCard(ctx.conn, product, { pool: ctx.pool }).catch(() => null);
+    }
+    const r = compareRoutes(ctx.slice, product, direction, card);
+    return { result: r, summary: `сравнение способов «${r.product}»: ${r.total}` };
+  }
+
+  if (name === "gisp_check") {
+    const { gispCheck } = require("./analysis");
+    let names = (Array.isArray(a.products) ? a.products : []).map((x) => str(x)).filter(Boolean);
+    if (!names.length) names = (ctx.slice.selection?.length > 1 ? ctx.slice.selection.filter((x) => x.kind === "product") : ctx.slice.products).map((p) => p.label);
+    names = [...new Set(names)].slice(0, 200);
+    const r = gispCheck(names);
+    return {
+      result: r,
+      summary: r.ready ? `ГИСП: в реестре ${r.found.length} из ${r.checked}` : "ГИСП — база не подключена",
+    };
+  }
+
+  if (name === "find_route") {
+    const { findRoute } = require("./analysis");
+    const to = str(a.to);
+    const from = str(a.from);
+    const depth = Math.min(6, Math.max(1, Number(a.depth) || 4));
+    const cardOf =
+      sourcesStoreKind() === "pg" && ctx.conn
+        ? (n) => require("../knowledge/product").productCard(ctx.conn, n, { pool: ctx.pool }).catch(() => null)
+        : null;
+    const r = await findRoute(ctx.slice, to, from, { cardOf, depth });
+    return {
+      result: cardOf ? r : { ...r, note: "база знаний недоступна — искал только по открытому графу" },
+      summary: `маршрут к «${to}»${from ? ` от «${from}»: ${r.found ? `путей ${r.paths.length}` : "не найден"}` : `: уровней ${r.levels.length}`}`,
+    };
+  }
+
+  if (name === "undo_actions") {
+    return shown("предложено отменить действия прошлого ответа", { kind: "undo", why }, ctx);
+  }
+
+  if (name === "propose_plan") {
+    const title = str(a.title, 200);
+    const steps = (Array.isArray(a.steps) ? a.steps : []).map((x) => str(x, 300)).filter(Boolean).slice(0, 20);
+    if (!title || !steps.length) return refuse("Нужны название и пункты плана.", "план — пусто");
+    const requests = Number.isFinite(Number(a.requests)) && Number(a.requests) > 0 ? Math.round(Number(a.requests)) : undefined;
+    return {
+      result: { ok: true, note: PLAN_NOTE },
+      summary: `предложен план «${title}»: ${steps.length} пунктов`,
+      proposal: { kind: "plan", title, steps, ...(requests ? { requests } : {}) },
+    };
+  }
+
+  if (name === "make_report") {
+    const title = str(a.title, 200) || "Отчёт";
+    return { result: { ok: true, note: REPORT_NOTE }, summary: `отчёт «${title}»`, proposal: { kind: "report", title } };
+  }
+
+  if (name === "import_chain") {
+    const label = str(a.product);
+    const direction = a.direction === "up" ? "up" : "down";
+    const depth = Math.min(4, Math.max(1, Number(a.depth) || 1));
+    const [node] = findProducts(ctx.slice, label);
+    if (!node) return refuse(`«${label}» нет на открытом графе — кусок цепочки вставляется у продукта графа.`, `из библиотеки — «${label}» на графе нет`);
+    if (!ctx.pool) return refuse("Библиотека графов недоступна (нужна в PostgreSQL).", "из библиотеки — недоступна");
+    const { libraryChains } = require("./analysis");
+    const found = await libraryChains(ctx.pool, node.label, direction);
+    const want = str(a.graph).toLowerCase();
+    const g = (want && found.find((x) => x.name.toLowerCase().includes(want))) || (!want && found[0]);
+    if (!g) {
+      return refuse(
+        found.length
+          ? `Графа «${str(a.graph)}» с шагами «${node.label}» ${direction === "up" ? "вверх" : "вниз"} нет; есть: ${found.map((x) => `«${x.name}» (${x.steps})`).join(", ")}.`
+          : `В библиотеке нет графов, где у «${node.label}» есть шаги ${direction === "up" ? "вверх" : "вниз"}.`,
+        `из библиотеки — «${node.label}» не нашлось`,
+      );
+    }
+    const out = shown(
+      `предложено взять из «${g.name}» шаги ${direction === "up" ? "вверх" : "вниз"} от «${node.label}» (${depth})`,
+      {
+        kind: "import",
+        nodeId: node.id,
+        label: node.label,
+        direction,
+        depth,
+        graphId: g.graphId,
+        graphName: g.name,
+        libraryNodeId: g.nodeId,
+        why,
+      },
+      ctx,
+    );
+    out.result.otherGraphs = found.filter((x) => x !== g).map((x) => `«${x.name}» (${x.steps})`).slice(0, 5);
+    return out;
   }
 
   if (name === "undo_layout") {

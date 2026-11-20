@@ -17,6 +17,10 @@
 // спрашивают («что за источники нашлись у автомобиля»), а product_card знает
 // только базу. transformations[].balance?: { status, basis, note } —
 // последний расчёт баланса: «частично» и почему, чтобы досчитать (20.11).
+// products[].empty?: true — у продукта нет описания (проверка графа).
+// transformations[].balance.inputs/outputs?: { название: доля } — массы
+// последнего расчёта в долях массы сырья: по ним сквозной баланс цепочки.
+// alternatives[].description? — описание варианта (сравнение способов).
 // selection?: [{ id, label, kind }] — узлы, выделенные на полотне рамкой или
 // с Shift: «заполни карточки для всех выделенных» (20.11).
 // Здесь — проверка и обрезка (граф на сотни узлов не должен раздувать
@@ -46,13 +50,32 @@ function readSources(v) {
   return up || down ? { ...(up ? { up } : {}), ...(down ? { down } : {}) } : null;
 }
 
+/** { название: доля } — только конечные положительные числа. */
+function readShares(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const out = {};
+  for (const [k, x] of Object.entries(v).slice(0, LIMITS.ends)) {
+    const name = clean(k, LIMITS.label);
+    const n = Number(x);
+    if (name && Number.isFinite(n) && n > 0) out[name] = n;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function readBalance(v) {
   if (!v || typeof v !== "object") return null;
   const status = clean(v.status, 40);
   if (!status) return null;
   const basis = clean(v.basis, LIMITS.label);
   const note = clean(v.note, LIMITS.note);
-  return { status, ...(basis ? { basis } : {}), ...(note ? { note } : {}) };
+  const inputs = readShares(v.inputs);
+  const outputs = readShares(v.outputs);
+  return {
+    status,
+    ...(basis ? { basis } : {}),
+    ...(note ? { note } : {}),
+    ...(inputs && outputs ? { inputs, outputs } : {}),
+  };
 }
 
 function readGraphSlice(raw) {
@@ -60,7 +83,12 @@ function readGraphSlice(raw) {
   const products = (Array.isArray(g.products) ? g.products : [])
     .map((p) => {
       const sources = readSources(p?.sources);
-      return { id: clean(p?.id, 300), label: clean(p?.label, LIMITS.label), ...(sources ? { sources } : {}) };
+      return {
+        id: clean(p?.id, 300),
+        label: clean(p?.label, LIMITS.label),
+        ...(sources ? { sources } : {}),
+        ...(p?.empty === true ? { empty: true } : {}),
+      };
     })
     .filter((p) => p.id && p.label)
     .slice(0, LIMITS.products);
@@ -88,6 +116,7 @@ function readGraphSlice(raw) {
       label: clean(a?.label, LIMITS.label),
       of: list(a?.of),
       direction: a?.direction === "up" ? "up" : "down",
+      ...(clean(a?.description, LIMITS.note) ? { description: clean(a?.description, LIMITS.note) } : {}),
     }))
     .filter((a) => a.id && a.label)
     .slice(0, LIMITS.alternatives);

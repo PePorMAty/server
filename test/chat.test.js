@@ -667,3 +667,153 @@ for (const backend of backends().filter((b) => b.name === "PostgreSQL")) {
     });
   });
 }
+
+// ---------- работа с графом целиком (4.9, предложения владельца 20.11) ----------
+const chain = readGraphSlice({
+  products: [
+    { id: "p1", label: "Бензол" },
+    { id: "p2", label: "Пропилен" },
+    { id: "p3", label: "Изопропилбензол (кумол)" },
+    { id: "p4", label: "Кумол", empty: true },
+    { id: "p5", label: "Фенол" },
+    { id: "p6", label: "Ацетон" },
+    { id: "p7", label: "Кислород" },
+    { id: "p8", label: "Бисфенол А", empty: true },
+  ],
+  transformations: [
+    {
+      id: "t1",
+      label: "Алкилирование бензола пропиленом",
+      inputs: ["Бензол", "Пропилен"],
+      outputs: ["Изопропилбензол (кумол)"],
+      balance: { status: "Рассчитан", inputs: { Бензол: 0.65, Пропилен: 0.35 }, outputs: { "Изопропилбензол (кумол)": 0.95 } },
+    },
+    {
+      id: "t2",
+      label: "Кумольный способ",
+      inputs: ["Изопропилбензол (кумол)", "Кислород"],
+      outputs: ["Фенол", "Ацетон"],
+      balance: { status: "Частично рассчитан", note: "нет данных о смолах", inputs: { "Изопропилбензол (кумол)": 0.9, Кислород: 0.1 }, outputs: { Фенол: 0.55, Ацетон: 0.33 } },
+    },
+    { id: "t3", label: "Конденсация фенола с ацетоном", inputs: ["Фенол", "Ацетон"], outputs: ["Бисфенол А"] },
+    { id: "t4", label: "Пустой шаг", inputs: ["Фенол"], outputs: [] },
+  ],
+  alternatives: [{ id: "a1", label: "Окисление толуола", of: ["Фенол"], direction: "up", description: "Через бензойную кислоту; сырьё — толуол." }],
+});
+const chainTool = (name, args, extra = {}) => runTool(name, args, { slice: chain, kinds: PROPOSAL_KINDS, ...extra });
+
+test("проверка графа: без описания, без баланса, «частично», пустые шаги, дубли", async () => {
+  const r = await chainTool("audit_graph", {});
+  assert.deepEqual(r.result.withoutDescription, ["Кумол", "Бисфенол А"]);
+  assert.deepEqual(r.result.withoutBalance, ["Конденсация фенола с ацетоном"]);
+  assert.deepEqual(r.result.balancePartial, [{ transformation: "Кумольный способ", status: "Частично рассчитан", why: "нет данных о смолах" }]);
+  assert.deepEqual(r.result.brokenSteps, ["Пустой шаг"]);
+  assert.deepEqual(r.result.duplicates, [["Изопропилбензол (кумол)", "Кумол"]]);
+  assert.equal(r.result.counts.unacceptedAlternatives, 1);
+  assert.match(r.summary, /без описания 2, без баланса 1, дублей 1/);
+});
+
+test("сквозной баланс: сырьё на 1 т продукта по цепочке расчётов; без расчёта — не разложено", async () => {
+  const r = (await chainTool("chain_balance", { product: "фенол", raw: "бензол" })).result;
+  const t = Object.fromEntries(r.rawMaterials.map((x) => [x.name, x.tons]));
+  // Кумол: 0,9 / 0,55 = 1,636 т; бензол: 1,636 · 0,65 / 0,95 = 1,120 т.
+  assert.equal(t["Бензол"], 1.12);
+  assert.equal(t["Пропилен"], 0.603);
+  assert.equal(t["Кислород"], 0.182);
+  assert.deepEqual(r.asked, { name: "Бензол", tons: 1.12 });
+  assert.deepEqual(r.steps.map((s) => s.transformation), ["Кумольный способ", "Алкилирование бензола пропиленом"]);
+  assert.deepEqual(r.unresolved, []);
+  // Бисфенол: шаг без баланса — не разложен, модель знает, что считать.
+  const b = (await chainTool("chain_balance", { product: "Бисфенол А" })).result;
+  assert.deepEqual(b.unresolved, [{ product: "Бисфенол А", tons: 1, transformation: "Конденсация фенола с ацетоном", why: "баланса нет" }]);
+  assert.match((await chainTool("chain_balance", { product: "Уран" })).result.error, /нет на открытом графе/);
+});
+
+test("сравнение способов: шаги графа с балансом и альтернативы с описанием", async () => {
+  const r = (await chainTool("compare_routes", { product: "Фенол", direction: "up" })).result;
+  assert.deepEqual(
+    r.routes.map((x) => [x.route, x.where]),
+    [
+      ["Кумольный способ", "на графе"],
+      ["Окисление толуола", "альтернатива на графе (не принята)"],
+    ],
+  );
+  assert.equal(r.routes[0].balance, "Частично рассчитан");
+  assert.match(r.routes[1].description, /бензойную/);
+});
+
+test("ГИСП: без базы — честно «не подключена»", async () => {
+  const r = await chainTool("gisp_check", {});
+  if (r.result.ready) assert.equal(r.result.checked, chain.products.length);
+  else assert.equal(r.summary, "ГИСП — база не подключена");
+});
+
+test("маршрут от X до Y: вверх по графу, графам библиотеки и разделам ИТС", async () => {
+  const { findRoute } = require("../routes/chat/analysis");
+  const cards = {
+    Толуол: null,
+    Метанол: {
+      transformations: {
+        fromGraphs: [{ direction: "up", label: "Синтез метанола", inputs: ["Синтез-газ"], outputs: ["Метанол"], graphs: [{ graphId: "g1", name: "Газохимия" }] }],
+        fromSections: [],
+      },
+    },
+    Формальдегид: {
+      transformations: {
+        fromGraphs: [],
+        fromSections: [{ direction: "up", inputs: ["Метанол", "Воздух"], outputs: ["Формальдегид"], source: "ИТС 32 · Формалин", stages: ["Окисление метанола: метанол + воздух → формальдегид"], multi: false }],
+      },
+    },
+  };
+  const g = readGraphSlice({ products: [{ id: "f", label: "Формальдегид" }] });
+  const r = await findRoute(g, "Формальдегид", "синтез-газ", { cardOf: async (n) => cards[n] ?? null });
+  assert.equal(r.found, true);
+  assert.deepEqual(
+    r.paths[0].map((s) => [s.transformation, s.source]),
+    [
+      ["Синтез метанола", "граф «Газохимия»"],
+      ["Окисление метанола", "ИТС 32 · Формалин"],
+    ],
+  );
+});
+
+test("из библиотеки: граф, где у продукта больше шагов в эту сторону; нет базы — отказ", async () => {
+  const queries = [];
+  const pool = {
+    query: async (sql, params) => {
+      queries.push(sql);
+      if (/GROUP BY/.test(sql)) return { rows: [{ graph_id: "g7", name: "Нефтехимия", steps: 3 }, { graph_id: "g8", name: "Фенол старый", steps: 1 }] };
+      return { rows: [{ node_id: params[0] === "g7" ? "lib-p5" : "x", label: "Фенол" }] };
+    },
+  };
+  const r = await chainTool("import_chain", { product: "фенол", direction: "up", depth: 2 }, { pool });
+  assert.deepEqual(r.proposal, {
+    kind: "import",
+    nodeId: "p5",
+    label: "Фенол",
+    direction: "up",
+    depth: 2,
+    graphId: "g7",
+    graphName: "Нефтехимия",
+    libraryNodeId: "lib-p5",
+    why: "",
+  });
+  assert.match(queries[0], /out_keys/);
+  assert.deepEqual(r.result.otherGraphs, ["«Фенол старый» (1)"]);
+  assert.equal((await chainTool("import_chain", { product: "фенол", direction: "up", graph: "старый" }, { pool })).proposal.graphId, "g8");
+  assert.match((await chainTool("import_chain", { product: "фенол", direction: "up" })).result.error, /Библиотека графов недоступна/);
+});
+
+test("отмена, план и отчёт — карточки; план без пунктов — отказ; старый клиент их не видит", async () => {
+  assert.deepEqual((await chainTool("undo_actions", { why: "не тот шаг" })).proposal, { kind: "undo", why: "не тот шаг" });
+  const plan = await chainTool("propose_plan", { title: "Цепочка до фенола", steps: ["шаг вверх от бензола", " ", "баланс"], requests: 25 });
+  assert.deepEqual(plan.proposal, { kind: "plan", title: "Цепочка до фенола", steps: ["шаг вверх от бензола", "баланс"], requests: 25 });
+  assert.match(plan.result.note, /Выполнить план/);
+  assert.equal((await chainTool("propose_plan", { title: "Пусто", steps: [] })).proposal, undefined);
+  assert.deepEqual((await chainTool("make_report", { title: "Фенол" })).proposal, { kind: "report", title: "Фенол" });
+  assert.match((await chainTool("propose_plan", { title: "x", steps: ["y"] }, { kinds: ["step", "show"] })).result.error, /Нет инструмента/);
+  // Инструменты чтения — у любого клиента, действия — только объявленные.
+  const old = chatSystemPrompt(chain, ["step", "show"]);
+  assert.match(old, /audit_graph/);
+  assert.doesNotMatch(old, /import_chain|propose_plan|undo_actions/);
+});
