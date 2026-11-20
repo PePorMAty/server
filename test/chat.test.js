@@ -329,6 +329,86 @@ test("источники, удаление, раскладка — действ�
   assert.match((await tool("delete_nodes", { names: ["Фенол"] }, ["step", "show"])).result.error, /Нет инструмента/);
 });
 
+test("итог действия для модели — по режиму: в автопилоте сайт делает сам, а не человек (20.11)", async () => {
+  const confirm = await runTool("propose_step", { product: "Фенол", direction: "up" }, { slice: graph2, kinds: PROPOSAL_KINDS });
+  assert.match(confirm.result.note, /карточкой с кнопкой — он сделает это сам/);
+  const auto = await runTool("propose_step", { product: "Фенол", direction: "up" }, { slice: graph2, kinds: PROPOSAL_KINDS, mode: "auto" });
+  assert.match(auto.result.note, /Сайт выполнит это сам/);
+  assert.doesNotMatch(auto.result.note, /человек[^.]*сам\b(?! или)/);
+  const bm = await runTool("bookmark_nodes", { names: ["Фенол"] }, { slice: graph2, kinds: PROPOSAL_KINDS, mode: "auto" });
+  assert.match(bm.result.note, /Сайт выполнит/);
+  // Промпт автопилота прямо запрещает «ты построишь сам».
+  assert.match(chatSystemPrompt(graph2, PROPOSAL_KINDS, { mode: "auto" }), /никогда не пиши «ты построишь сам»/);
+  // Вопрос «из чего делают» — ответ словами, а не шаг.
+  assert.match(chatSystemPrompt(graph2, PROPOSAL_KINDS), /ВОПРОС «из чего делают X\?»[^\n]*не просьба строить/);
+});
+
+test("graph_node: преобразование с последним расчётом баланса, у продукта — найденные мастером источники", async () => {
+  const g = readGraphSlice({
+    products: [
+      { id: "p1", label: "Циклогексанон" },
+      { id: "p2", label: "Гидроксиламинсульфат" },
+      { id: "p3", label: "Циклогексаноноксим" },
+      { id: "p4", label: "Автомобиль", sources: { up: { count: 7, titles: ["Автомобильная промышленность — обзор", "", "Сталь кузова"] } } },
+    ],
+    transformations: [
+      {
+        id: "t9",
+        label: "Оксимирование циклогексанона",
+        inputs: ["Циклогексанон", "Гидроксиламинсульфат"],
+        outputs: ["Циклогексаноноксим"],
+        balance: { status: "частично рассчитан", basis: "Циклогексанон", note: "нет норм расхода на стадию оксимирования" },
+      },
+    ],
+  });
+  const t = await runTool("graph_node", { name: "Оксимирование циклогексанона" }, { slice: g, kinds: PROPOSAL_KINDS });
+  assert.equal(t.summary, "«Оксимирование циклогексанона» на графе");
+  assert.equal(t.result.kind, "transformation");
+  assert.deepEqual(t.result.transformations[0].balance, { status: "частично рассчитан", basis: "Циклогексанон", note: "нет норм расхода на стадию оксимирования" });
+  const car = await runTool("graph_node", { name: "автомобиль" }, { slice: g, kinds: PROPOSAL_KINDS });
+  assert.deepEqual(car.result.foundSources, { Автомобиль: { up: { count: 7, titles: ["Автомобильная промышленность — обзор", "Сталь кузова"] } } });
+  assert.deepEqual((await runTool("graph_node", { name: "Уран" }, { slice: g, kinds: PROPOSAL_KINDS })).result, { found: false });
+
+  // Баланс со своими данными, на тонну сырья, заново.
+  const b = await runTool(
+    "propose_balance",
+    { transformation: "оксимирование циклогексанона", basis: "циклогексанон", known_data: "Выход оксима 99,5 % (ИТС 32—2023)", recalc: true },
+    { slice: g, kinds: PROPOSAL_KINDS },
+  );
+  assert.deepEqual(b.proposal, {
+    kind: "balance",
+    nodeId: "t9",
+    label: "Оксимирование циклогексанона",
+    why: "",
+    basisId: "p1",
+    basisLabel: "Циклогексанон",
+    knownData: "Выход оксима 99,5 % (ИТС 32—2023)",
+    force: true,
+  });
+  // Не сырьё этого преобразования — расчёт на сырьё по умолчанию, модель знает почему.
+  const wrong = await runTool("propose_balance", { transformation: "Оксимирование циклогексанона", basis: "Циклогексаноноксим" }, { slice: g, kinds: PROPOSAL_KINDS });
+  assert.equal(wrong.proposal.basisId, undefined);
+  assert.match(wrong.result.basis, /не сырьё/);
+  // Старый клиент без «вернуть раскладку» — инструмента нет.
+  assert.deepEqual((await runTool("undo_layout", {}, { slice: g, kinds: PROPOSAL_KINDS })).proposal, { kind: "unlayout" });
+  assert.match((await runTool("undo_layout", {}, { slice: g, kinds: ["step", "show", "layout"] })).result.error, /Нет инструмента/);
+});
+
+test("источники в срезе — не больше чем у 80 продуктов", () => {
+  const many = readGraphSlice({
+    products: Array.from({ length: 100 }, (_, i) => ({ id: `p${i}`, label: `П${i}`, sources: { down: { count: 1, titles: ["x"] } } })),
+  });
+  assert.equal(many.products.filter((p) => p.sources).length, 80);
+});
+
+test("страховка: «предложение показано в карточке» без карточки — поправка", () => {
+  assert.equal(claimedAction("Предложение показано в карточке — шаг вверх от «фенола» ты построишь сам."), "показано в карточке");
+  assert.equal(claimedAction("На графе уже показаны альтернативы фенола."), null);
+  assert.equal(claimedAction("Предложение не показано: фенола нет."), null);
+  assert.equal(claimedTool("Верну раскладку, как было", new Set(["undo_layout", "relayout"])), "undo_layout");
+  assert.equal(claimedTool("Разложил граф заново", new Set(["undo_layout", "relayout"])), "relayout");
+});
+
 test("альтернативы без шага, описание, карточка, закладки", async () => {
   assert.deepEqual((await tool("find_alternatives", { product: "кумол", direction: "up" })).proposal, {
     kind: "alternatives",

@@ -75,6 +75,10 @@ const CLAIMS = [
   "делаю", "строю", "достраиваю", "раскладываю", "запускаю", "добавляю", "удаляю", "показываю",
   "рассчитываю", "считаю баланс", "переименовываю", "объединяю", "заполняю", "готово",
 ];
+// «Предложение показано в карточке» без карточки (20.11): модель описывала
+// действие, которого не вызывала. Только о карточке и предложении: «на
+// графе показаны альтернативы» — о графе, а не о действии.
+const SHOWN_RE = /(^|[^а-я])(предложени[ея]|предложен[аоы]?)[^.!?\n]{0,60}показан|показан[аоы]?\s+(тебе\s+|вам\s+)?в\s+карточк/;
 const CLAIM_RE = new RegExp(`(^|[^а-я])(${CLAIMS.join("|")})(а|и|о|ы)?(?![а-я])`, "g");
 
 /**
@@ -87,6 +91,10 @@ function claimedAction(reply) {
     const before = text.slice(Math.max(0, m.index - 12), m.index + m[1].length);
     if (/(^|[^а-я])(не|вы(\s+уже)?)\s*$/.test(before)) continue;
     return m[2] + (m[3] ?? "");
+  }
+  const shown = text.match(SHOWN_RE);
+  if (shown && !/(^|[^а-я])не\s*$/.test(text.slice(Math.max(0, shown.index - 6), shown.index + shown[0].indexOf("показан")))) {
+    return "показано в карточке";
   }
   return null;
 }
@@ -104,7 +112,8 @@ const CLAIMED_TOOL = [
   [/описани[ея][^.]*(запис|заполн)|(запис|заполн)[^.]*описани/, "set_description"],
   [/карточк[^.]*заполн|заполн[^.]*карточк/, "fill_card"],
   [/источник/, "find_sources"],
-  [/расклад/, "relayout"],
+  [/верн[^.]*расклад|расклад[^.]*(верн|прежн)/, "undo_layout"],
+  [/расклад|разлож/, "relayout"],
   [/баланс/, "propose_balance"],
   [/переимен/, "propose_rename"],
   [/объедин/, "propose_merge"],
@@ -141,7 +150,7 @@ async function runChat(
   const tools = [];
   const usage = { requests: 0, tokens: 0 };
   let usedModel = model || null;
-  const ctx = { slice, kinds, provider, model, signal, ...bases };
+  const ctx = { slice, kinds, mode, provider, model, signal, ...bases };
   const toolDefs = toolsFor(kinds);
   const t0 = Date.now();
 
